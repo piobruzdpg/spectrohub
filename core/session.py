@@ -6,10 +6,10 @@ Centralny menedżer stanu danych (Single Source of Truth) dla SpectroHub.
 from typing import Dict, List, Optional
 import numpy as np
 from PySide6.QtCore import QObject, Signal
+from PySide6.QtGui import QUndoStack
 import logging
 
 from core.models import SpectrumData
-from core.logger import log_algo_exception
 
 logger = logging.getLogger("SpectroHub")
 
@@ -17,11 +17,11 @@ logger = logging.getLogger("SpectroHub")
 class ProjectSession(QObject):
     """Przechowuje wszystkie załadowane dane i emituje powiadomienia o zmianach."""
 
-    # Sygnały zmian stanu sesji
-    spectrum_added = Signal(SpectrumData)
-    spectrum_removed = Signal(str)  # id / nazwa
-    active_spectrum_changed = Signal(Optional[SpectrumData])
-    visibility_changed = Signal(str, bool)  # name, is_visible
+    # Bezpieczne sygnały w PySide6 - przekazywanie obiektów Pythona przez object
+    spectrum_added = Signal(object)
+    spectrum_removed = Signal(str)
+    active_spectrum_changed = Signal(object)
+    visibility_changed = Signal(str, bool)
     session_cleared = Signal()
 
     def __init__(self):
@@ -29,6 +29,7 @@ class ProjectSession(QObject):
         self._spectra: Dict[str, SpectrumData] = {}
         self._visibility: Dict[str, bool] = {}
         self._active_spectrum_name: Optional[str] = None
+        self.undo_stack = QUndoStack(self)
 
     @property
     def spectra(self) -> Dict[str, SpectrumData]:
@@ -41,7 +42,6 @@ class ProjectSession(QObject):
         return None
 
     def add_spectrum(self, spectrum: SpectrumData, make_active: bool = True):
-        """Dodaje widmo do sesji. Jeśli nazwa istnieje, nadaje unikalny sufiks."""
         base_name = spectrum.name
         unique_name = base_name
         counter = 1
@@ -60,14 +60,12 @@ class ProjectSession(QObject):
             self.set_active_spectrum(unique_name)
 
     def add_spectra_batch(self, spectra_list: List[SpectrumData]):
-        """Hurtowe dodanie wielu widm (np. po wczytaniu grupy OMNIC .spg)."""
         for spec in spectra_list:
             self.add_spectrum(spec, make_active=False)
         if spectra_list and self._active_spectrum_name is None:
             self.set_active_spectrum(spectra_list[-1].name)
 
     def remove_spectrum(self, name: str):
-        """Usuwa wskazane widmo z pamięci."""
         if name in self._spectra:
             del self._spectra[name]
             self._visibility.pop(name, None)
@@ -79,7 +77,6 @@ class ProjectSession(QObject):
                 self.set_active_spectrum(new_active)
 
     def set_active_spectrum(self, name: Optional[str]):
-        """Zmienia aktywne widmo robocze."""
         if name != self._active_spectrum_name:
             if name is not None and name not in self._spectra:
                 return
@@ -88,7 +85,6 @@ class ProjectSession(QObject):
             self.active_spectrum_changed.emit(self.active_spectrum)
 
     def set_visibility(self, name: str, is_visible: bool):
-        """Steruje widocznością widma na wykresie."""
         if name in self._spectra and self._visibility.get(name) != is_visible:
             self._visibility[name] = is_visible
             self.visibility_changed.emit(name, is_visible)
@@ -100,13 +96,12 @@ class ProjectSession(QObject):
         return [s for name, s in self._spectra.items() if self._visibility.get(name, True)]
 
     def clear_all(self):
-        """Czyści całą sesję roboczą."""
         self._spectra.clear()
         self._visibility.clear()
         self._active_spectrum_name = None
+        self.undo_stack.clear()
         logger.info("Wyczyszczono całą sesję projektu.")
         self.session_cleared.emit()
 
 
-# Globalna instancja sesji
 session = ProjectSession()

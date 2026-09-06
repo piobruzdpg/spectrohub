@@ -2,13 +2,29 @@
 
 TRANSLATIONS = {
     "app": {
-        "title": "SpectroHub - Platforma Analizy FTIR & DFT",
+        "title": "SpectroHub - Zintegrowana Platforma FTIR",
         "ready": "Gotowy",
-        "busy": "Przetwarzanie...",
         "cancel": "Anuluj",
-        "error": "Błąd",
         "warning": "Ostrzeżenie",
-        "success": "Sukces",
+        "error": "Błąd",
+        "info": "Informacja",
+        "undo": "↶ Cofnij",
+        "redo": "↷ Ponów",
+    },
+    "deconv": {
+        "solvent": "Rozpuszczalnik:",
+        "model": "Kształt:",
+        "algo": "Algorytm:",
+        "add_peak": "➕ Dodaj pasmo",
+        "clear_peaks": "🗑 Wyczyść",
+        "fit_btn": "⚡ Dopasuj Pasma",
+        "table": {
+            "peak": "Pik",
+            "center": "Pozycja",
+            "fwhm": "FWHM",
+            "area_pct": "Pole %",
+            "structure": "Struktura",
+        }
     },
     "menu": {
         "file": "Plik",

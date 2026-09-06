@@ -1,12 +1,13 @@
 """
 io_hub/readers/spc_reader.py
-Hybrydowy czytnik i pisarz binarnego formatu Thermo Grams SPC.
+Natywny dekoder binarnych plików Thermo Grams SPC (.spc).
+Obsługuje format New (0x4B), Old (0x4D), sub-widma oraz dane stało- i zmiennoprzecinkowe.
 """
 
 import os
 import struct
 import numpy as np
-from typing import List
+from typing import List, Dict, Any
 import logging
 
 from core.models import SpectrumData
@@ -16,147 +17,177 @@ logger = logging.getLogger("SpectroHub")
 
 
 class SPCReader(BaseSpectrumReader):
-    """Obsługa odczytu plików Thermo/Galactic Grams .spc."""
+    """Natywny dekoder plików binarnych Thermo Grams SPC."""
 
-    head_str = "cccciddicccci9s9sh32s130s30siicchf48sfifc187s"
-    old_head_str = "<cchfffcchcccc8shh28s130s30s32s"
+    SUPPORTED_EXTENSIONS = ['.spc']
 
     def read(self, file_path: str) -> List[SpectrumData]:
-        with open(file_path, "rb") as fin:
-            content = fin.read()
+        if not os.path.isfile(file_path):
+            raise FileNotFoundError(f"Plik nie istnieje: {file_path}")
 
-        if len(content) < 256:
-            raise ValueError(f"Plik SPC jest zbyt krótki: {os.path.basename(file_path)}")
+        with open(file_path, 'rb') as f:
+            content = f.read()
 
-        ftflg, fversn = struct.unpack('cc', content[:2])
-        endian = ">" if fversn == b'\x4c' else "<"
+        if len(content) < 512:
+            raise ValueError(f"Plik SPC za mały na poprawny nagłówek ({len(content)} B)")
 
-        sub_spectra = []
-        time_str = "00:00:00"
+        # Odczyt wersji: bajt 1
+        ftflgs, fversn = struct.unpack('<BB', content[:2])
 
-        if fversn in (b'\x4b', b'\x4c'):
-            fmt = endian + self.head_str
-            unpacked = struct.unpack(fmt.encode('ascii'), content[:512])
-
-            ftflg = ord(unpacked[0])
-            fexp = ord(unpacked[3])
-            fnpts = int(unpacked[4])
-            ffirst = float(unpacked[5])
-            flast = float(unpacked[6])
-            fnsub = int(unpacked[7])
-
-            tsprec = bool(ftflg & 0x01)
-            tmulti = bool(ftflg & 0x04)
-            txyxys = bool(ftflg & 0x40)
-            txvals = bool(ftflg & 0x80)
-
-            # Czas
-            d = unpacked[12]
-            if d > 0:
-                hour = (d >> 6) & 0x1F
-                minute = d & 0x3F
-                time_str = f"{hour:02d}:{minute:02d}:00"
-
-            # Oś X
-            if not txyxys:
-                if txvals:
-                    x_bytes = content[512 : 512 + (4 * fnpts)]
-                    x_raw = np.frombuffer(x_bytes, dtype=endian + "f4").astype(float)
-                    sub_pos = 512 + (4 * fnpts)
-                else:
-                    x_raw = np.linspace(ffirst, flast, num=fnpts, dtype=float)
-                    sub_pos = 512
-            else:
-                sub_pos = 512
-                x_raw = None
-
-            # Podpliki Y
-            for sub_idx in range(fnsub):
-                if sub_pos + 32 > len(content): break
-                subexp = struct.unpack(endian + 'b', content[sub_pos + 1 : sub_pos + 2])[0]
-                exp = subexp if tmulti else fexp
-                if not (-128 < exp <= 128): exp = 0
-
-                y_pos = sub_pos + 32
-                if exp in (128, -128):
-                    y_raw = np.frombuffer(content[y_pos : y_pos + 4 * fnpts], dtype=endian + "f4").astype(float)
-                elif tsprec:
-                    raw_int = np.frombuffer(content[y_pos : y_pos + 2 * fnpts], dtype=endian + "i2")
-                    y_raw = (2.0 ** (exp - 16)) * raw_int.astype(float)
-                else:
-                    raw_int = np.frombuffer(content[y_pos : y_pos + 4 * fnpts], dtype=endian + "i4")
-                    y_raw = (2.0 ** (exp - 32)) * raw_int.astype(float)
-
-                sub_spectra.append(y_raw)
-                sub_pos += (8 * fnpts + 32) if txyxys else (4 * fnpts + 32)
-
-        elif fversn == b'\x4d':  # Stary format
-            unpacked = struct.unpack(self.old_head_str.encode('ascii'), content[:256])
-            onpts = int(unpacked[3])
-            x_raw = np.linspace(float(unpacked[4]), float(unpacked[5]), num=onpts, dtype=float)
-            ohour = int(unpacked[11]) if isinstance(unpacked[11], int) else ord(unpacked[11])
-            ominute = int(unpacked[12]) if isinstance(unpacked[12], int) else ord(unpacked[12])
-            time_str = f"{ohour:02d}:{ominute:02d}:00"
-
-            sub_pos = 224
-            if sub_pos + 32 + (4 * onpts) <= len(content):
-                y_raw = np.frombuffer(content[sub_pos + 32 : sub_pos + 32 + 4 * onpts], dtype='<f4').astype(float)
-                sub_spectra.append(y_raw)
+        if fversn == 0x4B:
+            return self._parse_new_spc(content, file_path, ftflgs)
+        elif fversn == 0x4D:
+            return self._parse_old_spc(content, file_path, ftflgs)
         else:
-            raise ValueError(f"Nieznana sygnatura formatu SPC: {fversn}")
+            raise NotImplementedError(f"Nieobsługiwany format SPC: 0x{fversn:02X}")
 
+    def _parse_new_spc(self, content: bytes, file_path: str, ftflgs: int) -> List[SpectrumData]:
+        """Dekodowanie nowego formatu SPC (0x4B / LSB)."""
+        # Rozpakowanie nagłówka 512 bajtów
+        head_str = "<BBbBiddicccci9s9sh32s130s30siicchf48sfifc187s"
+        unpacked = struct.unpack(head_str, content[:512])
+
+        fexp = unpacked[2]          # b: signed char (wykładnik skali)
+        fnpts = unpacked[4]         # i: liczba punktów
+        ffirst = unpacked[5]        # d: początek osi X
+        flast = unpacked[6]         # d: koniec osi X
+        fnsub = unpacked[7]         # i: liczba podwidm
+        fxtype = unpacked[8]        # c/B: typ osi X
+        fytype = unpacked[9]        # c/B: typ osi Y
+        flogoff = unpacked[19]      # i: offset do logu
+
+        # Flagi binarne
+        tsprec = bool(ftflgs & 0x01)  # 16-bit integer if true
+        tmulti = bool(ftflgs & 0x04)  # multiple spectra
+        txyxys = bool(ftflgs & 0x40)  # each subfile has own x
+        txvals = bool(ftflgs & 0x80)  # global x preceeds y
+
+        # Budowanie osi X
+        sub_pos = 512
+        if not txyxys:
+            if txvals:
+                x_end = 512 + (4 * fnpts)
+                wavenumbers = np.frombuffer(content[512:x_end], dtype=np.float32).astype(np.float64)
+                sub_pos = x_end
+            else:
+                wavenumbers = np.linspace(ffirst, flast, num=fnpts, dtype=np.float64)
+        else:
+            wavenumbers = None
+
+        # Odczyt sub-widm
+        spectra_list = []
         base_name = os.path.splitext(os.path.basename(file_path))[0]
-        results = []
 
-        for idx, y_arr in enumerate(sub_spectra):
-            sub_name = f"{base_name}_{idx + 1}" if len(sub_spectra) > 1 else base_name
-            x_clean, y_clean = self.sanitize_and_sort(x_raw, y_arr)
-            results.append(SpectrumData(
-                wavenumbers=x_clean,
-                intensities=y_clean,
-                name=sub_name,
+        for sub_idx in range(fnsub):
+            if sub_pos + 32 > len(content):
+                break
+
+            # Subheader 32 bajty
+            sub_hdr = struct.unpack("<BBhfffiif4s", content[sub_pos:sub_pos + 32])
+            sub_exp = struct.unpack('<b', bytes([sub_hdr[1]]))[0]
+            sub_npts = sub_hdr[6] if sub_hdr[6] > 0 else fnpts
+            dat_pos = sub_pos + 32
+
+            # Oś X dla txyxys
+            cur_x = wavenumbers
+            if txyxys:
+                x_bytes = 4 * sub_npts
+                raw_x = np.frombuffer(content[dat_pos:dat_pos + x_bytes], dtype=np.int32)
+                exp_val = sub_exp if tmulti else fexp
+                cur_x = (2.0 ** (exp_val - 32)) * raw_x.astype(np.float64)
+                dat_pos += x_bytes
+
+            # Oś Y
+            exp_val = sub_exp if tmulti else fexp
+            if exp_val == -128 or exp_val == 128:
+                # Dane zmiennoprzecinkowe float32
+                y_bytes = 4 * sub_npts
+                cur_y = np.frombuffer(content[dat_pos:dat_pos + y_bytes], dtype=np.float32).astype(np.float64)
+                dat_pos += y_bytes
+            else:
+                # Dane całkowite skalowane potęgą 2
+                if tsprec:
+                    y_bytes = 2 * sub_npts
+                    raw_y = np.frombuffer(content[dat_pos:dat_pos + y_bytes], dtype=np.int16)
+                    cur_y = (2.0 ** (exp_val - 16)) * raw_y.astype(np.float64)
+                else:
+                    y_bytes = 4 * sub_npts
+                    raw_y = np.frombuffer(content[dat_pos:dat_pos + y_bytes], dtype=np.int32)
+                    cur_y = (2.0 ** (exp_val - 32)) * raw_y.astype(np.float64)
+                dat_pos += y_bytes
+
+            sub_pos = dat_pos
+            spec_name = base_name if fnsub == 1 else f"{base_name}_sub{sub_idx + 1}"
+
+            # Sanityzacja osi (uporządkowanie monotoniczne)
+            if cur_x[0] < cur_x[-1]:
+                # Odwracamy do tradycyjnego układu FTIR (malejący X: 4000 -> 400 cm^-1)
+                cur_x = cur_x[::-1]
+                cur_y = cur_y[::-1]
+
+            spectra_list.append(SpectrumData(
+                wavenumbers=cur_x,
+                intensities=cur_y,
+                name=spec_name,
                 file_path=file_path,
                 file_type="spc",
-                time_str=time_str
+                metadata={"fnsub": fnsub, "sub_index": sub_idx, "fversn": "0x4B"}
             ))
 
-        return results
+        return spectra_list
 
+    def _parse_old_spc(self, content: bytes, file_path: str, ftflgs: int) -> List[SpectrumData]:
+        """Dekodowanie starszego formatu SPC (0x4D)."""
+        old_hdr = struct.unpack("<BBhfffcchcccc8shh28s130s30s32s", content[:256])
+        oexp = struct.unpack('<b', bytes([old_hdr[2]]))[0]
+        onpts = old_hdr[3]
+        ofirst = old_hdr[4]
+        olast = old_hdr[5]
 
-def write_spc_file(file_path: str, wavenumbers: np.ndarray, intensities: np.ndarray, title: str = "IR Spectrum"):
-    """Zapisuje pojedyncze widmo do binarnego pliku Galactic SPC (nowy format 0x4B)[cite: 14]."""
-    npts = len(wavenumbers)
-    if npts == 0 or len(intensities) == 0:
-        raise ValueError("Wektory widmowe nie mogą być puste.")
+        wavenumbers = np.linspace(ofirst, olast, num=onpts, dtype=np.float64)
+        sub_pos = 256
+        spectra_list = []
+        base_name = os.path.splitext(os.path.basename(file_path))[0]
+        sub_idx = 0
 
-    fxmin = float(np.min(wavenumbers))
-    fxmax = float(np.max(wavenumbers))
-    y_data = np.array(intensities, dtype=np.float32)
+        while sub_pos + 32 < len(content):
+            sub_hdr = struct.unpack("<BBhfffiif4s", content[sub_pos:sub_pos + 32])
+            sub_exp = struct.unpack('<b', bytes([sub_hdr[1]]))[0]
+            pts = sub_hdr[6] if sub_hdr[6] > 0 else onpts
 
-    # SPC wymaga danych uporządkowanych zgodnie z fxmin -> fxmax
-    if wavenumbers[0] > wavenumbers[-1]:
-        y_data = y_data[::-1]
+            dat_pos = sub_pos + 32
+            exp = sub_exp if (0 < sub_exp < 128) else oexp
 
-    main_hdr = bytearray(512)
-    struct.pack_into('<B', main_hdr, 0, 0x00)
-    struct.pack_into('<B', main_hdr, 1, 0x4B)
-    struct.pack_into('<B', main_hdr, 2, 1)
-    struct.pack_into('<b', main_hdr, 3, -128)
-    struct.pack_into('<I', main_hdr, 4, npts)
-    struct.pack_into('<d', main_hdr, 8, fxmin)
-    struct.pack_into('<d', main_hdr, 16, fxmax)
-    struct.pack_into('<i', main_hdr, 24, 1)
+            if sub_exp in [128, -128]:
+                y_bytes = 4 * pts
+                cur_y = np.frombuffer(content[dat_pos:dat_pos + y_bytes], dtype=np.float32).astype(np.float64)
+            else:
+                y_bytes = 4 * pts
+                raw_bytes = np.frombuffer(content[dat_pos:dat_pos + y_bytes], dtype=np.uint8)
+                # Odtworzenie wartości całkowitych ze starszego formatu
+                y_int = []
+                for i in range(0, len(raw_bytes), 4):
+                    val = (raw_bytes[i + 1] * 16777216 + raw_bytes[i] * 65536 +
+                           raw_bytes[i + 3] * 256 + raw_bytes[i + 2])
+                    y_int.append(val)
+                cur_y = np.int32(y_int) / (2.0 ** (32 - exp))
 
-    comment_bytes = title.encode('utf-8', errors='ignore')[:30]
-    main_hdr[44 : 44 + len(comment_bytes)] = comment_bytes
-    main_hdr[174 : 174 + len(b"SpectroHub")] = b"SpectroHub"
+            sub_pos = dat_pos + y_bytes
+            sub_idx += 1
+            spec_name = base_name if sub_pos >= len(content) and sub_idx == 1 else f"{base_name}_sub{sub_idx}"
 
-    sub_hdr = bytearray(32)
-    struct.pack_into('<B', sub_hdr, 0, 0x00)
-    struct.pack_into('<b', sub_hdr, 1, -128)
-    struct.pack_into('<I', sub_hdr, 16, npts)
+            cur_x = wavenumbers.copy()
+            if cur_x[0] < cur_x[-1]:
+                cur_x = cur_x[::-1]
+                cur_y = cur_y[::-1]
 
-    with open(file_path, 'wb') as f:
-        f.write(main_hdr)
-        f.write(sub_hdr)
-        f.write(y_data.tobytes())
+            spectra_list.append(SpectrumData(
+                wavenumbers=cur_x,
+                intensities=cur_y,
+                name=spec_name,
+                file_path=file_path,
+                file_type="spc",
+                metadata={"sub_index": sub_idx, "fversn": "0x4D"}
+            ))
+
+        return spectra_list

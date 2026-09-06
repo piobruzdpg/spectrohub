@@ -72,3 +72,7 @@ coverage.xml
 
 # WYJĄTEK: Małe pliki testowe używane w testach jednostkowych
 !tests/sample_data/*
+
+TODO.md
+PRD.md
+STATE.md
