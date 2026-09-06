@@ -1,0 +1,74 @@
+# Środowiska wirtualne
+.venv/
+venv/
+env/
+ENV/
+
+# Pamięć podręczna Pythona i kompilacji
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE i narzędzia deweloperskie
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Dzienniki logowania i diagnostyki
+*.log
+spectrohub_debug.log*
+
+# Testy i pokrycie kodu
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# DANE NAUKOWE I PLIKI WYNIKOWE (Kluczowe: blokada dużych plików binarnych)
+*.fchk
+*.chk
+*.log
+*.out
+*.property.txt
+*.interp
+*.final.interp
+*.h5
+*.hdf5
+*.shproj
+*.xlsx
+*.csv
+*.spc
+*.spa
+*.spg
+*.dx
+*.jdx
+
+# WYJĄTEK: Małe pliki testowe używane w testach jednostkowych
+!tests/sample_data/*
