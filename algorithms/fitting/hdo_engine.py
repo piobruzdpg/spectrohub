@@ -1,58 +1,81 @@
 """
 algorithms/fitting/hdo_engine.py
-Wieloprocesowy silnik dopasowywania widm składowych i izolacji residuum (HDO Fit).
-Przystosowany do puli ProcessPoolExecutor / concurrent.futures.
+Wieloprocesowy, uogólniony silnik dekompozycji widmowej i HDO Fit.
+Czysta matematyka (NumPy / SciPy) – zero zależności od GUI.
+Obsługuje k widm bazowych, m pasm syntetycznych i asymetryczną funkcję kary.
 """
 
 import numpy as np
 from scipy.optimize import least_squares
 from scipy import integrate
-from concurrent.futures import ProcessPoolExecutor
+import concurrent.futures
+import multiprocessing
 import os
-from typing import Tuple, List, Dict, Any
+from typing import Tuple, List, Dict, Any, Optional
 
 
-def gxl_peak(wavenb: np.ndarray, a: float, b: float, c: float, d: float) -> np.ndarray:
-    """Profil pasma syntetycznego: iloczyn Gaussa i Lorentza (GxL)."""
-    diff_sq = ((wavenb - b) / d) ** 2
-    numerator = np.exp(-((1.0 - c) / 2.0) * diff_sq)
-    denominator = 1.0 + c * diff_sq
-    return a * (numerator / denominator)
+def gxl_peak(wavenb: np.ndarray, amp: float, center: float, shape: float, width: float) -> np.ndarray:
+    """
+    Pasmo będące iloczynem Gaussa i Lorentza (GxL).
+    shape in [0.0, 1.0]: 0.0 -> czysty Gauss, 1.0 -> czysty Lorentz.
+    """
+    diff_sq = ((wavenb - center) / max(width, 1e-4)) ** 2
+    numerator = np.exp(-((1.0 - shape) / 2.0) * diff_sq)
+    denominator = 1.0 + shape * diff_sq
+    return amp * (numerator / denominator)
 
 
-def evaluate_total_fit(param: np.ndarray, wavenb: np.ndarray, w1: np.ndarray, w2: np.ndarray) -> np.ndarray:
-    """Oblicza sumę: Linia bazowa (kwadratowa) + c_A*W1 + c_B*W2 + pasma GxL."""
-    baseline = param[0] * (wavenb ** 2) + param[1] * wavenb + param[2]
-    fit_y = baseline + param[3] * w1 + param[4] * w2
+def evaluate_total_fit(param: np.ndarray, wavenb: np.ndarray,
+                       base_matrix: np.ndarray, n_peaks: int,
+                       baseline_active: bool = False) -> np.ndarray:
+    """
+    Oblicza rekonstruowane widmo:
+    fit_y = Baseline(a*x^2 + b*x + c) + sum_i(c_i * W_i) + sum_j(Peak_j)
+    """
+    k_components = base_matrix.shape[0] if base_matrix.ndim == 2 else 0
 
-    n_extra_peaks = (len(param) - 5) // 4
-    for i in range(n_extra_peaks):
-        pos = 5 + i * 4
+    if baseline_active:
+        fit_y = param[0] * (wavenb ** 2) + param[1] * wavenb + param[2]
+    else:
+        fit_y = np.zeros_like(wavenb, dtype=np.float64)
+
+    # Suma ważonych widm bazowych: sum(c_i * W_i)
+    if k_components > 0:
+        coeffs = param[3: 3 + k_components]
+        fit_y += np.dot(coeffs, base_matrix)
+
+    # Suma pików syntetycznych GxL
+    start_peaks = 3 + k_components
+    for i in range(n_peaks):
+        pos = start_peaks + i * 4
         fit_y += gxl_peak(wavenb, param[pos], param[pos + 1], param[pos + 2], param[pos + 3])
 
     return fit_y
 
 
 def hdo_residuals(param: np.ndarray, target: np.ndarray, wavenb: np.ndarray,
-                  w1: np.ndarray, w2: np.ndarray, penalty_weight: float) -> np.ndarray:
-    """Funkcja celu z asymetryczną karą za przekraczanie eksperymentalnego widma."""
-    fit_y = evaluate_total_fit(param, wavenb, w1, w2)
+                  base_matrix: np.ndarray, n_peaks: int,
+                  penalty_weight: float, baseline_active: bool) -> np.ndarray:
+    """
+    Wektorowa funkcja celu z asymetryczną karą za przekraczanie widma badanego.
+    diff = fit_y - target; jeśli diff > 0 -> kara = diff * penalty_weight.
+    """
+    fit_y = evaluate_total_fit(param, wavenb, base_matrix, n_peaks, baseline_active)
     diff = fit_y - target
-    # Wektorowa kara
     penalty = np.where(diff > 0, diff * penalty_weight, 0.0)
     return target - (fit_y + penalty)
 
 
-def fit_single_initial_guess(args) -> Tuple[float, np.ndarray]:
-    """Pojedyncza optymalizacja z losowego punktu startowego (Worker wieloprocesowy)."""
-    param_guess, target, wavenb, w1, w2, penalty_weight, bounds = args
+def _mc_fit_worker(args) -> Tuple[float, np.ndarray]:
+    """Top-level worker dla ProcessPoolExecutor (bezpieczny pod macOS Apple Silicon / spawn)."""
+    param_guess, target, wavenb, base_matrix, n_peaks, penalty_weight, baseline_active, bounds = args
     try:
         res = least_squares(
             hdo_residuals, param_guess,
-            args=(target, wavenb, w1, w2, penalty_weight),
-            bounds=bounds, ftol=1e-5, xtol=1e-5
+            args=(target, wavenb, base_matrix, n_peaks, penalty_weight, baseline_active),
+            bounds=bounds, ftol=1.49e-5, xtol=1.49e-5, max_nfev=250
         )
-        fit_y = evaluate_total_fit(res.x, wavenb, w1, w2)
+        fit_y = evaluate_total_fit(res.x, wavenb, base_matrix, n_peaks, baseline_active)
         rss = float(np.sum((target - fit_y) ** 2))
         return rss, res.x
     except Exception:
@@ -60,84 +83,196 @@ def fit_single_initial_guess(args) -> Tuple[float, np.ndarray]:
 
 
 class HDOFitEngine:
-    """Orkiestrator procedury Monte Carlo dla dekompozycji HDO / 2 widm."""
+    """Główny silnik Monte Carlo dla dekompozycji k widm bazowych i m pasm syntetycznych."""
 
     @staticmethod
-    def generate_random_guesses(wavenb: np.ndarray, target: np.ndarray, n_peaks: int,
-                                n_samples: int = 2000, bounds_w1=(0.0, 1.0), bounds_w2=(0.0, 1.0)) -> np.ndarray:
-        """Generuje losowe wektory startowe w przestrzeni parametrów."""
-        total_params = 5 + 4 * n_peaks
-        guesses = np.zeros((n_samples, total_params), dtype=np.float64)
+    def generate_random_guesses(wavenb: np.ndarray, target: np.ndarray,
+                                k_components: int, n_peaks: int,
+                                n_samples: int,
+                                comp_bounds: List[Tuple[float, float]],
+                                baseline_active: bool = False) -> np.ndarray:
+        total_p = 3 + k_components + 4 * n_peaks
+        guesses = np.zeros((n_samples, total_p), dtype=np.float64)
 
-        # Baseline start: 0
+        # Baseline: start wokół 0
         guesses[:, 0:3] = 0.0
-        # Udziały W1 i W2
-        guesses[:, 3] = np.random.uniform(bounds_w1[0], bounds_w1[1], n_samples)
-        guesses[:, 4] = np.random.uniform(bounds_w2[0], bounds_w2[1], n_samples)
 
-        max_amp = np.max(target)
+        # Losowanie wag dla każdego z k widm bazowych
+        for i in range(k_components):
+            low, high = comp_bounds[i]
+            guesses[:, 3 + i] = np.random.uniform(low, high, n_samples)
+
+        # Losowanie parametrów pików syntetycznych GxL
+        max_amp = max(np.max(target), 1e-3)
         wn_min, wn_max = np.min(wavenb), np.max(wavenb)
+        start_peaks = 3 + k_components
 
-        for i in range(n_peaks):
-            pos = 5 + i * 4
-            guesses[:, pos] = np.random.uniform(0.1 * max_amp, 0.8 * max_amp, n_samples)  # Amplituda
-            guesses[:, pos + 1] = np.random.uniform(wn_min, wn_max, n_samples)             # Pozycja
-            guesses[:, pos + 2] = np.random.uniform(0.01, 0.99, n_samples)                 # Kształt GxL
-            guesses[:, pos + 3] = np.random.uniform(10.0, 80.0, n_samples)                 # Szerokość
+        for j in range(n_peaks):
+            pos = start_peaks + j * 4
+            guesses[:, pos] = np.random.uniform(0.05 * max_amp, 0.8 * max_amp, n_samples)  # Amplituda
+            guesses[:, pos + 1] = np.random.uniform(wn_min, wn_max, n_samples)              # Położenie
+            guesses[:, pos + 2] = np.random.uniform(0.01, 0.99, n_samples)                  # Kształt GxL
+            guesses[:, pos + 3] = np.random.uniform(10.0, 80.0, n_samples)                  # Szerokość
+
+        # Permutacja kolumn dla równomiernego pokrycia przestrzeni próbkowania
+        for col in range(total_p):
+            guesses[:, col] = np.random.permutation(guesses[:, col])
 
         return guesses
 
     @classmethod
-    def run_monte_carlo(cls, wavenb: np.ndarray, target: np.ndarray, w1: np.ndarray, w2: np.ndarray,
-                        n_peaks: int = 0, n_iterations: int = 1000, penalty_weight: float = 10.0,
-                        max_workers: Optional[int] = None) -> Dict[str, Any]:
-        """Równoległe przeszukiwanie przestrzeni rozwiązań na wielu rdzeniach CPU."""
+    def run_monte_carlo(cls, wavenb: np.ndarray, target: np.ndarray,
+                        base_spectra_list: List[np.ndarray],
+                        comp_bounds: List[Tuple[float, float]],
+                        n_peaks: int = 0,
+                        n_iterations: int = 2000,
+                        penalty_weight: float = 10.0,
+                        st_dev: float = 0.01,
+                        baseline_active: bool = False,
+                        max_workers: Optional[int] = None,
+                        progress_callback: Optional[Any] = None) -> Dict[str, Any]:
+        """
+        Główna metoda obliczeniowa dekompozycji.
+        Zwraca pełen zestaw parametrów, dopasowane widmo, krzywe składowe,
+        czyste residuum nadmiarowe oraz statystyki całkowe.
+        """
+        k_components = len(base_spectra_list)
+        if k_components > 0:
+            base_matrix = np.vstack(base_spectra_list)
+        else:
+            base_matrix = np.empty((0, len(wavenb)))
+
         if max_workers is None:
             max_workers = max(1, (os.cpu_count() or 2) - 1)
 
-        guesses = cls.generate_random_guesses(wavenb, target, n_peaks, n_samples=n_iterations)
+        # Generowanie losowych zestawów startowych
+        guesses = cls.generate_random_guesses(
+            wavenb, target, k_components, n_peaks, n_iterations, comp_bounds, baseline_active
+        )
 
-        # Ustalenie granic (Bounds)
-        total_p = 5 + 4 * n_peaks
+        total_p = 3 + k_components + 4 * n_peaks
         lower = np.full(total_p, -np.inf)
         upper = np.full(total_p, np.inf)
 
-        lower[0:3], upper[0:3] = -1e-8, 1e-8  # Blokada linii bazowej wokół 0
-        lower[3], upper[3] = 0.0, 1.2          # W1
-        lower[4], upper[4] = 0.0, 1.2          # W2
+        # Więzy dla linii bazowej
+        if not baseline_active:
+            lower[0:3], upper[0:3] = -1e-9, 1e-9
+        else:
+            lower[0:3], upper[0:3] = -0.1, 0.1
 
-        if n_peaks > 0:
-            wn_span = np.max(wavenb) - np.min(wavenb)
-            for i in range(n_peaks):
-                pos = 5 + i * 4
-                lower[pos], upper[pos] = 0.0, 2.0 * np.max(target)
-                lower[pos + 1], upper[pos + 1] = np.min(wavenb) - 50.0, np.max(wavenb) + 50.0
-                lower[pos + 2], upper[pos + 2] = 0.0, 1.0
-                lower[pos + 3], upper[pos + 3] = 2.0, 0.5 * wn_span
+        # Więzy dla k widm składowych
+        for i in range(k_components):
+            lower[3 + i], upper[3 + i] = comp_bounds[i][0], comp_bounds[i][1]
+
+        # Więzy dla pasm syntetycznych
+        start_peaks = 3 + k_components
+        wn_span = np.max(wavenb) - np.min(wavenb)
+        for j in range(n_peaks):
+            pos = start_peaks + j * 4
+            lower[pos], upper[pos] = 0.0, 2.0 * max(np.max(target), 1e-2)  # Amplituda
+            lower[pos + 1], upper[pos + 1] = np.min(wavenb) - 20.0, np.max(wavenb) + 20.0  # Środek
+            lower[pos + 2], upper[pos + 2] = 0.0, 1.0  # Shape GxL
+            lower[pos + 3], upper[pos + 3] = 2.0, 0.6 * wn_span  # Szerokość
 
         bounds = (lower, upper)
-        tasks = [(guesses[i], target, wavenb, w1, w2, penalty_weight, bounds) for i in range(n_iterations)]
+        tasks = [
+            (guesses[i], target, wavenb, base_matrix, n_peaks, penalty_weight, baseline_active, bounds)
+            for i in range(n_iterations)
+        ]
 
         best_rss = np.inf
         best_params = guesses[0]
 
-        # Wykonanie równoległe w osobnej puli procesów (brak GIL)
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            results = executor.map(fit_single_initial_guess, tasks, chunksize=max(1, n_iterations // (max_workers * 4)))
-            for rss, params in results:
+        # Równoległe wykonanie w puli procesów (spawn context)
+        ctx = multiprocessing.get_context("spawn")
+        chunk_size = max(1, n_iterations // (max_workers * 4))
+
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
+            futures = [executor.submit(_mc_fit_worker, t) for t in tasks]
+            for idx, fut in enumerate(concurrent.futures.as_completed(futures)):
+                rss, params = fut.result()
                 if rss < best_rss:
                     best_rss = rss
                     best_params = params
 
-        # Wyznaczenie czystego residuum: Residuum = Target - (c_A*W1 + c_B*W2)
-        fitted_curve = evaluate_total_fit(best_params, wavenb, w1, w2)
-        pure_excess_residual = target - (best_params[3] * w1 + best_params[4] * w2)
+                if progress_callback and (idx % max(1, n_iterations // 20) == 0 or idx == n_iterations - 1):
+                    progress_callback(int((idx + 1) / n_iterations * 100), best_rss)
+
+        # 1. Obliczenie krzywej dopasowania (Total Fit)
+        fitted_curve = evaluate_total_fit(best_params, wavenb, base_matrix, n_peaks, baseline_active)
+
+        # 2. Składowe ważone: c_i * W_i
+        scaled_components = []
+        sum_components = np.zeros_like(wavenb)
+        extracted_coeffs = []
+        for i in range(k_components):
+            c_val = float(best_params[3 + i])
+            extracted_coeffs.append(c_val)
+            comp_curve = c_val * base_matrix[i]
+            scaled_components.append(comp_curve)
+            sum_components += comp_curve
+
+        # 3. Piki syntetyczne
+        peaks_curves = []
+        sum_peaks = np.zeros_like(wavenb)
+        start_peaks = 3 + k_components
+        peaks_params = []
+        for j in range(n_peaks):
+            pos = start_peaks + j * 4
+            p_amp = float(best_params[pos])
+            p_center = float(best_params[pos + 1])
+            p_shape = float(best_params[pos + 2])
+            p_width = float(best_params[pos + 3])
+            peaks_params.append({'amp': p_amp, 'center': p_center, 'shape': p_shape, 'width': p_width})
+
+            p_y = gxl_peak(wavenb, p_amp, p_center, p_shape, p_width)
+            peaks_curves.append(p_y)
+            sum_peaks += p_y
+
+        # 4. Czyste residuum nadmiarowe: Residuum = Target - sum(c_i * W_i)
+        excess_residual = target - sum_components
+
+        # 5. Linia bazowa
+        if baseline_active:
+            baseline_curve = best_params[0] * (wavenb ** 2) + best_params[1] * wavenb + best_params[2]
+        else:
+            baseline_curve = np.zeros_like(wavenb)
+
+        # 6. Analiza całkowa (Simpsona) i udziały procentowe
+        area_target = abs(float(integrate.simpson(target, wavenb)))
+        comp_areas = [abs(float(integrate.simpson(c_curve, wavenb))) for c_curve in scaled_components]
+        peaks_area = abs(float(integrate.simpson(sum_peaks, wavenb))) if n_peaks > 0 else 0.0
+        baseline_area = abs(float(integrate.simpson(baseline_curve, wavenb))) if baseline_active else 0.0
+
+        total_area = sum(comp_areas) + peaks_area + baseline_area
+        area_percentages = [
+            (a / total_area * 100.0) if total_area > 0 else 0.0 for a in comp_areas
+        ]
+
+        # 7. Metryki GoF (Goodness-of-Fit)
+        ss_res = float(np.sum((target - fitted_curve) ** 2))
+        ss_tot = float(np.sum((target - np.mean(target)) ** 2))
+        r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+        rmse = float(np.sqrt(np.mean((target - fitted_curve) ** 2)))
+        dof = max(1, len(wavenb) - total_p - 1)
+        chi2_red = (ss_res / max(st_dev ** 2, 1e-8)) / dof
 
         return {
             'best_params': best_params,
-            'c_A': float(best_params[3]),
-            'c_B': float(best_params[4]),
-            'rss': best_rss,
+            'coefficients': extracted_coeffs,
+            'comp_areas': comp_areas,
+            'area_percentages': area_percentages,
+            'peaks_params': peaks_params,
+            'peaks_area': peaks_area,
+            'baseline_area': baseline_area,
             'fitted_curve': fitted_curve,
-            'excess_residual': pure_excess_residual
+            'scaled_components': scaled_components,
+            'sum_peaks': sum_peaks,
+            'peaks_curves': peaks_curves,
+            'baseline_curve': baseline_curve,
+            'excess_residual': excess_residual,
+            'rss': ss_res,
+            'r2': r2,
+            'rmse': rmse,
+            'chi2_red': chi2_red
         }

@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QUndoStack
 import logging
 
-from core.models import SpectrumData
+from core.models import SpectrumData, SpectralSeries
 
 logger = logging.getLogger("SpectroHub")
 
@@ -23,6 +23,8 @@ class ProjectSession(QObject):
     active_spectrum_changed = Signal(object)
     visibility_changed = Signal(str, bool)
     session_cleared = Signal()
+    series_added = Signal(object)
+    series_removed = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -30,6 +32,7 @@ class ProjectSession(QObject):
         self._visibility: Dict[str, bool] = {}
         self._active_spectrum_name: Optional[str] = None
         self.undo_stack = QUndoStack(self)
+        self._series: Dict[str, SpectralSeries] = {}
 
     @property
     def spectra(self) -> Dict[str, SpectrumData]:
@@ -76,6 +79,29 @@ class ProjectSession(QObject):
                 new_active = next(iter(self._spectra.keys()), None)
                 self.set_active_spectrum(new_active)
 
+    @property
+    def series(self) -> Dict[str, SpectralSeries]:
+        return self._series
+
+    def add_series(self, series_obj: SpectralSeries):
+        base_name = series_obj.name
+        unique_name = base_name
+        counter = 1
+        while unique_name in self._series:
+            unique_name = f"{base_name}_{counter}"
+            counter += 1
+
+        series_obj.name = unique_name
+        self._series[unique_name] = series_obj
+        logger.info(f"Dodano serię/tensor do sesji: '{unique_name}' (Wymiary: {series_obj.shape})")
+        self.series_added.emit(series_obj)
+
+    def remove_series(self, name: str):
+        if name in self._series:
+            del self._series[name]
+            logger.info(f"Usunięto serię z sesji: '{name}'")
+            self.series_removed.emit(name)
+
     def set_active_spectrum(self, name: Optional[str]):
         if name != self._active_spectrum_name:
             if name is not None and name not in self._spectra:
@@ -102,6 +128,7 @@ class ProjectSession(QObject):
         self.undo_stack.clear()
         logger.info("Wyczyszczono całą sesję projektu.")
         self.session_cleared.emit()
+        self._series.clear()
 
 
 session = ProjectSession()

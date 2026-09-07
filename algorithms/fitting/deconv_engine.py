@@ -2,15 +2,15 @@
 algorithms/fitting/deconv_engine.py
 Silnik dekonwolucji pasmowej oparty na bibliotece lmfit.
 Czysta logika analityczna bez domieszek UI.
+Obsługuje tryb dedykowany Amidu I (struktury białkowe) oraz tryb ogólny (Custom).
 """
 
 import numpy as np
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 from lmfit import Parameters, Model
 from lmfit.models import GaussianModel, LorentzianModel, VoigtModel, PseudoVoigtModel
 
 
-# Zakresy struktur drugorzędowych
 STRUCTURE_RANGES_H2O = [
     (1610.0, 1625.0, "Beta-Sheet (Aggregated/Strong)"),
     (1625.0, 1640.0, "Beta-Sheet"),
@@ -52,10 +52,6 @@ class DeconvolutionEngine:
     @classmethod
     def fit_peaks(cls, x: np.ndarray, y: np.ndarray, peaks: List[Dict[str, Any]],
                   method: str = "leastsq") -> Tuple[List[Dict[str, Any]], Dict[str, float]]:
-        """
-        Dopasowuje parametry pasm do sygnału y(x) za pomocą lmfit.
-        Zwraca zaktualizowaną listę pików oraz słownik metryk dopasowania (GoF).
-        """
         if len(peaks) == 0 or len(x) == 0:
             raise ValueError("Brak danych lub brak pików do dopasowania.")
 
@@ -72,7 +68,7 @@ class DeconvolutionEngine:
             else:
                 composite_model += model
 
-            # Dodanie więzów
+            # Dodanie parametrów i więzów
             model.set_param_hint(prefix + 'center', value=p['center'], vary=not p.get('lock_center', False))
             model.set_param_hint(prefix + 'sigma', value=p['sigma'], min=1e-4, vary=not p.get('lock_sigma', False))
             model.set_param_hint(prefix + 'amplitude', value=p['area'], min=0.0, vary=not p.get('lock_area', False))
@@ -91,7 +87,6 @@ class DeconvolutionEngine:
         if not result.success:
             raise RuntimeError(f"Optymalizacja lmfit nie osiągnęła zbieżności: {result.message}")
 
-        # Aktualizacja parametrów
         bv = result.best_values
         updated_peaks = [p.copy() for p in peaks]
 
@@ -105,7 +100,6 @@ class DeconvolutionEngine:
             if p.get('type') == 'PseudoVoigt' and prefix + 'fraction' in bv:
                 p['fraction'] = float(bv[prefix + 'fraction'])
 
-        # Obliczenie statystyk Goodness-of-Fit (GoF)
         ss_res = np.sum((y - result.best_fit) ** 2)
         ss_tot = np.sum((y - np.mean(y)) ** 2)
         r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
@@ -123,7 +117,6 @@ class DeconvolutionEngine:
 
     @classmethod
     def evaluate_model_curves(cls, x: np.ndarray, y: np.ndarray, peaks: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Wylicza profile składowych pasm, sumę całkowitą oraz residuum."""
         total_y = np.zeros_like(x, dtype=np.float64)
         components = []
 

@@ -1,37 +1,22 @@
 """
 algorithms/chemometrics/multivariate.py
-Zaawansowana analiza chemometryczna: PFA/Malinowski, SPEXFA, MCR-ALS, PARAFAC, Tucker3, 2D-COS.
-Brak zależności od GUI.
+Silnik chemometryczny analizy wielowymiarowej i dekompozycji serii ewolucyjnych.
+Czysty rdzeń numeryczny (NumPy / SciPy / scikit-learn / pyMCR) — zero kodu GUI.
 """
 
-import logging
 import numpy as np
-from typing import Dict, Any, Tuple, Optional, List
-from scipy.linalg import pinv
-from sklearn.decomposition import TruncatedSVD
-from sklearn.cross_decomposition import PLSRegression
-from sklearn.manifold import TSNE
-import tensorly as tl
+from numpy.linalg import svd, pinv, det
+from scipy.stats import f as f_dist
+from typing import Dict, Any, List, Tuple, Optional
 from pymcr.mcr import McrAR
-from pymcr.regressors import OLS, NNLS
+from pymcr.regressors import NNLS, OLS
 from pymcr.constraints import Constraint, ConstraintNorm
 
-from core.logger import log_algo_exception
 
-logger = logging.getLogger("SpectroHub")
-
-# Bezpieczny import UMAP
-try:
-    import umap
-    UMAP_AVAILABLE = True
-except ImportError:
-    UMAP_AVAILABLE = False
-
-
-# --- RESTRYKCJE MCR-ALS ---
+# --- WŁASNE OGRANICZENIA DLA MCR-ALS ---
 
 class ConstraintClosure(Constraint):
-    """Wymusza sumowanie profili stężeń do jedności (domknięcie bilansu)."""
+    """Ograniczenie domknięcia bilansu stężeń (suma stężeń w próbie = 1.0)."""
     def __init__(self, axis=-1, copy=False):
         super().__init__(copy)
         self.axis = axis
@@ -46,7 +31,7 @@ class ConstraintClosure(Constraint):
 
 
 class ConstraintUnimodal(Constraint):
-    """Wymusza jednomodalność profili (brak wtórnych maksimów)."""
+    """Ograniczenie jednomodalności profilu stężeń."""
     def __init__(self, copy=False):
         super().__init__(copy)
 
@@ -56,11 +41,9 @@ class ConstraintUnimodal(Constraint):
         for j in range(A.shape[1]):
             c = A[:, j]
             max_idx = np.argmax(c)
-            # Wymuszenie monotonicznego spadku w lewo
             for i in range(max_idx - 1, -1, -1):
                 if c[i] > c[i + 1]:
                     c[i] = c[i + 1]
-            # Wymuszenie monotonicznego spadku w prawo
             for i in range(max_idx + 1, len(c)):
                 if c[i] > c[i - 1]:
                     c[i] = c[i - 1]
@@ -68,265 +51,420 @@ class ConstraintUnimodal(Constraint):
         return A
 
 
-# --- 1. ANALIZA CZYNNIKÓW GŁÓWNYCH (PCA / PFA) I METODY MANIFOLD ---
+# --- 1. SUBRUTYNY IKSFA I WFAX (MALINOWSKI) ---
 
-def run_pca_uncentered(X: np.ndarray, n_components: int) -> Dict[str, Any]:
+def iksfax_py(d: np.ndarray, n: int, typical: int = 1) -> Optional[List[int]]:
     """
-    Wykonuje PCA bez centrowania (TruncatedSVD) dla zachowania fizycznego sensu widm FTIR.
+    Iterative Key Set Factor Analysis (IKSFA).
+    typical: 1 dla wierszy (widma), 2 dla kolumn (stężenia).
     """
-    n_comp = min(n_components, X.shape[0], X.shape[1] - 1)
-    svd = TruncatedSVD(n_components=n_comp)
-    scores = svd.fit_transform(X)
-
-    return {
-        'scores': scores,
-        'loadings': svd.components_.T,
-        'variance': svd.explained_variance_ratio_,
-        'pca_model': svd,
-        'X_original': X
-    }
-
-
-def run_pca_reconstruction(pca_results: Dict[str, Any], k: int) -> Dict[str, Any]:
-    """Rekonstrukcja sygnału z pierwszych k składowych."""
-    svd = pca_results['pca_model']
-    X_orig = pca_results['X_original']
-    scores = pca_results['scores']
-
-    scores_k = np.copy(scores)
-    scores_k[:, k:] = 0.0
-
-    X_recon = svd.inverse_transform(scores_k)
-    residuals = X_orig - X_recon
-
-    return {
-        'X_reconstructed': X_recon,
-        'residuals': residuals,
-        'k': k
-    }
-
-
-def run_fa_rank_analysis(X: np.ndarray) -> Dict[str, Any]:
-    """
-    Analiza rang Malinowskiego: Błąd Rzeczywisty (RE), Wskaźnik IND oraz wartości własne.
-    """
-    r, c = X.shape
+    r, c = d.shape
     sm = min(r, c)
-    max_k = sm - 1
-    if max_k < 1:
-        raise ValueError("Zbyt mała liczba widm do przeprowadzenia analizy rang.")
+    lg = max(r, c)
 
-    u, s_vec, vh = np.linalg.svd(X, full_matrices=False)
-    ev = s_vec ** 2
+    u, s_vec, vt = svd(d, full_matrices=False)
+    u_scaled = u[:, :n] @ np.diag(s_vec[:n])
+    v_scaled = vt.T[:, :n] @ np.diag(s_vec[:n])
 
-    re = np.zeros(max_k)
-    ind = np.zeros(max_k)
-    sev = np.zeros(sm + 1)
-
-    for k_sev in range(sm - 1, -1, -1):
-        sev[k_sev] = sev[k_sev + 1] + ev[k_sev]
-
-    for l in range(max_k):
-        matlab_l = l + 1
-        current_sev = sev[matlab_l]
-        re_val = np.sqrt(current_sev / (r * (c - matlab_l)))
-        re[l] = re_val
-        ind[l] = re_val / ((c - matlab_l) ** 2)
-
-    return {
-        'u': u, 's_vec': s_vec, 'vh': vh,
-        'ev': ev[:max_k], 're': re, 'ind': ind, 'max_k': max_k,
-        'X_original': X
-    }
-
-
-def run_umap(X: np.ndarray, n_components: int = 2) -> np.ndarray:
-    """Nieliniowa redukcja wymiarowości UMAP."""
-    if not UMAP_AVAILABLE:
-        raise ImportError("Biblioteka 'umap-learn' nie jest zainstalowana w bieżącym środowisku.")
-    model = umap.UMAP(n_components=n_components, random_state=42)
-    return model.fit_transform(X)
-
-
-def run_tsne(X: np.ndarray, n_components: int = 2) -> np.ndarray:
-    """Nieliniowa redukcja wymiarowości t-SNE."""
-    perplexity = min(30.0, max(1.0, float(X.shape[0] - 1.0)))
-    model = TSNE(n_components=n_components, random_state=42, perplexity=perplexity)
-    return model.fit_transform(X)
-
-
-# --- 2. DEKOMPOZYCJA TENSORÓW 3D (PARAFAC / TUCKER3) ---
-
-def run_parafac(tensor: np.ndarray, rank: int, non_negative: bool = False) -> Dict[str, Any]:
-    """Dekompozycja CP/PARAFAC tensora 3D (np. Długość fali x Stężenie A x Stężenie B)."""
-    tensor_clean = np.nan_to_num(tensor, nan=0.0)
-    if non_negative:
-        weights, factors = tl.decomposition.non_negative_parafac(tensor_clean, rank=rank, init='random', n_iter_max=150)
-    else:
-        weights, factors = tl.decomposition.parafac(tensor_clean, rank=rank, n_iter_max=150)
-    return {'weights': weights, 'factors': factors}
-
-
-def run_tucker(tensor: np.ndarray, ranks: List[int]) -> Dict[str, Any]:
-    """Dekompozycja Tucker3 tensora na rdzeń i macierze czynnikowe."""
-    tensor_clean = np.nan_to_num(tensor, nan=0.0)
-    core, factors = tl.decomposition.tucker(tensor_clean, rank=ranks)
-    return {'core': core, 'factors': factors}
-
-
-# --- 3. SPEXFA & MCR-ALS ---
-
-def run_spexfa(X: np.ndarray, n_components: int) -> Dict[str, Any]:
-    """
-    Metoda SPEXFA: izolacja czystych widm i profili stężeń za pomocą selekcji IKSFA.
-    """
-    D = X.T
-    r, c = D.shape
-    n = n_components
-
-    u, s_vec, vh = np.linalg.svd(D, full_matrices=False)
-    s_mat = np.diag(s_vec)
-
-    u_n = u[:, :n]
-    s_n = s_mat[:n, :n]
-    vh_n = vh[:n, :]
-    dr = u_n @ s_n @ vh_n
-
-    ev = s_vec ** 2
-    sev = np.sum(ev[n:])
-    re = np.sqrt(sev / (r * (c - n)))
+    sev = np.sum(s_vec[n:] ** 2) if n < sm else 0.0
+    re = np.sqrt(sev / (lg * (sm - n))) if lg * (sm - n) > 0 else 0.0
     cutoff = 5.0 * re * np.sqrt(n)
 
-    ubar = u_n @ s_n
-    ubar_norm = np.linalg.norm(ubar, axis=1)
-    mask = ubar_norm < cutoff
-    ubar_masked = np.copy(ubar)
-    ubar_masked[mask, :] = np.nan
+    target_matrix = u_scaled if typical == 1 else v_scaled
+    norms = np.linalg.norm(target_matrix, axis=1)
+    valid_indices = np.where(norms >= cutoff)[0]
 
-    valid_indices = ~mask
-    if np.sum(valid_indices) == 0:
-        raise ValueError("Wszystkie zmienne znajdują się poniżej progu szumu.")
+    if len(valid_indices) < n:
+        valid_indices = np.arange(target_matrix.shape[0])
 
-    ubar_norm_clean = np.linalg.norm(ubar_masked[valid_indices, :], axis=1, keepdims=True)
-    ubar_masked[valid_indices, :] = (ubar_masked[valid_indices, :] * np.sqrt(c)) / ubar_norm_clean
+    if len(valid_indices) == 0:
+        return None
 
-    key = [int(np.nanargmin(np.abs(ubar_masked[:, 0])))]
+    ubar = target_matrix.copy()
+    ubar[valid_indices, :] = ubar[valid_indices, :] * (np.sqrt(sm) / norms[valid_indices, np.newaxis])
 
-    for k_idx in range(1, n):
-        w = ubar_masked[:, :k_idx + 1]
-        ky = np.zeros((k_idx + 1, k_idx + 1))
-        for j in range(k_idx):
-            ky[j, :] = w[key[j], :]
+    key = [valid_indices[np.argmin(np.abs(ubar[valid_indices, 0]))]]
 
-        dt = np.zeros(r)
-        for i in range(r):
-            if np.isnan(ubar_masked[i, 0]):
-                dt[i] = -np.inf
-            else:
-                ky[k_idx, :] = w[i, :]
-                dt[i] = np.abs(np.linalg.det(ky))
-        key.append(int(np.argmax(dt)))
+    for k in range(1, n):
+        current_keys_rows = ubar[key, :k + 1]
+        candidate_indices = [idx for idx in valid_indices if idx not in key]
+        if not candidate_indices:
+            break
 
-    conc_transposed = dr[key, :]
-    spex = dr @ pinv(conc_transposed)
+        dets = np.zeros(len(candidate_indices))
+        for i, idx in enumerate(candidate_indices):
+            test_matrix = np.vstack([current_keys_rows, ubar[idx, :k + 1]])
+            try:
+                dets[i] = np.abs(det(test_matrix))
+            except np.linalg.LinAlgError:
+                dets[i] = 0.0
+
+        if np.max(dets) > 0:
+            key.append(candidate_indices[np.argmax(dets)])
+        else:
+            break
+
+    # Udoskonalanie kluczy
+    for _ in range(20):
+        tkey = list(key)
+        w = ubar[:, :n]
+        for j in range(len(key)):
+            current_temp_keys = [k for i, k in enumerate(key) if i != j]
+            candidate_indices = [idx for idx in valid_indices if idx not in current_temp_keys]
+            if not candidate_indices:
+                continue
+
+            dets = np.zeros(len(candidate_indices))
+            base_rows = w[current_temp_keys, :]
+            for i, idx in enumerate(candidate_indices):
+                test_matrix = np.vstack([base_rows, w[idx, :]])
+                try:
+                    dets[i] = np.linalg.norm(w[idx, :]) if n == 1 else np.abs(det(test_matrix))
+                except np.linalg.LinAlgError:
+                    dets[i] = 0.0
+
+            if np.max(dets) > 0:
+                key[j] = candidate_indices[np.argmax(dets)]
+
+        if key == tkey:
+            break
+
+    return key
+
+
+def wfax_py(d: np.ndarray, n_total: int, w1: int, w2: int) -> Optional[np.ndarray]:
+    """Window Factor Analysis (WFAX) z usuwaniem tła instrumentalnego."""
+    nr, nc = d.shape
+    if n_total <= 0 or n_total > min(nr, nc) or w1 < 0 or w2 >= nc or w1 > w2:
+        return None
+
+    u, s_vec, vt = svd(d, full_matrices=False)
+    n_eff = min(n_total, len(s_vec))
+    dn = u[:, :n_eff] @ np.diag(s_vec[:n_eff]) @ vt[:n_eff, :]
+
+    cols_to_delete = np.arange(max(0, w1), min(nc - 1, w2) + 1)
+    db = np.delete(d, cols_to_delete, axis=1) if len(cols_to_delete) > 0 else d.copy()
+
+    n_bg = n_total - 1
+    if n_bg <= 0 or db.shape[1] == 0:
+        Xn = dn
+    else:
+        ub, _, _ = svd(db, full_matrices=False)
+        n_bg_eff = min(n_bg, ub.shape[1])
+        ub_trunc = ub[:, :n_bg_eff]
+        Xn = dn - ub_trunc @ (ub_trunc.T @ dn)
+
+    try:
+        _, _, vxt = svd(Xn, full_matrices=False)
+    except np.linalg.LinAlgError:
+        return None
+
+    if vxt.shape[0] == 0:
+        return np.zeros(nc)
+
+    cx = vxt[0, :]
+    max_abs = np.max(np.abs(cx))
+    return cx / cx[np.argmax(np.abs(cx))] if max_abs > 1e-10 else np.zeros_like(cx)
+
+
+# --- 2. GŁÓWNE ALGORYTMY ANALIZY EVOCHEM / CHEMTENSOR ---
+
+def run_pfa(d: np.ndarray, n: int = 0) -> Dict[str, Any]:
+    """
+    Principal Factor Analysis (Malinowski).
+    Zwraca wartości własne (EV), błąd rzeczywisty (RE), wskaźnik IND oraz poziom istotności %SL.
+    """
+    r, c = d.shape
+    sm = min(r, c)
+    lg = max(r, c)
+
+    u, s_vec, vt = svd(d, full_matrices=False)
+    ev = s_vec ** 2
+
+    re = np.full(sm, np.nan)
+    ind = np.full(sm, np.nan)
+    Msl = np.full(sm, np.nan)
+
+    sev_cumulative = np.concatenate(([0], np.cumsum(ev[::-1])))[::-1]
+
+    for k in range(sm - 1):
+        sev_k = sev_cumulative[k + 1]
+        denom_re = lg * (sm - (k + 1))
+        re[k] = np.sqrt(sev_k / denom_re) if denom_re > 0 and sev_k >= 0 else 0.0
+
+        denom_ind = (sm - (k + 1)) ** 2
+        ind[k] = re[k] / denom_ind if denom_ind > 0 and not np.isnan(re[k]) else 0.0
+
+        df1 = (r - k) * (c - k)
+        df2 = sum((r - i) * (c - i) for i in range(k + 1, sm))
+        if df1 > 0 and df2 > 0 and sev_k > 1e-12:
+            f_stat = (df2 * ev[k]) / (df1 * sev_k)
+            Msl[k] = f_dist.sf(f_stat, df1, df2) * 100.0
+
+    res = {
+        'factors': np.arange(1, sm + 1),
+        'ev': ev,
+        're': re,
+        'ind': ind,
+        'msl': Msl,
+        'suggested_k': int(np.nanargmin(ind[:max(1, sm - 2)])) + 1 if sm > 2 else 1,
+        'X_original': d
+    }
+
+    if n > 0:
+        n_eff = min(n, sm)
+        u_k = u[:, :n_eff]
+        s_k = np.diag(s_vec[:n_eff])
+        vt_k = vt[:n_eff, :]
+        dr = u_k @ s_k @ vt_k
+        res.update({
+            'dr': dr,
+            'residuals': d - dr,
+            'scores': u_k @ s_k,
+            'loadings': vt_k.T,
+            'k': n_eff
+        })
+
+    return res
+
+
+def run_autowfa(d: np.ndarray, n_chem: int, m_total: Optional[int] = None, noise: float = 0.065) -> Dict[str, Any]:
+    """Automatyczna analiza czynnikowa z oknem (AUTOWFA)."""
+    r, c = d.shape
+    if m_total is None:
+        m_total = n_chem
+
+    initial_keys = iksfax_py(d, n_chem, typical=2)
+    if initial_keys is None or len(initial_keys) < n_chem:
+        raise RuntimeError("IKSFA nie zdołała wyznaczyć początkowego zbioru kluczy.")
+
+    u, s_vec, vt = svd(d, full_matrices=False)
+    vbar = vt.T[:, :n_chem]
+
+    keys = np.array(initial_keys)
+    w1 = np.zeros(n_chem, dtype=int)
+    w2 = np.zeros(n_chem, dtype=int)
+
+    for j in range(n_chem):
+        ctest = np.zeros((c, 1))
+        ctest[keys[j], 0] = 1.0
+        cpred = (vbar @ (vbar.T @ ctest)).flatten()
+        max_v = np.max(np.abs(cpred))
+        cpred = cpred / max_v if max_v > 1e-10 else np.zeros(c)
+
+        mx_idx = int(np.argmax(cpred))
+        keys[j] = mx_idx
+
+        # Lewa krawędź
+        left = mx_idx
+        for k in range(mx_idx, -1, -1):
+            if cpred[k] <= 0:
+                left = k + 1
+                break
+            if k == 0: left = 0
+        w1[j] = left
+
+        # Prawa krawędź
+        right = mx_idx
+        for k in range(mx_idx, c):
+            if cpred[k] <= 0:
+                right = k - 1
+                break
+            if k == c - 1: right = c - 1
+        w2[j] = right
+
+    sort_idx = np.argsort(keys)
+    keys, w1, w2 = keys[sort_idx], w1[sort_idx], w2[sort_idx]
+
+    conc = np.zeros((n_chem, c))
+    for j in range(n_chem):
+        for _ in range(12):
+            cpred = wfax_py(d, m_total, w1[j], w2[j])
+            if cpred is None:
+                break
+            conc[j, :] = cpred
+            if np.any(cpred):
+                mx_idx = int(np.argmax(cpred))
+                keys[j] = mx_idx
+                new_w1 = 0
+                for k in range(mx_idx, -1, -1):
+                    if cpred[k] <= noise:
+                        new_w1 = k + 1
+                        break
+                new_w2 = c - 1
+                for k in range(mx_idx, c):
+                    if cpred[k] <= noise:
+                        new_w2 = k - 1
+                        break
+                w1[j] = min(new_w1, mx_idx)
+                w2[j] = max(new_w2, mx_idx)
 
     return {
-        'C': conc_transposed.T,
-        'ST': spex,
-        'rank': n
+        'conc': conc,
+        'keys': keys,
+        'windows': np.column_stack([keys, w1, w2]),
+        'rank': n_chem
     }
 
 
-def run_mcr_als(data_matrix_or_tensor: np.ndarray, rank: int, non_negative: bool = True,
+def run_spexfa(d: np.ndarray, n: int) -> Dict[str, Any]:
+    """
+    Spectral Extraction Factor Analysis (SPEXFA).
+    Izoluje czyste widma (Pure Spectra), profile stężeń oraz ich niepewności.
+    """
+    r, c = d.shape
+    u, s_vec, vt = svd(d, full_matrices=False)
+    dr = u[:, :n] @ np.diag(s_vec[:n]) @ vt[:n, :]
+
+    key_rows = iksfax_py(d, n, typical=1)
+    if key_rows is None or len(key_rows) < n:
+        raise RuntimeError("IKSFA nie wyznaczyła kluczowych wierszy dla SPEXFA.")
+
+    valid_keys = [k for k in key_rows if k < dr.shape[0]]
+    conc_temp = dr[valid_keys, :]
+    conc_norm = np.max(conc_temp, axis=1, keepdims=True)
+    conc_norm[conc_norm <= 1e-10] = 1.0
+    conc_normalized = conc_temp / conc_norm
+
+    spex = dr @ pinv(conc_normalized)
+    e = d - dr
+
+    spexerr = np.zeros_like(spex)
+    try:
+        xx = pinv(conc_normalized @ conc_normalized.T)
+        if c > n:
+            for j in range(r):
+                vj = np.sum(e[j, :] ** 2) / (c - n)
+                for k in range(n):
+                    spexerr[j, k] = np.sqrt(max(0.0, vj * xx[k, k]))
+    except Exception:
+        spexerr.fill(np.nan)
+
+    return {
+        'pure_spectra': spex,
+        'pure_concentrations': conc_normalized.T,
+        'spexerr': spexerr,
+        'rank': n,
+        'dr': dr
+    }
+
+
+def run_mcr_als(d: np.ndarray, rank: int, non_negative: bool = True,
                 norm: bool = False, closure: bool = False, unimodal: bool = False,
-                use_spexfa_init: bool = True, max_iter: int = 500, tol_err_change: float = 1e-4,
-                st_init: Optional[np.ndarray] = None, st_fix_indices: Optional[List[int]] = None) -> Dict[str, Any]:
+                use_spexfa_init: bool = True, max_iter: int = 500,
+                tol_err_change: float = 1e-4) -> Dict[str, Any]:
     """
-    Wielowymiarowa rozdzielczość krzywych (MCR-ALS).
-    Przyjmuje zarówno macierz 2D (W x C), jak i tensor 3D (W x N x M).
+    Multivariate Curve Resolution — Alternating Least Squares (MCR-ALS).
+    d: Macierz o kształcie (Liczby falowe, Próbki).
     """
-    if data_matrix_or_tensor.ndim == 3:
-        w, n_rows, m_cols = data_matrix_or_tensor.shape
-        D_matrix_full = data_matrix_or_tensor.transpose(1, 2, 0).reshape((n_rows * m_cols), w)
-        is_tensor = True
-    elif data_matrix_or_tensor.ndim == 2:
-        # Wiersze: liczby falowe, Kolumny: próbki -> transpozycja do (próbki x cechy)
-        w, n_samples = data_matrix_or_tensor.shape
-        D_matrix_full = data_matrix_or_tensor.T
-        n_rows, m_cols = n_samples, 1
-        is_tensor = False
-    else:
-        raise ValueError("Dane dla MCR-ALS muszą być macierzą 2D lub tensorem 3D.")
-
-    valid_mask = ~np.isnan(D_matrix_full).any(axis=1) & ~np.all(D_matrix_full == 0.0, axis=1)
-    D_matrix = D_matrix_full[valid_mask]
-
-    if D_matrix.shape[0] == 0:
-        raise ValueError("Brak prawidłowych punktów dla procedury MCR-ALS.")
-
-    n_samples, n_features = D_matrix.shape
+    D_samples = d.T  # pyMCR oczekuje macierzy (Próbki, Liczby falowe)
+    n_samples, n_features = D_samples.shape
 
     c_regr = NNLS() if non_negative else OLS()
     st_regr = NNLS() if non_negative else OLS()
 
     c_constraints = []
-    if norm: c_constraints.append(ConstraintNorm())
-    if closure: c_constraints.append(ConstraintClosure(axis=1))
-    if unimodal: c_constraints.append(ConstraintUnimodal())
+    if norm:
+        c_constraints.append(ConstraintNorm())
+    if closure:
+        c_constraints.append(ConstraintClosure(axis=1))
+    if unimodal:
+        c_constraints.append(ConstraintUnimodal())
 
-    final_st_init = np.random.rand(rank, n_features)
-
-    # Inicjalizacja przez SPEXFA
-    if use_spexfa_init and st_init is None:
+    st_init = np.random.rand(rank, n_features)
+    if use_spexfa_init:
         try:
-            spex_res = run_spexfa(D_matrix, rank)
-            final_st_init = spex_res['ST'].T
-        except Exception as e:
-            logger.warning(f"Inicjalizacja SPEXFA nie powiodła się: {e}. Fallback do liczb losowych.")
-
-    if st_init is not None and st_fix_indices:
-        for i, fix_idx in enumerate(st_fix_indices):
-            if fix_idx < rank:
-                final_st_init[fix_idx, :] = st_init[i, :]
+            spex_res = run_spexfa(d, rank)
+            st_init = spex_res['pure_spectra'].T
+        except Exception:
+            pass
 
     mcr = McrAR(max_iter=max_iter, tol_err_change=tol_err_change,
                 c_regr=c_regr, st_regr=st_regr,
                 c_constraints=c_constraints, st_constraints=[])
 
-    mcr.fit(D_matrix, ST=final_st_init, st_fix=st_fix_indices)
-
-    C_full = np.full((n_rows * m_cols, rank), np.nan)
-    C_full[valid_mask, :] = mcr.C_opt_
+    mcr.fit(D_samples, ST=st_init)
 
     return {
-        'C': C_full if is_tensor else C_full.reshape(n_samples, rank),
-        'ST': mcr.ST_opt_.T,  # Kształt: (liczby falowe x rank)
+        'pure_concentrations': mcr.C_opt_,      # (Próbki x rank)
+        'pure_spectra': mcr.ST_opt_.T,          # (Liczby falowe x rank)
         'rank': rank,
-        'converged': getattr(mcr, 'converged', True)
+        'iterations': getattr(mcr, 'n_iter_', max_iter)
+    }
+
+try:
+    import tensorly as tl
+    HAS_TENSORLY = True
+except ImportError:
+    HAS_TENSORLY = False
+
+
+def run_parafac(tensor_3d: np.ndarray, rank: int, non_negative: bool = False) -> Dict[str, Any]:
+    """
+    Dekompozycja PARAFAC (CANDECOMP) dla tensora 3D (W x N x M).
+    Zwraca wyizolowane widma (Mode 0) oraz trendy zmian wzdłuż wymiarów N i M.
+    """
+    if not HAS_TENSORLY:
+        raise ImportError("Brak biblioteki `tensorly`. Zainstaluj ją wpisując: pip install tensorly")
+
+    if tensor_3d.ndim != 3:
+        raise ValueError(f"PARAFAC wymaga tensora 3D (otrzymano tablicę o wymiarze {tensor_3d.ndim}D).")
+
+    tensor_clean = np.nan_to_num(tensor_3d, nan=0.0)
+
+    if non_negative:
+        weights, factors = tl.decomposition.non_negative_parafac(tensor_clean, rank=rank, init='random', n_iter_max=150)
+    else:
+        weights, factors = tl.decomposition.parafac(tensor_clean, rank=rank, n_iter_max=150)
+
+    return {
+        'pure_spectra': factors[0],      # Wymiar (W x rank)
+        'mode1_trends': factors[1],      # Wymiar (N x rank)
+        'mode2_trends': factors[2],      # Wymiar (M x rank)
+        'weights': weights,
+        'rank': rank
+    }
+
+def run_fsmwefa(d: np.ndarray, window_size: int = 7) -> Dict[str, Any]:
+    """Fixed-Size Moving Window EFA (FSMWEFA)."""
+    r, c = d.shape
+    if window_size % 2 == 0:
+        window_size += 1
+    if window_size >= c:
+        raise ValueError("Szerokość okna musi być mniejsza od liczby próbek w serii.")
+
+    half_w = window_size // 2
+    max_factors = min(r, window_size)
+    efa_matrix = np.full((max_factors, c), np.nan)
+
+    for i in range(c - window_size + 1):
+        sub = d[:, i:i + window_size]
+        _, s_vec, _ = svd(sub, full_matrices=False)
+        center_idx = i + half_w
+        efa_matrix[:len(s_vec), center_idx] = s_vec
+
+    return {
+        'efa_matrix': efa_matrix,
+        'max_factors': max_factors,
+        'window_size': window_size
     }
 
 
-# --- 4. SPEKTROSKOPIA KORELACYJNA 2D (2D-COS) ---
-
-def calculate_2dcos(D: np.ndarray) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-    """
-    Oblicza synchroniczną (Phi) i asynchroniczną (Psi) macierz korelacji 2D.
-    D: macierz widm dynamicznych (Wiersze: liczby falowe, Kolumny: zmienna perturbująca).
-    """
-    n_features, n_samples = D.shape
+def calculate_2dcos(d: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Wyznacza mapę synchroniczną (Phi) i asynchroniczną (Psi) dla 2D-COS."""
+    n_features, n_samples = d.shape
     if n_samples < 2:
-        return None, None
+        raise ValueError("Zbyt mało próbek do 2D-COS (wymagane min. 2).")
 
-    mean_spec = D.mean(axis=1, keepdims=True)
-    Y = D - mean_spec
-    Phi = (1.0 / (n_samples - 1)) * (Y @ Y.T)
+    mean_spec = d.mean(axis=1, keepdims=True)
+    y = d - mean_spec
+    phi = (1.0 / (n_samples - 1)) * (y @ y.T)
 
-    # Macierz Hilberta-Nody
-    N = np.zeros((n_samples, n_samples))
+    n_mat = np.zeros((n_samples, n_samples))
     for i in range(n_samples):
         for j in range(n_samples):
             if i != j:
-                N[i, j] = 1.0 / (np.pi * (j - i))
+                n_mat[i, j] = 1.0 / (np.pi * (j - i))
 
-    Psi = (1.0 / (n_samples - 1)) * (Y @ N @ Y.T)
-    return Phi, Psi
+    psi = (1.0 / (n_samples - 1)) * (y @ n_mat @ y.T)
+    return phi, psi

@@ -24,6 +24,7 @@ class SpectroCanvas(QWidget):
     """Zintegrowany wykres z obsługą Smart Zoom, interakcji FTIR i macOS."""
 
     peak_add_requested = Signal(float, float)
+    dft_mode_selected = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -72,7 +73,20 @@ class SpectroCanvas(QWidget):
         self.canvas.mpl_connect('motion_notify_event', self._on_motion)
         self.canvas.mpl_connect('button_release_event', self._on_release)
 
+    def prepare_axes(self, shared_x: bool = True):
+        """Konfiguruje dolną oś X (współdzielona dla FTIR / niezależna dla profili stężeń)."""
+        self._deconv_cache = None
+        self.ax_main.clear()
+        self.ax_sub.remove()
+        if shared_x:
+            self.ax_sub = self.fig.add_subplot(4, 1, 4, sharex=self.ax_main)
+        else:
+            self.ax_sub = self.fig.add_subplot(4, 1, 4)
+        self.fig.subplots_adjust(left=0.08, right=0.96, top=0.94, bottom=0.08, hspace=0.25)
+        self._apply_styling()
+
     def redraw_all(self, *args):
+        self.prepare_axes(shared_x=True)
         self._deconv_cache = None
         self.ax_main.clear()
         self.ax_sub.clear()
@@ -97,6 +111,15 @@ class SpectroCanvas(QWidget):
             self.ax_main.plot(spec.wavenumbers, spec.intensities, label=spec.name,
                               color=color, lw=lw, alpha=alpha)
             all_wns.append(spec.wavenumbers)
+
+            if hasattr(spec, 'stick_freqs') and spec.stick_freqs is not None and len(spec.stick_freqs) > 0:
+                s = getattr(spec, 'scale_factor', 1.0)
+                f_scaled = spec.stick_freqs * s
+                max_y = np.max(spec.intensities) if len(spec.intensities) > 0 and np.max(spec.intensities) > 0 else 1.0
+                max_i = np.max(spec.stick_intens) if len(spec.stick_intens) > 0 and np.max(
+                    spec.stick_intens) > 0 else 1.0
+                h = (spec.stick_intens / max_i) * max_y * 0.95
+                self.ax_main.vlines(f_scaled, 0, h, color=color, alpha=0.75, lw=1.2, ls='-', zorder=2.8)
 
         if all_wns:
             min_x = min(np.min(w) for w in all_wns)
@@ -208,6 +231,66 @@ class SpectroCanvas(QWidget):
                              np.max(active_spec.intensities) + margin)
         self.canvas.draw_idle()
 
+    def update_decomposition_overlay(
+            self,
+            target_spec: SpectrumData,
+            fitted_y: np.ndarray,
+            components: List[np.ndarray],
+            comp_names: List[str],
+            peaks_curves: List[np.ndarray],
+            excess_residual: np.ndarray,
+            fit_residual: np.ndarray
+    ):
+        """Wyświetla wyniki dekompozycji Monte Carlo / HDO na wykresie dwupanelowym."""
+        self._deconv_cache = None
+        self.ax_main.clear()
+        self.ax_sub.clear()
+        self._apply_styling()
+
+        if target_spec is None:
+            self.canvas.draw_idle()
+            return
+
+        wn = target_spec.wavenumbers
+
+        # 1. Panel górny: Eksperyment, Fit całkowity oraz składowe
+        self.ax_main.plot(wn, target_spec.intensities, label="W₀ (Eksperyment)",
+                          color="#ffffff", lw=1.6, zorder=3)
+        self.ax_main.plot(wn, fitted_y, label="Fit Całkowity",
+                          color="#ee6c4d", lw=1.4, ls="--", zorder=4)
+
+        palette = ['#2a9d8f', '#f4a261', '#98c1d9', '#e76f51', '#b5e48c', '#d88c9a']
+        for idx, comp in enumerate(components):
+            name = comp_names[idx] if idx < len(comp_names) else f"W{idx + 1}"
+            c = palette[idx % len(palette)]
+            self.ax_main.plot(wn, comp, label=f"c·{name}", color=c, lw=1.2, ls=":", alpha=0.9, zorder=2.5)
+
+        for idx, p_curve in enumerate(peaks_curves):
+            self.ax_main.plot(wn, p_curve, color="#e0aaff", lw=1.0, ls="-.", alpha=0.8,
+                              label=f"Pik GxL {idx + 1}" if idx == 0 else None, zorder=2.4)
+
+        self.ax_main.legend(loc='upper right', facecolor='#2b2b36', edgecolor='#4a4a5a',
+                            labelcolor='#ffffff', fontsize=8)
+
+        # 2. Panel dolny: Czyste residuum nadmiarowe oraz błąd fitu
+        self.ax_sub.plot(wn, excess_residual, color="#00ffcc", lw=1.1, label="Residuum nadmiarowe (W₀ - Σ cᵢWᵢ)")
+        self.ax_sub.plot(wn, fit_residual, color="#6c757d", lw=0.8, ls=":", label="Residuum dopasowania")
+        self.ax_sub.axhline(0, color="#ee6c4d", lw=0.6, ls=":")
+        self.ax_sub.set_ylabel("Residua", color="#dcdcdc", fontsize=9)
+        self.ax_sub.legend(loc='upper right', facecolor='#2b2b36', edgecolor='#4a4a5a',
+                           labelcolor='#ffffff', fontsize=7)
+
+        # Ustalenie granic osi X (malejąco dla FTIR)
+        self.ax_main.set_xlim(np.max(wn), np.min(wn))
+        y_span = np.max(target_spec.intensities) - np.min(target_spec.intensities)
+        margin = max(y_span * 0.1, 0.01)
+        self.ax_main.set_ylim(np.min(target_spec.intensities) - margin,
+                              np.max(target_spec.intensities) + margin)
+
+        self.initial_xlim = (np.max(wn), np.min(wn))
+        self.initial_ylim = self.ax_main.get_ylim()
+        self.canvas.draw_idle()
+
     def _on_press(self, event):
         if event.inaxes != self.ax_main:
             return
@@ -234,6 +317,19 @@ class SpectroCanvas(QWidget):
                                        fill=True, facecolor='#ee6c4d', alpha=0.2,
                                        edgecolor='#ee6c4d', linestyle='--', lw=1)
             self.ax_main.add_patch(self.zoom_rect)
+        # Detekcja kliknięcia w pałeczkę drgań DFT dla aktywnego widma
+        active = session.active_spectrum
+        if event.button == 1 and not is_modifier_held and hasattr(active,
+                                                                  'stick_freqs') and active.stick_freqs is not None:
+            s = getattr(active, 'scale_factor', 1.0)
+            scaled_freqs = active.stick_freqs * s
+            dists = np.abs(scaled_freqs - event.xdata)
+            closest_idx = int(np.argmin(dists))
+
+            # Tolerancja kliknięcia: 15 cm^-1
+            if dists[closest_idx] <= 15.0:
+                self.dft_mode_selected.emit(closest_idx)
+                return
 
     def _on_motion(self, event):
         if event.button != 1 or self.zoom_start is None or event.inaxes != self.ax_main:

@@ -25,6 +25,11 @@ from gui.workspaces.ws_deconvolution import DeconvolutionPanel
 from gui.workspaces.ws_chemometrics import ChemometricsPanel
 from gui.workspaces.ws_quantum import QuantumPanel
 
+from io_hub.exporters.excel_exporter import ExcelProjectExporter
+from io_hub.exporters.ascii_exporter import ASCIIExporter
+from io_hub.exporters.spc_exporter import SPCExporter
+from io_hub.exporters.jcamp_exporter import JCAMPExporter
+
 logger = logging.getLogger("SpectroHub")
 
 DARK_STYLE = """
@@ -108,6 +113,19 @@ class MainWindow(QMainWindow):
         self.act_open.triggered.connect(self._on_open_files)
         self.menu_file.addAction(self.act_open)
 
+        self.menu_file.addSeparator()
+
+        # Eksporty
+        self.act_export_excel = QAction(self)
+        self.act_export_excel.triggered.connect(self._on_export_excel)
+        self.menu_file.addAction(self.act_export_excel)
+
+        self.act_export_active = QAction(self)
+        self.act_export_active.triggered.connect(self._on_export_active_spectrum)
+        self.menu_file.addAction(self.act_export_active)
+
+        self.menu_file.addSeparator()
+
         self.act_exit = QAction(self)
         self.act_exit.setShortcut(QKeySequence.Quit)
         self.act_exit.triggered.connect(self.close)
@@ -118,6 +136,10 @@ class MainWindow(QMainWindow):
         self.act_clear = QAction(self)
         self.act_clear.triggered.connect(session.clear_all)
         self.menu_tools.addAction(self.act_clear)
+
+        self.act_tensor_builder = QAction(tr("menu.tensor_builder", "Kreator Serii & Tensora 3D..."), self)
+        self.act_tensor_builder.triggered.connect(self._open_tensor_builder)
+        self.menu_tools.addAction(self.act_tensor_builder)
 
     def _create_workspace_toolbar(self):
         toolbar = QToolBar("Workspaces", self)
@@ -182,10 +204,76 @@ class MainWindow(QMainWindow):
                 logger.error(f"Błąd otwarcia pliku {p}: {e}")
                 QMessageBox.critical(self, tr("app.error"), f"Błąd wczytania {os.path.basename(p)}:\n{e}")
 
+    def _open_tensor_builder(self):
+        from gui.tensor_builder_dialog import TensorBuilderDialog
+        dialog = TensorBuilderDialog(self)
+        dialog.exec()
+
+    def _on_export_excel(self):
+        spectra = list(session.spectra.values())
+        if not spectra:
+            QMessageBox.information(self, tr("app.info"), tr("export.no_spectra", "Brak widm do eksportu."))
+            return
+
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("export.save_excel", "Zapisz projekt do Excela"),
+            "SpectroHub_Projekt.xlsx", "Skoroszyt Excel (*.xlsx)"
+        )
+        if not path:
+            return
+
+        try:
+            peaks = getattr(self.panel_deconv.panel_deconv, 'peaks', [])
+            ExcelProjectExporter.export(path, spectra, deconv_peaks=peaks)
+            QMessageBox.information(self, tr("app.info"),
+                                    tr("export.excel_success", "Pomyślnie wyeksportowano raport Excel!"))
+        except Exception as e:
+            logger.error(f"Błąd eksportu Excel: {e}")
+            QMessageBox.critical(self, tr("app.error"), f"Błąd zapisu pliku Excel:\n{e}")
+
+    def _on_export_active_spectrum(self):
+        active = session.active_spectrum
+        if not active:
+            QMessageBox.warning(self, tr("app.warning"), tr("export.no_active", "Brak aktywnego widma."))
+            return
+
+        filters = (
+            "CSV - Międzynarodowy (*.csv);;"
+            "CSV - Polski format (*.csv);;"
+            "Thermo Grams SPC (*.spc);;"
+            "JCAMP-DX (*.dx);;"
+            "Plik tekstowy DPT (*.dpt)"
+        )
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self, tr("export.save_spectrum", "Eksportuj aktywne widmo"),
+            f"{active.name}.csv", filters
+        )
+        if not path:
+            return
+
+        try:
+            if "Polski" in selected_filter:
+                ASCIIExporter.export_spectrum_data(active, path, style="PL")
+            elif "SPC" in selected_filter:
+                SPCExporter.export_spectrum(active, path)
+            elif "JCAMP" in selected_filter:
+                JCAMPExporter.export_spectrum(active, path)
+            elif "DPT" in selected_filter:
+                ASCIIExporter.export_spectrum_data(active, path, style="EU")
+            else:
+                ASCIIExporter.export_spectrum_data(active, path, style="EU")
+
+            QMessageBox.information(self, tr("app.info"), tr("export.single_success", "Widmo zostało wyeksportowane."))
+        except Exception as e:
+            logger.error(f"Błąd eksportu widma: {e}")
+            QMessageBox.critical(self, tr("app.error"), f"Błąd zapisu widma:\n{e}")
+
     def retranslate_ui(self):
         self.setWindowTitle(tr("app.title", "SpectroHub - Platforma Analizy FTIR & DFT"))
         self.menu_file.setTitle(tr("menu.file", "Plik"))
         self.act_open.setText(tr("menu.open_spectra", "Dodaj pliki widm..."))
+        self.act_export_excel.setText(tr("menu.export_excel", "Eksportuj projekt do Excela (.xlsx)..."))
+        self.act_export_active.setText(tr("menu.export_active", "Eksportuj aktywne widmo jako..."))
         self.act_exit.setText(tr("menu.exit", "Wyjdź"))
         self.menu_tools.setTitle(tr("menu.tools", "Narzędzia"))
         self.act_clear.setText(tr("menu.clear", "Wyczyść sesję"))
