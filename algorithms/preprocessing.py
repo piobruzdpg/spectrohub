@@ -45,7 +45,11 @@ def baseline_linear(x: np.ndarray, y: np.ndarray, x1: float, x2: float) -> np.nd
     idx1 = np.abs(x - x1).argmin()
     idx2 = np.abs(x - x2).argmin()
 
-    slope = (y[idx2] - y[idx1]) / (x[idx2] - x[idx1])
+    denom = x[idx2] - x[idx1]
+    if abs(denom) < 1e-12:
+        return np.zeros_like(y)
+
+    slope = (y[idx2] - y[idx1]) / denom
     intercept = y[idx1] - slope * x[idx1]
     return slope * x + intercept
 
@@ -69,8 +73,13 @@ def apply_savgol(y: np.ndarray, window: int = 11, poly: int = 3, deriv: int = 0)
     raise ValueError("Obsługiwane są wyłącznie tablice 1D oraz 2D.")
 
 
-def get_second_derivative_inverted(x: np.ndarray, y: np.ndarray, window: int = 11, poly: int = 3) -> Tuple[
-    np.ndarray, np.ndarray]:
+def get_first_derivative(x: np.ndarray, y: np.ndarray, window: int = 11, poly: int = 3) -> Tuple[np.ndarray, np.ndarray]:
+    """Pierwsza pochodna sygnału (d1y/dx1) za pomocą Savitzky-Golay."""
+    deriv1 = apply_savgol(y, window=window, poly=poly, deriv=1)
+    return x, deriv1
+
+
+def get_second_derivative_inverted(x: np.ndarray, y: np.ndarray, window: int = 11, poly: int = 3) -> Tuple[np.ndarray, np.ndarray]:
     """
     Druga pochodna z odwróconym znakiem (-1 * d2y/dx2).
     Minima pasm FTIR stają się dodatnimi maksimami ułatwiającymi lokalizację pasm ukrytych.
@@ -185,3 +194,10 @@ def apply_msc(matrix_2d: np.ndarray) -> np.ndarray:
             corrected[:, col] = y - intercept
 
     return corrected
+
+
+# --- 5. ALIASY ZGODNOŚCI WSTECZNEJ ---
+min_max_scale = apply_min_max
+snv = apply_snv
+smooth_savitzky_golay = apply_savgol
+vector_norm_l2 = apply_vector_norm_l2

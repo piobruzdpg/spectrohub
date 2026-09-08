@@ -106,7 +106,7 @@ class MainWindow(QMainWindow):
     def _create_menu_bar(self):
         menu = self.menuBar()
 
-        # Plik
+        # 1. Menu Plik
         self.menu_file = menu.addMenu("")
         self.act_open = QAction(self)
         self.act_open.setShortcut(QKeySequence.Open)
@@ -115,7 +115,6 @@ class MainWindow(QMainWindow):
 
         self.menu_file.addSeparator()
 
-        # Eksporty
         self.act_export_excel = QAction(self)
         self.act_export_excel.triggered.connect(self._on_export_excel)
         self.menu_file.addAction(self.act_export_excel)
@@ -131,7 +130,18 @@ class MainWindow(QMainWindow):
         self.act_exit.triggered.connect(self.close)
         self.menu_file.addAction(self.act_exit)
 
-        # Narzędzia
+        # 2. Menu Edycja (Globalne Undo / Redo)
+        self.menu_edit = menu.addMenu("Edycja")
+
+        self.act_undo = session.undo_stack.createUndoAction(self, "Cofnij")
+        self.act_undo.setShortcut(QKeySequence.Undo)  # Ctrl+Z / Cmd+Z
+        self.menu_edit.addAction(self.act_undo)
+
+        self.act_redo = session.undo_stack.createRedoAction(self, "Ponów")
+        self.act_redo.setShortcut(QKeySequence.Redo)  # Ctrl+Y / Cmd+Shift+Z
+        self.menu_edit.addAction(self.act_redo)
+
+        # 3. Menu Narzędzia
         self.menu_tools = menu.addMenu("")
         self.act_clear = QAction(self)
         self.act_clear.triggered.connect(session.clear_all)
@@ -187,6 +197,11 @@ class MainWindow(QMainWindow):
         self.inspector_stack.setCurrentIndex(idx)
         self.status_bar.showMessage(f"{tr('app.ready')}: Workspace {idx + 1}")
 
+        # Jeśli wracamy do Preprocessingu (lub DFT), przywracamy domyślny podgląd projektu
+        if idx in (0, 3):
+            self.canvas_2d.prepare_axes(shared_x=True)
+            self.canvas_2d.redraw_all()
+
     def _toggle_language(self):
         new_lang = "en" if i18n.current_language == "pl" else "pl"
         i18n.set_language(new_lang)
@@ -196,13 +211,13 @@ class MainWindow(QMainWindow):
             self, tr("menu.open_spectra"), "",
             "Obsługiwane widma (*.0 *.[0-9]* *.opus *.spa *.spg *.spc *.dx *.jdx *.csv *.dpt *.txt *.log);;Wszystkie (*.*)"
         )
-        for p in paths:
-            try:
-                specs = SpectrumImportDispatcher.load_file(p)
-                session.add_spectra_batch(specs)
-            except Exception as e:
-                logger.error(f"Błąd otwarcia pliku {p}: {e}")
-                QMessageBox.critical(self, tr("app.error"), f"Błąd wczytania {os.path.basename(p)}:\n{e}")
+        if paths:
+            # Uruchamiamy FileImportWorker w tle przez globalny QThreadPool,
+            # żeby nie blokować interfejsu i załadować wszystko jednym wsadem!
+            from PySide6.QtCore import QThreadPool
+            from gui.project_tree import FileImportWorker
+            worker = FileImportWorker(paths)
+            QThreadPool.globalInstance().start(worker)
 
     def _open_tensor_builder(self):
         from gui.tensor_builder_dialog import TensorBuilderDialog

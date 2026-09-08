@@ -22,7 +22,6 @@ class SpectrumData:
     metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        # Wymuszenie float64 i spójności tablic
         self.wavenumbers = np.asarray(self.wavenumbers, dtype=np.float64)
         self.intensities = np.asarray(self.intensities, dtype=np.float64)
 
@@ -34,6 +33,21 @@ class SpectrumData:
     @property
     def n_points(self) -> int:
         return len(self.wavenumbers)
+
+    def clone(self, new_name: Optional[str] = None) -> 'SpectrumData':
+        """Tworzy niezależną kopię głęboką widma w pamięci RAM."""
+        import copy
+        return SpectrumData(
+            wavenumbers=self.wavenumbers.copy(),
+            intensities=self.intensities.copy(),
+            name=new_name if new_name else self.name,
+            file_path=self.file_path,
+            file_type=self.file_type,
+            time_str=self.time_str,
+            units_x=self.units_x,
+            units_y=self.units_y,
+            metadata=copy.deepcopy(self.metadata)
+        )
 
 @dataclass
 class SpectralSeries:
@@ -50,6 +64,10 @@ class SpectralSeries:
     axis_m_values: Optional[np.ndarray] = None  # Wartości fizyczne (np. mol/dm³)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self):
+        self.wavenumbers = np.asarray(self.wavenumbers, dtype=np.float64)
+        self.data = np.asarray(self.data, dtype=np.float64)
+
     @property
     def is_3d(self) -> bool:
         return self.data.ndim == 3
@@ -58,12 +76,48 @@ class SpectralSeries:
     def shape(self) -> tuple:
         return self.data.shape
 
+    @property
+    def n_spectra(self) -> int:
+        """Zwraca całkowitą liczbę widm składowych serii."""
+        if self.is_3d:
+            return self.data.shape[1] * self.data.shape[2]
+        return self.data.shape[1] if self.data.ndim == 2 else 0
+
+    def get_spectrum_at(self, idx: int) -> SpectrumData:
+        """Zwraca konkretną klatkę serii jako samodzielny obiekt SpectrumData."""
+        if self.is_3d:
+            w, n, m = self.data.shape
+            n_idx = idx // m
+            m_idx = idx % m
+            y = self.data[:, n_idx, m_idx]
+            val_n = self.axis_n_values[n_idx] if self.axis_n_values is not None else n_idx
+            val_m = self.axis_m_values[m_idx] if self.axis_m_values is not None else m_idx
+            frame_name = f"{self.name}_({self.axis_n_name}={val_n}_{self.axis_m_name}={val_m})"
+        else:
+            y = self.data[:, idx]
+            val_n = self.axis_n_values[idx] if self.axis_n_values is not None else idx
+            frame_name = f"{self.name}_({self.axis_n_name}={val_n})"
+
+        return SpectrumData(
+            wavenumbers=self.wavenumbers.copy(),
+            intensities=y.copy(),
+            name=frame_name,
+            file_path="",
+            file_type="series_frame",
+            metadata={"parent_series": self.name, "index": idx}
+        )
+
+    def get_all_spectra(self) -> List[SpectrumData]:
+        """Zwraca listę wszystkich widm wchodzących w skład serii."""
+        return [self.get_spectrum_at(i) for i in range(self.n_spectra)]
+
     def get_matrix_2d(self) -> np.ndarray:
         """Zwraca widma spłaszczone do macierzy 2D (W x Próbki) dla metod takich jak PCA/SVD."""
         if self.data.ndim == 2:
             return self.data
         w, n, m = self.data.shape
         return self.data.reshape(w, n * m)
+
 
 @dataclass
 class GaussianData(SpectrumData):
@@ -76,3 +130,26 @@ class GaussianData(SpectrumData):
     atomnos: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
     coords: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float64))
     Lx: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=np.float64))
+
+    def clone(self, new_name: Optional[str] = None) -> 'GaussianData':
+        """Tworzy niezależną kopię głęboką danych kwantowych DFT."""
+        import copy
+        return GaussianData(
+            wavenumbers=self.wavenumbers.copy(),
+            intensities=self.intensities.copy(),
+            name=new_name if new_name else self.name,
+            file_path=self.file_path,
+            file_type=self.file_type,
+            time_str=self.time_str,
+            units_x=self.units_x,
+            units_y=self.units_y,
+            metadata=copy.deepcopy(self.metadata),
+            stick_freqs=self.stick_freqs.copy() if self.stick_freqs is not None else np.array([]),
+            stick_intens=self.stick_intens.copy() if self.stick_intens is not None else np.array([]),
+            ped_results=copy.deepcopy(self.ped_results),
+            hessian_source=self.hessian_source,
+            scale_factor=self.scale_factor,
+            atomnos=self.atomnos.copy() if self.atomnos is not None else np.array([]),
+            coords=self.coords.copy() if self.coords is not None else np.empty((0, 3)),
+            Lx=self.Lx.copy() if self.Lx is not None else np.empty((0, 0))
+        )

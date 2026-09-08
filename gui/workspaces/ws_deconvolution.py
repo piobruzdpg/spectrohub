@@ -203,11 +203,27 @@ class AmideDeconvPanel(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._ensure_canvas_connected()
-        self._update_curves_and_canvas()
+        if self.peaks or self.show_deriv:
+            self._update_curves_and_canvas()
+        else:
+            canvas = self._get_canvas()
+            if canvas:
+                canvas.redraw_all()
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        canvas = self._get_canvas()
+        if canvas:
+            canvas.redraw_all()
 
     def _on_active_spectrum_changed(self, spectrum):
         self._ensure_canvas_connected()
-        self._update_curves_and_canvas()
+        # Bezpiecznik: rysujemy nakładkę tylko jeśli Workspace 2 jest widoczny
+        # i faktycznie mamy zdefiniowane pasma lub włączoną pochodną!
+        if not self.isVisible():
+            return
+        if self.peaks or self.show_deriv:
+            self._update_curves_and_canvas()
 
     def _is_general_mode(self) -> bool:
         return self.combo_mode.currentIndex() == 1
@@ -397,13 +413,8 @@ class AmideDeconvPanel(QWidget):
             combo_t.setCurrentText(p['type'])
             combo_t.blockSignals(False)
 
-            # Col 2: Pozycja
             self._set_or_update_item(row, 2, f"{p['center']:.1f}")
-
-            # Col 3: FWHM
             self._set_or_update_item(row, 3, f"{fwhm:.1f}")
-
-            # Col 4: Pole
             self._set_or_update_item(row, 4, f"{p['area']:.2f}")
 
             # Col 5: %
@@ -849,7 +860,7 @@ class GeneralizedDecompositionPanel(QWidget):
         self.lbl_status.setStyleSheet("color: #a0a0a0; font-size: 11px;")
         layout.addWidget(self.lbl_status)
 
-        # 6. Sekcja Wyników & Wstrzykiwania danych do sesji
+        # 6. Wyniki & Eksport
         group_results = QGroupBox("5. Wyniki & Eksport")
         self.group_results = group_results
         l_res = QVBoxLayout(group_results)
@@ -902,7 +913,6 @@ class GeneralizedDecompositionPanel(QWidget):
 
     @staticmethod
     def _sync_combo_items(combo: QComboBox, new_items: list):
-        """Aktualizuje elementy QComboBox bez użycia .clear(), chroniąc Cocoa Accessibility."""
         current_items = [combo.itemText(i) for i in range(combo.count())]
         if current_items == new_items:
             return
@@ -910,19 +920,16 @@ class GeneralizedDecompositionPanel(QWidget):
         current_val = combo.currentText()
         combo.blockSignals(True)
 
-        # 1. Usuń tylko te elementy, których już nie ma w sesji
         for item in current_items:
             if item not in new_items:
                 idx = combo.findText(item)
                 if idx >= 0:
                     combo.removeItem(idx)
 
-        # 2. Dodaj nowe elementy, zachowując istniejące
         for item in new_items:
             if combo.findText(item) < 0:
                 combo.addItem(item)
 
-        # 3. Przywróć zaznaczenie
         if current_val in new_items:
             combo.setCurrentText(current_val)
 
@@ -930,13 +937,10 @@ class GeneralizedDecompositionPanel(QWidget):
 
     def _refresh_combos(self):
         all_names = list(session.spectra.keys())
-
-        # Synchronizacja widma badanego W0
         self._sync_combo_items(self.combo_target, all_names)
         if not self.combo_target.currentText() and session.active_spectrum:
             self.combo_target.setCurrentText(session.active_spectrum.name)
 
-        # Synchronizacja widm bazowych w tabeli bez usuwania obiektów
         for row in range(self.table_bases.rowCount()):
             combo = self.table_bases.cellWidget(row, 0)
             if isinstance(combo, QComboBox):
@@ -1077,7 +1081,6 @@ class GeneralizedDecompositionPanel(QWidget):
             f"R²: {results['r2']:.5f} | RMSE: {results['rmse']:.5f} | Red-χ²: {results['chi2_red']:.2e}"
         )
 
-        # Od razu rysujemy dopasowanie i residuum na wykresie
         self._update_canvas_plot()
 
     def _get_canvas(self):
@@ -1100,7 +1103,6 @@ class GeneralizedDecompositionPanel(QWidget):
             if self.table_bases.cellWidget(r, 0)
         ]
 
-        # Utworzenie tymczasowego obiektu przeskalowanego przez N do poprawnego podglądu osi
         scaled_target = SpectrumData(
             wavenumbers=target_spec.wavenumbers,
             intensities=target_spec.intensities * self.spin_n.value(),
@@ -1118,29 +1120,6 @@ class GeneralizedDecompositionPanel(QWidget):
                 peaks_curves=self.last_results.get('peaks_curves', []),
                 excess_residual=self.last_results['excess_residual'],
                 fit_residual=scaled_target.intensities - self.last_results['fitted_curve']
-            )
-
-    def _update_canvas_plot(self):
-        canvas = self._get_canvas()
-        if not canvas or not self.last_results:
-            return
-
-        target_name = self.combo_target.currentText()
-        target_spec = session.spectra.get(target_name)
-        if not target_spec:
-            return
-
-        # Przekazanie kompletu krzywych do canvasu
-        if hasattr(canvas, "update_decomposition_overlay"):
-            canvas.update_decomposition_overlay(
-                target_spec=target_spec,
-                fitted_y=self.last_results['fitted_curve'],
-                components=self.last_results['scaled_components'],
-                comp_names=[self.table_bases.cellWidget(r, 0).currentText() for r in
-                            range(self.table_bases.rowCount())],
-                peaks_curves=self.last_results.get('peaks_curves', []),
-                excess_residual=self.last_results['excess_residual'],
-                fit_residual=target_spec.intensities * self.spin_n.value() - self.last_results['fitted_curve']
             )
 
     def _on_worker_error(self, err: str):
@@ -1225,7 +1204,7 @@ class GeneralizedDecompositionPanel(QWidget):
 
 
 # =====================================================================
-# GŁÓWNY WIDOK PERSPEKTYWY ROBOCZEJ (ZARZĄDCA PODZAKŁADEK)
+# GŁÓWNY WIDOK PERSPEKTYWY ROBOCZEJ
 # =====================================================================
 
 class DeconvolutionWorkspace(QWidget):
@@ -1252,5 +1231,4 @@ class DeconvolutionWorkspace(QWidget):
         self.tabs.setTabText(1, tr("deconv.tab_decomp", "🧪 Dekompozycja HDO / Widm"))
 
 
-# Alias wstecznej zgodności pod importy z main_window.py
 DeconvolutionPanel = DeconvolutionWorkspace

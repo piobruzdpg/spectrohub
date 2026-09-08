@@ -1,58 +1,279 @@
 """
 gui/workspaces/ws_preprocessing.py
 Panel preprocessingu i przygotowania danych spektroskopowych (Workspace 1).
-Zintegrowany z silnikiem hurtowej kompensacji VaporFit (Batch), AsLS, SG i QUndoStack.
+Zintegrowany z silnikiem Pipeline Managera (edycja parametrów, reordering, batch, in-place z Undo),
+korekcją offsetu w wybranym punkcie oraz pełną obsługą historii QUndoStack.
 """
+
+import copy
+import logging
+from typing import List, Dict, Any, Tuple, Optional
+import numpy as np
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QLineEdit, QGroupBox, QMessageBox, QDialog, QComboBox,
     QListWidget, QListWidgetItem, QScrollArea, QFrame,
-    QProgressBar, QApplication
+    QProgressBar, QApplication, QCheckBox, QFormLayout,
+    QDialogButtonBox, QSpinBox, QDoubleSpinBox
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QUndoCommand
-import numpy as np
-import logging
 
 from core.session import session
-from core.models import SpectrumData
+from core.models import SpectrumData, SpectralSeries
 from core.i18n import tr, i18n
 from algorithms import preprocessing as prep
 from algorithms.atmospheric import AtmosphericCorrectionEngine
 
 logger = logging.getLogger("SpectroHub")
 
+# ==============================================================================
+# DIALOG EDYCJI PARAMETRÓW KROKU POTOKU
+# ==============================================================================
+class StepParamDialog(QDialog):
+    """Modalne okno pozwalające edytować parametry dowolnego kroku potoku."""
+
+    def __init__(self, step: Dict[str, Any], parent=None):
+        super().__init__(parent)
+        self.step = step
+        self.setWindowTitle(f"Parametry kroku: {step.get('type', '')}")
+        self.resize(340, 200)
+        self.setModal(True)
+
+        self.layout = QVBoxLayout(self)
+        self.form = QFormLayout()
+        self.layout.addLayout(self.form)
+
+        stype = step.get('type', '')
+
+        if stype == 'crop':
+            self.spin_min = QDoubleSpinBox()
+            self.spin_min.setRange(0.0, 10000.0)
+            self.spin_min.setValue(step.get('min_w', 1000.0))
+            self.spin_max = QDoubleSpinBox()
+            self.spin_max.setRange(0.0, 10000.0)
+            self.spin_max.setValue(step.get('max_w', 1800.0))
+            self.form.addRow("Liczba falowa Min [cm⁻¹]:", self.spin_min)
+            self.form.addRow("Liczba falowa Max [cm⁻¹]:", self.spin_max)
+
+        elif stype == 'asls':
+            self.ent_lam = QLineEdit(f"{step.get('lam', 1e5):.0e}")
+            self.spin_p = QDoubleSpinBox()
+            self.spin_p.setRange(0.0001, 0.5)
+            self.spin_p.setDecimals(4)
+            self.spin_p.setSingleStep(0.001)
+            self.spin_p.setValue(step.get('p', 0.001))
+            self.form.addRow("Gładkość (λ):", self.ent_lam)
+            self.form.addRow("Asymetria (p):", self.spin_p)
+
+        elif stype in ['sg_smooth', 'deriv1', 'deriv2']:
+            self.spin_win = QSpinBox()
+            self.spin_win.setRange(3, 101)
+            self.spin_win.setSingleStep(2)
+            self.spin_win.setValue(step.get('win', 11))
+            self.spin_poly = QSpinBox()
+            self.spin_poly.setRange(1, 6)
+            self.spin_poly.setValue(step.get('poly', 3))
+            self.form.addRow("Szerokość okna (pkt):", self.spin_win)
+            self.form.addRow("Stopień wielomianu:", self.spin_poly)
+
+        elif stype == 'offset_point':
+            self.spin_target_wn = QDoubleSpinBox()
+            self.spin_target_wn.setRange(0.0, 10000.0)
+            self.spin_target_wn.setValue(step.get('target_wn', 2000.0))
+            self.form.addRow("Punkt zerowania ν [cm⁻¹]:", self.spin_target_wn)
+
+        else:
+            self.form.addRow(QLabel("Ten krok nie wymaga dodatkowych parametrów."))
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._save_and_accept)
+        btns.rejected.connect(self.reject)
+        self.layout.addWidget(btns)
+
+    def _save_and_accept(self):
+        stype = self.step.get('type', '')
+        try:
+            if stype == 'crop':
+                self.step['min_w'] = float(self.spin_min.value())
+                self.step['max_w'] = float(self.spin_max.value())
+                self.step['name'] = f"Przycięcie [{self.step['min_w']:.0f}–{self.step['max_w']:.0f}]"
+
+            elif stype == 'asls':
+                self.step['lam'] = float(self.ent_lam.text())
+                self.step['p'] = float(self.spin_p.value())
+                self.step['name'] = f"AsLS (λ={self.step['lam']:.0e}, p={self.step['p']})"
+
+            elif stype == 'sg_smooth':
+                self.step['win'] = int(self.spin_win.value())
+                self.step['poly'] = int(self.spin_poly.value())
+                self.step['name'] = f"SG Wygładzanie (okno={self.step['win']}, st={self.step['poly']})"
+
+            elif stype == 'deriv1':
+                self.step['win'] = int(self.spin_win.value())
+                self.step['poly'] = int(self.spin_poly.value())
+                self.step['name'] = f"1. Pochodna SG (okno={self.step['win']})"
+
+            elif stype == 'deriv2':
+                self.step['win'] = int(self.spin_win.value())
+                self.step['poly'] = int(self.spin_poly.value())
+                self.step['name'] = f"2. Pochodna SG (-) (okno={self.step['win']})"
+
+            elif stype == 'offset_point':
+                self.step['target_wn'] = float(self.spin_target_wn.value())
+                self.step['name'] = f"Offset w punkcie {self.step['target_wn']:.1f} cm⁻¹ ➔ 0"
+
+            self.accept()
+        except ValueError:
+            QMessageBox.warning(self, "Błąd", "Wprowadzono niepoprawny format liczby.")
+
 
 # ==============================================================================
-# KOMENDY HISTORII DLA OPERACJI PREPROCESSINGU (QUndoStack)
+# KOMENDY HISTORII (QUndoStack)
+# ==============================================================================
+# gui/workspaces/ws_preprocessing.py — poprawione klasy komend historii
+
+# ==============================================================================
+# KOMENDY HISTORII (QUndoStack)
 # ==============================================================================
 class ModifySpectrumCommand(QUndoCommand):
-    """Cofa lub ponawia operacje modyfikujące intensywności widma in-place."""
+    """Cofa lub ponawia modyfikację pojedynczego widma in-place."""
 
     def __init__(self, spec: SpectrumData, description: str,
                  old_y: np.ndarray, new_y: np.ndarray,
-                 old_x: np.ndarray = None, new_x: np.ndarray = None,
+                 old_x: Optional[np.ndarray] = None, new_x: Optional[np.ndarray] = None,
+                 old_meta: Optional[dict] = None, new_meta: Optional[dict] = None,
                  canvas=None):
         super().__init__(description)
         self.spec = spec
         self.old_y = old_y.copy()
         self.new_y = new_y.copy()
-        self.old_x = old_x.copy() if old_x is not None else None
-        self.new_x = new_x.copy() if new_x is not None else None
+        self.old_x = old_x.copy() if old_x is not None else spec.wavenumbers.copy()
+        self.new_x = new_x.copy() if new_x is not None else spec.wavenumbers.copy()
+        self.old_meta = copy.deepcopy(old_meta) if old_meta is not None else copy.deepcopy(spec.metadata)
+        self.new_meta = copy.deepcopy(new_meta) if new_meta is not None else copy.deepcopy(spec.metadata)
         self.canvas = canvas
 
     def undo(self):
+        self.spec.wavenumbers = self.old_x.copy()
         self.spec.intensities = self.old_y.copy()
-        if self.old_x is not None:
-            self.spec.wavenumbers = self.old_x.copy()
+        self.spec.metadata = copy.deepcopy(self.old_meta)
+        if hasattr(session, "spectrum_data_changed"):
+            session.spectrum_data_changed.emit(self.spec)
         if self.canvas:
             self.canvas.redraw_all()
 
     def redo(self):
+        self.spec.wavenumbers = self.new_x.copy()
         self.spec.intensities = self.new_y.copy()
-        if self.new_x is not None:
-            self.spec.wavenumbers = self.new_x.copy()
+        self.spec.metadata = copy.deepcopy(self.new_meta)
+        if hasattr(session, "spectrum_data_changed"):
+            session.spectrum_data_changed.emit(self.spec)
+        if self.canvas:
+            self.canvas.redraw_all()
+
+
+class BatchPipelineCommand(QUndoCommand):
+    """Cofa lub ponawia wykonanie potoku wsadowego na wielu widmach jednocześnie."""
+
+    def __init__(self, items: List[Tuple[SpectrumData, np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict, dict]],
+                 description: str, canvas=None):
+        super().__init__(description)
+        self.items = items
+        self.canvas = canvas
+
+    def undo(self):
+        modified_specs = []
+        for spec, old_x, old_y, _, _, old_meta, _ in self.items:
+            spec.wavenumbers = old_x.copy()
+            spec.intensities = old_y.copy()
+            spec.metadata = copy.deepcopy(old_meta)
+            modified_specs.append(spec)
+
+        if hasattr(session, "batch_spectra_changed"):
+            session.batch_spectra_changed.emit(modified_specs)
+        if self.canvas:
+            self.canvas.redraw_all()
+
+    def redo(self):
+        modified_specs = []
+        for spec, _, _, new_x, new_y, _, new_meta in self.items:
+            spec.wavenumbers = new_x.copy()
+            spec.intensities = new_y.copy()
+            spec.metadata = copy.deepcopy(new_meta)
+            modified_specs.append(spec)
+
+        if hasattr(session, "batch_spectra_changed"):
+            session.batch_spectra_changed.emit(modified_specs)
+        if self.canvas:
+            self.canvas.redraw_all()
+
+
+class ModifySeriesCommand(QUndoCommand):
+    """Cofa lub ponawia operacje in-place na serii 2D lub tensorze 3D."""
+
+    def __init__(self, series_obj: SpectralSeries, description: str,
+                 old_wn: np.ndarray, new_wn: np.ndarray,
+                 old_data: np.ndarray, new_data: np.ndarray,
+                 canvas=None):
+        super().__init__(description)
+        self.series_obj = series_obj
+        self.old_wn = old_wn.copy()
+        self.new_wn = new_wn.copy()
+        self.old_data = old_data.copy()
+        self.new_data = new_data.copy()
+        self.canvas = canvas
+
+    def undo(self):
+        self.series_obj.wavenumbers = self.old_wn.copy()
+        self.series_obj.data = self.old_data.copy()
+        if hasattr(session, "series_data_changed"):
+            session.series_data_changed.emit(self.series_obj)
+        if self.canvas:
+            self.canvas.redraw_all()
+
+    def redo(self):
+        self.series_obj.wavenumbers = self.new_wn.copy()
+        self.series_obj.data = self.new_data.copy()
+        if hasattr(session, "series_data_changed"):
+            session.series_data_changed.emit(self.series_obj)
+        if self.canvas:
+            self.canvas.redraw_all()
+
+
+class AddBatchSpectraCommand(QUndoCommand):
+    """Cofa lub ponawia dodanie wygenerowanych widm (np. proc_*, corr_*) do sesji lub okna."""
+
+    def __init__(self, spectra_list: List[SpectrumData], description: str,
+                 canvas=None, window_id: Optional[str] = None):
+        super().__init__(description)
+        self.spectra_list = spectra_list
+        self.window_id = window_id
+        self.registered_names: List[str] = []
+        self.canvas = canvas
+
+    def redo(self):
+        if self.window_id and self.window_id in session.windows:
+            self.registered_names = []
+            for spec in self.spectra_list:
+                added = session.add_spectrum_to_window(self.window_id, spec)
+                self.registered_names.append(added.name)
+        else:
+            session.add_spectra_batch(self.spectra_list)
+            self.registered_names = [s.name for s in self.spectra_list]
+
+        if self.canvas:
+            self.canvas.redraw_all()
+
+    def undo(self):
+        if self.window_id and self.window_id in session.windows:
+            for name in self.registered_names:
+                session.remove_spectrum_from_window(self.window_id, name)
+        else:
+            for name in self.registered_names:
+                session.remove_spectrum(name)
+
         if self.canvas:
             self.canvas.redraw_all()
 
@@ -61,7 +282,7 @@ class ModifySpectrumCommand(QUndoCommand):
 # DIALOG HURTOWEJ KOMPENSACJI ATMOSFERYCZNEJ (BATCH VAPORFIT)
 # ==============================================================================
 class VaporFitDialog(QDialog):
-    """Okno konfiguracji i uruchomienia kompensacji par wody i CO2 (pojedynczo lub hurtowo)."""
+    """Okno konfiguracji i uruchomienia kompensacji par wody i CO2."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -76,13 +297,11 @@ class VaporFitDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(8)
 
-        # 1. Górny panel z dwoma listami: Próbki (lewa) oraz Atmosfera (prawa)
         row_lists = QHBoxLayout()
 
-        # Lewa kolumna: Próbki do skorygowania
+        # Próbki
         box_samples = QGroupBox(tr("vapor.samples_group", "1. Widma badane do skorygowania"))
         l_samples = QVBoxLayout(box_samples)
-
         row_sample_tools = QHBoxLayout()
         btn_sel_all = QPushButton("Wszystkie")
         btn_sel_all.clicked.connect(lambda: self._set_all_checks(self.list_samples, Qt.Checked))
@@ -100,10 +319,9 @@ class VaporFitDialog(QDialog):
         l_samples.addWidget(self.list_samples)
         row_lists.addWidget(box_samples, stretch=1)
 
-        # Prawa kolumna: Widma referencyjne atmosfery
+        # Atmosfera
         box_atm = QGroupBox(tr("vapor.atm_group", "2. Widma odniesienia atmosfery (H₂O / CO₂)"))
         l_atm = QVBoxLayout(box_atm)
-
         row_atm_tools = QHBoxLayout()
         btn_atm_none = QPushButton("Odznacz wszystko")
         btn_atm_none.clicked.connect(lambda: self._set_all_checks(self.list_atm, Qt.Unchecked))
@@ -114,14 +332,12 @@ class VaporFitDialog(QDialog):
         self.list_atm = QListWidget()
         l_atm.addWidget(self.list_atm)
         row_lists.addWidget(box_atm, stretch=1)
-
         layout.addLayout(row_lists)
 
-        # 2. Parametry dopasowania
+        # Parametry
         box_params = QGroupBox(tr("vapor.params_group", "3. Parametry algorytmu optymalizacyjnego"))
         l_params = QVBoxLayout(box_params)
 
-        # Zakres, SG i Wybór trybu znaku
         row_inputs = QHBoxLayout()
         row_inputs.addWidget(QLabel("Zakres [cm⁻¹]:"))
         self.ent_min_wn = QLineEdit("1000")
@@ -140,7 +356,6 @@ class VaporFitDialog(QDialog):
         self.ent_sg_poly.setFixedWidth(30)
         row_inputs.addWidget(self.ent_sg_poly)
 
-        # Kontrolka znaku
         row_inputs.addWidget(QLabel("Kierunek:"))
         self.combo_sign = QComboBox()
         self.combo_sign.addItems(["Auto (Wygładź)", "Odejmij (-)", "Dodaj (+)"])
@@ -149,12 +364,10 @@ class VaporFitDialog(QDialog):
         self.btn_find_opt = QPushButton("🔍 Szukaj SG")
         self.btn_find_opt.clicked.connect(self._on_find_optimal_window)
         row_inputs.addWidget(self.btn_find_opt)
-
         l_params.addLayout(row_inputs)
-
         layout.addWidget(box_params)
 
-        # 3. Pasek postępu i diagnostyka
+        # Status
         self.frame_status = QFrame()
         self.frame_status.setStyleSheet("background-color: #252530; border-radius: 4px; padding: 6px;")
         l_status = QVBoxLayout(self.frame_status)
@@ -171,7 +384,7 @@ class VaporFitDialog(QDialog):
         l_status.addWidget(self.progress_bar)
         layout.addWidget(self.frame_status)
 
-        # 4. Przyciski akcji
+        # Przyciski
         row_actions = QHBoxLayout()
         self.btn_apply = QPushButton("⚡ Uruchom korekcję hurtową (Batch)")
         self.btn_apply.setStyleSheet("background-color: #2a9d8f; font-weight: bold; padding: 8px;")
@@ -204,7 +417,6 @@ class VaporFitDialog(QDialog):
         active = session.active_spectrum
         all_spectra = session.spectra
 
-        # Blokada zdarzeń i odświeżania w celu wyeliminowania ostrzeżeń Cocoa Accessibility na macOS
         self.list_samples.setUpdatesEnabled(False)
         self.list_atm.setUpdatesEnabled(False)
         self.list_samples.blockSignals(True)
@@ -214,7 +426,6 @@ class VaporFitDialog(QDialog):
         self.list_atm.clear()
 
         for name, spec in all_spectra.items():
-            # Pozycja na liście próbek
             item_s = QListWidgetItem(f"{name} ({spec.n_points} pkt)")
             item_s.setData(Qt.UserRole, name)
             item_s.setFlags(item_s.flags() | Qt.ItemIsUserCheckable)
@@ -222,11 +433,9 @@ class VaporFitDialog(QDialog):
             item_s.setCheckState(Qt.Checked if is_active else Qt.Unchecked)
             self.list_samples.addItem(item_s)
 
-            # Pozycja na liście atmosfery
             item_a = QListWidgetItem(f"{name} ({spec.n_points} pkt)")
             item_a.setData(Qt.UserRole, name)
             item_a.setFlags(item_a.flags() | Qt.ItemIsUserCheckable)
-            # Domyślnie zaznacz, jeśli nazwa sugeruje parę/atmosferę
             is_atm_name = any(k in name.lower() for k in ['vap', 'atm', 'h2o', 'co2', 'para'])
             item_a.setCheckState(Qt.Checked if is_atm_name and not is_active else Qt.Unchecked)
             self.list_atm.addItem(item_a)
@@ -257,7 +466,6 @@ class VaporFitDialog(QDialog):
                                 "Zaznacz co najmniej jedno widmo próbki i jedno widmo atmosfery.")
             return
 
-        # Do estymacji bierzemy pierwszą zaznaczoną próbkę
         sample_spec = session.spectra[sample_names[0]]
         try:
             poly = int(self.ent_sg_poly.text())
@@ -274,7 +482,6 @@ class VaporFitDialog(QDialog):
         atm_matrix = []
         for a_name in atm_names:
             a_spec = session.spectra[a_name]
-            # Uporządkowanie monotoniczne do np.interp
             if a_spec.wavenumbers[0] > a_spec.wavenumbers[-1]:
                 x_ref, y_ref = a_spec.wavenumbers[::-1], a_spec.intensities[::-1]
             else:
@@ -291,8 +498,7 @@ class VaporFitDialog(QDialog):
         opt_win = res['best_window_sdv']
         self.ent_sg_points.setText(str(opt_win))
         QMessageBox.information(
-            self,
-            tr("app.info", "Informacja"),
+            self, tr("app.info", "Informacja"),
             f"Sugerowane optymalne okno SG (próbka: {sample_spec.name}):\n"
             f"• Wg krzywizny SDV: {res['best_window_sdv']} pkt\n"
             f"• Wg wskaźnika SSI: {res['best_window_ssi']} pkt\n\n"
@@ -303,15 +509,11 @@ class VaporFitDialog(QDialog):
         sample_names = self._get_checked_names(self.list_samples)
         atm_names = self._get_checked_names(self.list_atm)
 
-        if not sample_names:
-            QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"), "Nie zaznaczono żadnego widma do korekcji.")
+        if not sample_names or not atm_names:
+            QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"),
+                                "Wybierz co najmniej jedno widmo próbki i jedno widmo atmosfery.")
             return
 
-        if not atm_names:
-            QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"), "Wybierz co najmniej jedno widmo odniesienia atmosfery.")
-            return
-
-        # Wykluczenie widm atmosfery z listy próbek, jeśli zostały przypadkowo zaznaczone po obu stronach
         final_sample_names = [s for s in sample_names if s not in atm_names]
         if not final_sample_names:
             QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"),
@@ -335,7 +537,6 @@ class VaporFitDialog(QDialog):
         created_spectra = []
         errors = []
 
-        # Przygotowanie posortowanych baz atmosfery do szybkiej interpolacji
         prepared_atm = []
         for a_name in atm_names:
             a_spec = session.spectra[a_name]
@@ -343,13 +544,6 @@ class VaporFitDialog(QDialog):
                 prepared_atm.append((a_spec.wavenumbers[::-1], a_spec.intensities[::-1]))
             else:
                 prepared_atm.append((a_spec.wavenumbers, a_spec.intensities))
-
-        sign_map = {
-            "Auto (Wygładź)": "auto",
-            "Odejmij (-)": "subtract",
-            "Dodaj (+)": "add"
-        }
-        chosen_mode = sign_map.get(self.combo_sign.currentText(), "auto")
 
         for idx, s_name in enumerate(final_sample_names):
             self.lbl_status.setText(f"Korygowanie ({idx + 1}/{total_count}): {s_name}...")
@@ -362,10 +556,9 @@ class VaporFitDialog(QDialog):
                 y_crop = sample_spec.intensities[mask]
 
                 if len(wn_crop) < points + 2:
-                    errors.append(f"{s_name}: Za mało punktów pomiarowych w wybranym zakresie.")
+                    errors.append(f"{s_name}: Za mało punktów w wybranym zakresie.")
                     continue
 
-                # Rzutowanie widm atmosfery na siatkę aktualnej próbki
                 atm_cols = [np.interp(wn_crop, x_ref, y_ref) for x_ref, y_ref in prepared_atm]
                 atm_matrix = np.column_stack(atm_cols)
 
@@ -394,9 +587,9 @@ class VaporFitDialog(QDialog):
 
             self.progress_bar.setValue(idx + 1)
 
-        # Hurtowe dodanie skorygowanych widm do sesji
         if created_spectra:
-            session.add_spectra_batch(created_spectra)
+            cmd = AddBatchSpectraCommand(created_spectra, f"VaporFit Batch ({len(created_spectra)} widm)")
+            session.undo_stack.push(cmd)
 
         self.btn_apply.setEnabled(True)
         self.lbl_status.setText(f"Ukończono! Skorygowano pomyślnie {len(created_spectra)}/{total_count} widm.")
@@ -413,10 +606,25 @@ class VaporFitDialog(QDialog):
 # GŁÓWNY PANEL INSPEKTORA PREPROCESSINGU
 # ==============================================================================
 class PreprocessingPanel(QWidget):
-    """Widok narzędzi obróbki i przygotowania danych (Workspace 1)."""
+    """Widok narzędzi obróbki i przygotowania danych z wbudowanym Pipeline Managerem."""
+
+    def _verify_single_tool_permission(self) -> bool:
+        """Chroni magazyn przed przypadkową edycją pojedynczego widma."""
+        if getattr(session, 'active_context', 'storage') == 'storage':
+            QMessageBox.information(
+                self, tr("app.info", "Informacja"),
+                "Jesteś w Magazynie Danych (Referencji).\n\n"
+                "Pojedyncze manipulacje są zablokowane dla magazynu, aby chronić oryginalne pomiary.\n"
+                "• Przeciągnij widmo do Okna Wykresu, aby dowolnie je modyfikować.\n"
+                "• W Magazynie Danych możesz wykonywać pełną obróbkę wsadową (Potok Przetwarzania, Batch VaporFit)."
+            )
+            return False
+        return True
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.pipeline_steps: List[Dict[str, Any]] = []
+
         self._init_ui()
         i18n.language_changed.connect(self.retranslate_ui)
 
@@ -433,16 +641,133 @@ class PreprocessingPanel(QWidget):
         layout.setSpacing(10)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        # 1. Narzędzie atmosferyczne VaporFit
+        # ======================================================================
+        # SEKCJA 1: PIPELINE MANAGER (POTOK PRZETWARZANIA WSADOWEGO)
+        # ======================================================================
+        box_pipeline = QGroupBox("⚙️ Potok Przetwarzania (Pipeline Manager)")
+        box_pipeline.setStyleSheet("QGroupBox { font-weight: bold; color: #48cae4; }")
+        l_pipe = QVBoxLayout(box_pipeline)
+        l_pipe.setSpacing(6)
+
+        self.list_pipeline = QListWidget()
+        self.list_pipeline.setFixedHeight(120)
+        self.list_pipeline.setStyleSheet("background-color: #1e1e24; border: 1px solid #383848;")
+        self.list_pipeline.itemDoubleClicked.connect(self._on_edit_pipeline_step)
+        l_pipe.addWidget(self.list_pipeline)
+
+        # Pasek kontrolny potoku
+        row_pipe_tools = QHBoxLayout()
+        self.combo_step_type = QComboBox()
+        self.combo_step_type.addItems([
+            "✂ Przycięcie (Crop)",
+            "📏 Linia Bazowa (AsLS)",
+            "📏 Linia Bazowa (Dwa krańce)",
+            "〰 Wygładzanie (SG)",
+            "📉 1. Pochodna (SG)",
+            "📉 2. Pochodna (-) (SG)",
+            "⚖ Normalizacja SNV",
+            "⚖ Normalizacja Min-Max",
+            "⚖ Normalizacja L₂",
+            "⚖ Offset (Min ➔ 0.0)",
+            "⚖ Offset (w punkcie ν)"
+        ])
+        btn_add_step = QPushButton("➕ Dodaj")
+        btn_add_step.clicked.connect(self._on_add_pipeline_step)
+
+        btn_edit_step = QPushButton("✏️ Edytuj")
+        btn_edit_step.setToolTip("Edytuj parametry zaznaczonego kroku")
+        btn_edit_step.clicked.connect(self._on_edit_pipeline_step)
+
+        btn_up = QPushButton("▲")
+        btn_up.setFixedWidth(26)
+        btn_up.setToolTip("Przesuń krok w górę")
+        btn_up.clicked.connect(self._on_move_step_up)
+
+        btn_down = QPushButton("▼")
+        btn_down.setFixedWidth(26)
+        btn_down.setToolTip("Przesuń krok w dół")
+        btn_down.clicked.connect(self._on_move_step_down)
+
+        btn_del_step = QPushButton("✕")
+        btn_del_step.setFixedWidth(26)
+        btn_del_step.setToolTip("Usuń zaznaczony krok z potoku")
+        btn_del_step.clicked.connect(self._on_remove_pipeline_step)
+
+        btn_clear_pipe = QPushButton("Wyczyść")
+        btn_clear_pipe.clicked.connect(self._on_clear_pipeline)
+
+        row_pipe_tools.addWidget(self.combo_step_type, 1)
+        row_pipe_tools.addWidget(btn_add_step)
+        row_pipe_tools.addWidget(btn_edit_step)
+        row_pipe_tools.addWidget(btn_up)
+        row_pipe_tools.addWidget(btn_down)
+        row_pipe_tools.addWidget(btn_del_step)
+        row_pipe_tools.addWidget(btn_clear_pipe)
+        l_pipe.addLayout(row_pipe_tools)
+
+        # Cel potoku i tryb zapisu
+        row_target = QHBoxLayout()
+        row_target.addWidget(QLabel("Cel:"))
+        self.combo_target_scope = QComboBox()
+        self.combo_target_scope.addItems([
+            "Tylko aktywne widmo",
+            "Wszystkie widoczne widma w drzewie",
+            "Aktywna seria 2D / Tensor"
+        ])
+        row_target.addWidget(self.combo_target_scope, 1)
+        l_pipe.addLayout(row_target)
+
+        self.chk_inplace = QCheckBox("Modyfikuj w miejscu (In-place z Undo)")
+        self.chk_inplace.setChecked(True)
+        self.chk_inplace.setToolTip("Jeśli odznaczone, potok utworzy nowe widma z przedrostkiem 'proc_'")
+        l_pipe.addWidget(self.chk_inplace)
+
+        # Pasek postępu potoku
+        self.pipe_progress = QProgressBar()
+        self.pipe_progress.setValue(0)
+        self.pipe_progress.setFixedHeight(14)
+        self.pipe_progress.setVisible(False)
+        l_pipe.addWidget(self.pipe_progress)
+
+        # Przycisk uruchomienia potoku
+        self.btn_run_pipeline = QPushButton("⚡ Uruchom Potok na Wybranych Danych")
+        self.btn_run_pipeline.setStyleSheet("background-color: #2a9d8f; font-weight: bold; padding: 8px;")
+        self.btn_run_pipeline.clicked.connect(self._on_run_pipeline)
+        l_pipe.addWidget(self.btn_run_pipeline)
+
+        layout.addWidget(box_pipeline)
+
+        # ======================================================================
+        # SEKCJA 2: POJEDYNCZE NARZĘDZIA / PARAMETRY KROKÓW
+        # ======================================================================
+
+        # Kompensacja VaporFit
         box_vapor = QGroupBox("💨 Kompensacja Atmosferyczna (VaporFit)")
         l_vapor = QVBoxLayout(box_vapor)
         self.btn_vaporfit = QPushButton("Otwórz VaporFit (Batch)...")
-        self.btn_vaporfit.setStyleSheet("background-color: #2a9d8f; font-weight: bold; padding: 6px;")
+        self.btn_vaporfit.setStyleSheet("background-color: #3d5a80; font-weight: bold; padding: 6px;")
         self.btn_vaporfit.clicked.connect(self._open_vaporfit_dialog)
         l_vapor.addWidget(self.btn_vaporfit)
         layout.addWidget(box_vapor)
 
-        # 2. Korekcja linii bazowej
+        # Przycinanie widma (Crop)
+        box_crop = QGroupBox("✂ Przycinanie Zakresu (Crop)")
+        l_crop = QVBoxLayout(box_crop)
+        row_crop = QHBoxLayout()
+        row_crop.addWidget(QLabel("Zakres:"))
+        self.ent_crop_min = QLineEdit("1000")
+        self.ent_crop_max = QLineEdit("1800")
+        row_crop.addWidget(self.ent_crop_min)
+        row_crop.addWidget(QLabel("—"))
+        row_crop.addWidget(self.ent_crop_max)
+        l_crop.addLayout(row_crop)
+
+        self.btn_crop = QPushButton("Przytnij aktywne widmo teraz")
+        self.btn_crop.clicked.connect(self._apply_crop)
+        l_crop.addWidget(self.btn_crop)
+        layout.addWidget(box_crop)
+
+        # Korekcja linii bazowej
         box_baseline = QGroupBox("📏 Linia Bazowa")
         l_baseline = QVBoxLayout(box_baseline)
 
@@ -456,17 +781,17 @@ class PreprocessingPanel(QWidget):
         row_asls.addWidget(self.ent_asls_p)
         l_baseline.addLayout(row_asls)
 
+        row_bl_btns = QHBoxLayout()
         self.btn_asls = QPushButton("Odejmij tło (AsLS)")
         self.btn_asls.clicked.connect(self._apply_asls)
-        l_baseline.addWidget(self.btn_asls)
-
         self.btn_linear_bl = QPushButton("Odejmij linię (Dwa krańce)")
         self.btn_linear_bl.clicked.connect(self._apply_linear_endpoints_bl)
-        l_baseline.addWidget(self.btn_linear_bl)
-
+        row_bl_btns.addWidget(self.btn_asls)
+        row_bl_btns.addWidget(self.btn_linear_bl)
+        l_baseline.addLayout(row_bl_btns)
         layout.addWidget(box_baseline)
 
-        # 3. Filtry i pochodne (Savitzky-Golay)
+        # Filtry i pochodne (Savitzky-Golay)
         box_filters = QGroupBox("〰 Filtr Savitzky-Golay & Pochodne")
         l_filters = QVBoxLayout(box_filters)
 
@@ -480,7 +805,7 @@ class PreprocessingPanel(QWidget):
         row_sg.addWidget(self.ent_sg_poly)
         l_filters.addLayout(row_sg)
 
-        self.btn_sg_smooth = QPushButton("Wygładź (SG)")
+        self.btn_sg_smooth = QPushButton("Wygładź teraz (SG)")
         self.btn_sg_smooth.clicked.connect(self._apply_sg_smoothing)
         l_filters.addWidget(self.btn_sg_smooth)
 
@@ -492,11 +817,10 @@ class PreprocessingPanel(QWidget):
         row_derivs.addWidget(self.btn_deriv1)
         row_derivs.addWidget(self.btn_deriv2)
         l_filters.addLayout(row_derivs)
-
         layout.addWidget(box_filters)
 
-        # 4. Normalizacje i Offset
-        box_norm = QGroupBox("⚖ Normalizacje & Skalowanie")
+        # Normalizacje i Offset
+        box_norm = QGroupBox("⚖ Normalizacje & Offset")
         l_norm = QVBoxLayout(box_norm)
 
         row_norm1 = QHBoxLayout()
@@ -517,37 +841,33 @@ class PreprocessingPanel(QWidget):
         row_norm2.addWidget(self.btn_offset_zero)
         l_norm.addLayout(row_norm2)
 
+        # Punktowy offset w wybranym nu
+        row_offset_pt = QHBoxLayout()
+        row_offset_pt.addWidget(QLabel("Offset przy ν:"))
+        self.ent_offset_wn = QLineEdit("2000")
+        self.ent_offset_wn.setFixedWidth(55)
+        row_offset_pt.addWidget(self.ent_offset_wn)
+        row_offset_pt.addWidget(QLabel("cm⁻¹"))
+
+        self.btn_offset_point = QPushButton("A(ν) ➔ 0.0")
+        self.btn_offset_point.clicked.connect(self._apply_offset_at_point)
+        row_offset_pt.addWidget(self.btn_offset_point)
+        l_norm.addLayout(row_offset_pt)
+
         layout.addWidget(box_norm)
 
-        # 5. Przycinanie widma (Crop)
-        box_crop = QGroupBox("✂ Przycinanie Zakresu (Crop)")
-        l_crop = QVBoxLayout(box_crop)
-        row_crop = QHBoxLayout()
-        row_crop.addWidget(QLabel("Zakres:"))
-        self.ent_crop_min = QLineEdit("1000")
-        self.ent_crop_max = QLineEdit("1800")
-        row_crop.addWidget(self.ent_crop_min)
-        row_crop.addWidget(QLabel("—"))
-        row_crop.addWidget(self.ent_crop_max)
-        l_crop.addLayout(row_crop)
-
-        self.btn_crop = QPushButton("Przytnij aktywne widmo")
-        self.btn_crop.clicked.connect(self._apply_crop)
-        l_crop.addWidget(self.btn_crop)
-        layout.addWidget(box_crop)
-
-        # 6. Globalne Undo / Redo
+        # Globalne Undo / Redo
         box_history = QGroupBox("↺ Historia Operacji")
         l_hist = QHBoxLayout(box_history)
-        self.btn_undo = QPushButton("↶ Cofnij")
+        self.btn_undo = QPushButton("↶ Cofnij (⌘Z / Ctrl+Z)")
         self.btn_undo.clicked.connect(session.undo_stack.undo)
         session.undo_stack.canUndoChanged.connect(self.btn_undo.setEnabled)
-        self.btn_undo.setEnabled(False)
+        self.btn_undo.setEnabled(session.undo_stack.canUndo())
 
-        self.btn_redo = QPushButton("↷ Ponów")
+        self.btn_redo = QPushButton("↷ Ponów (⌘⇧Z / Ctrl+Y)")
         self.btn_redo.clicked.connect(session.undo_stack.redo)
         session.undo_stack.canRedoChanged.connect(self.btn_redo.setEnabled)
-        self.btn_redo.setEnabled(False)
+        self.btn_redo.setEnabled(session.undo_stack.canRedo())
 
         l_hist.addWidget(self.btn_undo)
         l_hist.addWidget(self.btn_redo)
@@ -561,11 +881,308 @@ class PreprocessingPanel(QWidget):
         main_win = self.window()
         return getattr(main_win, 'canvas_2d', None)
 
+    # ======================================================================
+    # LOGIKA PIPELINE MANAGERA
+    # ======================================================================
+    def _on_add_pipeline_step(self):
+        choice = self.combo_step_type.currentText()
+        step = {}
+
+        try:
+            if "Przycięcie" in choice:
+                min_w = float(self.ent_crop_min.text())
+                max_w = float(self.ent_crop_max.text())
+                step = {'type': 'crop', 'name': f"Przycięcie [{min_w:.0f}–{max_w:.0f}]", 'min_w': min_w, 'max_w': max_w}
+
+            elif "AsLS" in choice:
+                lam = float(self.ent_asls_lam.text())
+                p = float(self.ent_asls_p.text())
+                step = {'type': 'asls', 'name': f"AsLS (λ={lam:.0e}, p={p})", 'lam': lam, 'p': p}
+
+            elif "Dwa krańce" in choice:
+                step = {'type': 'linear_bl', 'name': "Linia bazowa (krańce)"}
+
+            elif "Wygładzanie" in choice:
+                win = int(self.ent_sg_win.text())
+                poly = int(self.ent_sg_poly.text())
+                step = {'type': 'sg_smooth', 'name': f"SG Wygładzanie (okno={win}, st={poly})", 'win': win, 'poly': poly}
+
+            elif "1. Pochodna" in choice:
+                win = int(self.ent_sg_win.text())
+                poly = int(self.ent_sg_poly.text())
+                step = {'type': 'deriv1', 'name': f"1. Pochodna SG (okno={win})", 'win': win, 'poly': poly}
+
+            elif "2. Pochodna" in choice:
+                win = int(self.ent_sg_win.text())
+                poly = int(self.ent_sg_poly.text())
+                step = {'type': 'deriv2', 'name': f"2. Pochodna SG (-) (okno={win})", 'win': win, 'poly': poly}
+
+            elif "SNV" in choice:
+                step = {'type': 'snv', 'name': "Normalizacja SNV"}
+
+            elif "Min-Max" in choice:
+                step = {'type': 'minmax', 'name': "Normalizacja Min-Max"}
+
+            elif "Norma L" in choice:
+                step = {'type': 'l2', 'name': "Normalizacja L₂"}
+
+            elif "Min ➔ 0.0" in choice:
+                step = {'type': 'offset_min', 'name': "Offset (Min ➔ 0.0)"}
+
+            elif "punkcie ν" in choice:
+                t_wn = float(self.ent_offset_wn.text())
+                step = {'type': 'offset_point', 'name': f"Offset w punkcie {t_wn:.1f} cm⁻¹ ➔ 0", 'target_wn': t_wn}
+
+        except ValueError:
+            QMessageBox.warning(self, tr("app.warning"), "Nieprawidłowe wartości w polach parametrów.")
+            return
+
+        if step:
+            self.pipeline_steps.append(step)
+            self.list_pipeline.addItem(f"{len(self.pipeline_steps)}. {step['name']}")
+
+    def _on_edit_pipeline_step(self):
+        row = self.list_pipeline.currentRow()
+        if not (0 <= row < len(self.pipeline_steps)):
+            return
+
+        step = self.pipeline_steps[row]
+        dlg = StepParamDialog(step, self)
+        if dlg.exec() == QDialog.Accepted:
+            self._refresh_pipeline_list()
+            self.list_pipeline.setCurrentRow(row)
+
+    def _on_move_step_up(self):
+        row = self.list_pipeline.currentRow()
+        if row > 0:
+            self.pipeline_steps[row - 1], self.pipeline_steps[row] = self.pipeline_steps[row], self.pipeline_steps[row - 1]
+            self._refresh_pipeline_list()
+            self.list_pipeline.setCurrentRow(row - 1)
+
+    def _on_move_step_down(self):
+        row = self.list_pipeline.currentRow()
+        if 0 <= row < len(self.pipeline_steps) - 1:
+            self.pipeline_steps[row + 1], self.pipeline_steps[row] = self.pipeline_steps[row], self.pipeline_steps[row + 1]
+            self._refresh_pipeline_list()
+            self.list_pipeline.setCurrentRow(row + 1)
+
+    def _on_remove_pipeline_step(self):
+        row = self.list_pipeline.currentRow()
+        if 0 <= row < len(self.pipeline_steps):
+            self.pipeline_steps.pop(row)
+            self._refresh_pipeline_list()
+
+    def _on_clear_pipeline(self):
+        self.pipeline_steps.clear()
+        self.list_pipeline.clear()
+
+    def _refresh_pipeline_list(self):
+        self.list_pipeline.clear()
+        for idx, step in enumerate(self.pipeline_steps):
+            self.list_pipeline.addItem(f"{idx + 1}. {step['name']}")
+
+    def _apply_pipeline_to_vectors(self, x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Aplikuje sekwencję potoku do pary wektorów (x, y)."""
+        curr_x = x.copy()
+        curr_y = y.copy()
+
+        for step in self.pipeline_steps:
+            stype = step['type']
+
+            if stype == 'crop':
+                curr_x, curr_y = prep.crop_range(curr_x, curr_y, step['min_w'], step['max_w'])
+
+            elif stype == 'asls':
+                baseline = prep.baseline_asls(curr_y, lam=step['lam'], p=step['p'])
+                curr_y = curr_y - baseline
+
+            elif stype == 'linear_bl':
+                if len(curr_y) >= 2:
+                    baseline = prep.baseline_linear(curr_x, curr_y, curr_x[0], curr_x[-1])
+                    curr_y = curr_y - baseline
+
+            elif stype == 'sg_smooth':
+                curr_y = prep.apply_savgol(curr_y, window=step['win'], poly=step['poly'], deriv=0)
+
+            elif stype == 'deriv1':
+                _, curr_y = prep.get_first_derivative(curr_x, curr_y, window=step['win'], poly=step['poly'])
+
+            elif stype == 'deriv2':
+                _, curr_y = prep.get_second_derivative_inverted(curr_x, curr_y, window=step['win'], poly=step['poly'])
+
+            elif stype == 'snv':
+                curr_y = prep.apply_snv(curr_y)
+
+            elif stype == 'minmax':
+                curr_y = prep.apply_min_max(curr_y)
+
+            elif stype == 'l2':
+                curr_y = prep.apply_vector_norm_l2(curr_y)
+
+            elif stype == 'offset_min':
+                curr_y = curr_y - np.min(curr_y)
+
+            elif stype == 'offset_point':
+                curr_y = prep.apply_offset(curr_y, curr_x, target_wn=step['target_wn'], target_val=0.0)
+
+        return curr_x, curr_y
+
+    def _on_run_pipeline(self):
+        if not self.pipeline_steps:
+            QMessageBox.warning(self, tr("app.warning"), "Potok jest pusty. Dodaj co najmniej jeden krok.")
+            return
+
+        scope = self.combo_target_scope.currentIndex()
+        in_place = self.chk_inplace.isChecked()
+        canvas = self._get_canvas()
+        target_win = session.active_window_id if session.active_context == "window" else None
+
+        # 1. TYLKO AKTYWNE WIDMO
+        if scope == 0:
+            active = session.active_spectrum
+            if not active:
+                QMessageBox.warning(self, tr("app.warning"), "Brak aktywnego widma.")
+                return
+
+            new_x, new_y = self._apply_pipeline_to_vectors(active.wavenumbers, active.intensities)
+            new_meta = copy.deepcopy(active.metadata)
+            new_meta["last_pipeline"] = [s['name'] for s in self.pipeline_steps]
+
+            if in_place:
+                cmd = ModifySpectrumCommand(
+                    active, f"Potok: {active.name}",
+                    active.intensities, new_y, active.wavenumbers, new_x,
+                    old_meta=active.metadata, new_meta=new_meta, canvas=canvas
+                )
+                session.undo_stack.push(cmd)
+            else:
+                new_spec = SpectrumData(
+                    wavenumbers=new_x, intensities=new_y,
+                    name=f"proc_{active.name}", file_path=active.file_path,
+                    file_type="processed", metadata=new_meta
+                )
+                cmd = AddBatchSpectraCommand([new_spec], f"Potok: proc_{active.name}", canvas=canvas,
+                                             window_id=target_win)
+                session.undo_stack.push(cmd)
+
+        # 2. WSZYSTKIE WIDOCZNE WIDMA (BATCH)
+
+        elif scope == 1:
+            visible_spectra = session.get_display_spectra()
+            if not visible_spectra:
+                QMessageBox.warning(self, tr("app.warning"), "Brak widocznych widm w aktywnym widoku.")
+                return
+
+            total = len(visible_spectra)
+            self.pipe_progress.setMaximum(total)
+            self.pipe_progress.setValue(0)
+            self.pipe_progress.setVisible(True)
+            self.btn_run_pipeline.setEnabled(False)
+
+            batch_records = []
+            new_created_spectra = []
+
+            for idx, spec in enumerate(visible_spectra):
+                old_x = spec.wavenumbers.copy()
+                old_y = spec.intensities.copy()
+                new_x, new_y = self._apply_pipeline_to_vectors(old_x, old_y)
+
+                old_meta = copy.deepcopy(spec.metadata)
+                new_meta = copy.deepcopy(spec.metadata)
+                new_meta["last_pipeline"] = [s['name'] for s in self.pipeline_steps]
+
+                if in_place:
+                    batch_records.append((spec, old_x, old_y, new_x, new_y, old_meta, new_meta))
+                else:
+                    new_spec = SpectrumData(
+                        wavenumbers=new_x, intensities=new_y,
+                        name=f"proc_{spec.name}", file_path=spec.file_path,
+                        file_type="processed", metadata=new_meta
+                    )
+                    new_created_spectra.append(new_spec)
+
+                if (idx + 1) % 10 == 0 or idx == total - 1:
+                    self.pipe_progress.setValue(idx + 1)
+                    QApplication.processEvents()
+
+            if in_place and batch_records:
+                cmd = BatchPipelineCommand(batch_records, f"Potok wsadowy ({len(self.pipeline_steps)} kroków)", canvas=canvas)
+                session.undo_stack.push(cmd)
+            elif not in_place and new_created_spectra:
+                cmd = AddBatchSpectraCommand(new_created_spectra, f"Potok wsadowy ({len(new_created_spectra)} widm)",
+                                             canvas=canvas, window_id=target_win)
+                session.undo_stack.push(cmd)
+
+            self.pipe_progress.setVisible(False)
+            self.btn_run_pipeline.setEnabled(True)
+            QMessageBox.information(self, tr("app.info"), f"Przetworzono {total} widm potokiem.")
+
+        # 3. AKTYWNA SERIA 2D / TENSOR 3D
+        elif scope == 2:
+            active_s = session.active_series
+            if not active_s:
+                QMessageBox.warning(self, tr("app.warning"), "Brak aktywnej serii 2D.")
+                return
+
+            mat = active_s.get_matrix_2d()
+            n_cols = mat.shape[1]
+            wn = active_s.wavenumbers
+
+            self.pipe_progress.setMaximum(n_cols)
+            self.pipe_progress.setValue(0)
+            self.pipe_progress.setVisible(True)
+            self.btn_run_pipeline.setEnabled(False)
+
+            ref_x, ref_y0 = self._apply_pipeline_to_vectors(wn, mat[:, 0])
+            new_mat = np.zeros((len(ref_x), n_cols), dtype=np.float64)
+            new_mat[:, 0] = ref_y0
+
+            for col in range(1, n_cols):
+                _, new_y = self._apply_pipeline_to_vectors(wn, mat[:, col])
+                new_mat[:, col] = new_y
+                if col % 10 == 0 or col == n_cols - 1:
+                    self.pipe_progress.setValue(col + 1)
+                    QApplication.processEvents()
+
+            if in_place:
+                old_wn = active_s.wavenumbers.copy()
+                old_data = active_s.data.copy()
+
+                if active_s.is_3d:
+                    new_data = new_mat.reshape(len(ref_x), active_s.data.shape[1], active_s.data.shape[2])
+                else:
+                    new_data = new_mat
+
+                cmd = ModifySeriesCommand(active_s, f"Potok serii: {active_s.name}",
+                                          old_wn, ref_x, old_data, new_data, canvas=canvas)
+                session.undo_stack.push(cmd)
+            else:
+                out_data = new_mat.reshape(len(ref_x), active_s.data.shape[1], active_s.data.shape[2]) if active_s.is_3d else new_mat
+                new_series = SpectralSeries(
+                    name=f"proc_{active_s.name}",
+                    wavenumbers=ref_x,
+                    data=out_data,
+                    axis_n_name=active_s.axis_n_name,
+                    axis_n_values=active_s.axis_n_values,
+                    axis_m_name=active_s.axis_m_name,
+                    axis_m_values=active_s.axis_m_values
+                )
+                session.add_series(new_series, make_active=True)
+
+            self.pipe_progress.setVisible(False)
+            self.btn_run_pipeline.setEnabled(True)
+            QMessageBox.information(self, tr("app.info"), f"Przetworzono serię '{active_s.name}' ({n_cols} widm)!")
+
+    # ======================================================================
+    # POJEDYNCZE OPERACJE MANUALNE
+    # ======================================================================
     def _open_vaporfit_dialog(self):
         dlg = VaporFitDialog(self)
         dlg.exec()
 
     def _apply_asls(self):
+        if not self._verify_single_tool_permission():
+            return
         spec = session.active_spectrum
         if not spec:
             return
@@ -581,27 +1198,27 @@ class PreprocessingPanel(QWidget):
             QMessageBox.critical(self, tr("app.error", "Błąd"), f"Błąd AsLS: {e}")
 
     def _apply_linear_endpoints_bl(self):
+        if not self._verify_single_tool_permission():
+            return
         spec = session.active_spectrum
         if not spec or len(spec.intensities) < 2:
             return
-        x1, y1 = spec.wavenumbers[0], spec.intensities[0]
-        x2, y2 = spec.wavenumbers[-1], spec.intensities[-1]
-        m = (y2 - y1) / (x2 - x1)
-        c = y1 - m * x1
-        baseline = m * spec.wavenumbers + c
+        baseline = prep.baseline_linear(spec.wavenumbers, spec.intensities, spec.wavenumbers[0], spec.wavenumbers[-1])
         new_y = spec.intensities - baseline
 
         cmd = ModifySpectrumCommand(spec, "Linia bazowa (krańce)", spec.intensities, new_y, canvas=self._get_canvas())
         session.undo_stack.push(cmd)
 
     def _apply_sg_smoothing(self):
+        if not self._verify_single_tool_permission():
+            return
         spec = session.active_spectrum
         if not spec:
             return
         try:
             win = int(self.ent_sg_win.text())
             poly = int(self.ent_sg_poly.text())
-            new_y = prep.smooth_savitzky_golay(spec.intensities, window_length=win, polyorder=poly)
+            new_y = prep.apply_savgol(spec.intensities, window=win, poly=poly, deriv=0)
 
             cmd = ModifySpectrumCommand(spec, "Wygładzanie SG", spec.intensities, new_y, canvas=self._get_canvas())
             session.undo_stack.push(cmd)
@@ -609,6 +1226,8 @@ class PreprocessingPanel(QWidget):
             QMessageBox.critical(self, tr("app.error", "Błąd"), f"Błąd filtru SG: {e}")
 
     def _apply_derivative(self, order: int):
+        if not self._verify_single_tool_permission():
+            return
         spec = session.active_spectrum
         if not spec:
             return
@@ -628,31 +1247,38 @@ class PreprocessingPanel(QWidget):
             QMessageBox.critical(self, tr("app.error", "Błąd"), f"Błąd pochodnej: {e}")
 
     def _apply_snv(self):
+        if not self._verify_single_tool_permission():
+            return
         spec = session.active_spectrum
         if not spec:
             return
-        new_y = prep.snv(spec.intensities)
+        new_y = prep.apply_snv(spec.intensities)
         cmd = ModifySpectrumCommand(spec, "Normalizacja SNV", spec.intensities, new_y, canvas=self._get_canvas())
         session.undo_stack.push(cmd)
 
     def _apply_minmax(self):
+        if not self._verify_single_tool_permission():
+            return
         spec = session.active_spectrum
         if not spec:
             return
-        new_y = prep.min_max_scale(spec.intensities)
+        new_y = prep.apply_min_max(spec.intensities)
         cmd = ModifySpectrumCommand(spec, "Normalizacja Min-Max", spec.intensities, new_y, canvas=self._get_canvas())
         session.undo_stack.push(cmd)
 
     def _apply_l2(self):
+        if not self._verify_single_tool_permission():
+            return
         spec = session.active_spectrum
         if not spec:
             return
-        norm = np.linalg.norm(spec.intensities)
-        new_y = spec.intensities / norm if norm > 0 else spec.intensities
+        new_y = prep.apply_vector_norm_l2(spec.intensities)
         cmd = ModifySpectrumCommand(spec, "Normalizacja L2", spec.intensities, new_y, canvas=self._get_canvas())
         session.undo_stack.push(cmd)
 
     def _apply_offset_min(self):
+        if not self._verify_single_tool_permission():
+            return
         spec = session.active_spectrum
         if not spec:
             return
@@ -661,20 +1287,30 @@ class PreprocessingPanel(QWidget):
         cmd = ModifySpectrumCommand(spec, "Offset do 0.0", spec.intensities, new_y, canvas=self._get_canvas())
         session.undo_stack.push(cmd)
 
+    def _apply_offset_at_point(self):
+        if not self._verify_single_tool_permission():
+            return
+        spec = session.active_spectrum
+        if not spec:
+            return
+        try:
+            target_wn = float(self.ent_offset_wn.text())
+            new_y = prep.apply_offset(spec.intensities, spec.wavenumbers, target_wn=target_wn, target_val=0.0)
+            cmd = ModifySpectrumCommand(spec, f"Offset przy {target_wn:.1f} cm⁻¹", spec.intensities, new_y, canvas=self._get_canvas())
+            session.undo_stack.push(cmd)
+        except ValueError:
+            QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"), "Nieprawidłowa liczba falowa punktu offsetu.")
+
     def _apply_crop(self):
+        if not self._verify_single_tool_permission():
+            return
         spec = session.active_spectrum
         if not spec:
             return
         try:
             min_w = float(self.ent_crop_min.text())
             max_w = float(self.ent_crop_max.text())
-            mask = (spec.wavenumbers >= min_w) & (spec.wavenumbers <= max_w)
-            if not np.any(mask):
-                QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"), "Brak punktów pomiarowych w podanym zakresie.")
-                return
-
-            new_x = spec.wavenumbers[mask]
-            new_y = spec.intensities[mask]
+            new_x, new_y = prep.crop_range(spec.wavenumbers, spec.intensities, min_w, max_w)
 
             cmd = ModifySpectrumCommand(
                 spec, f"Przycięcie [{min_w:.0f}-{max_w:.0f}]",
@@ -683,8 +1319,8 @@ class PreprocessingPanel(QWidget):
                 canvas=self._get_canvas()
             )
             session.undo_stack.push(cmd)
-        except ValueError:
-            QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"), "Nieprawidłowe liczby falowe zakresu.")
+        except Exception as e:
+            QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"), f"Błąd przycinania: {e}")
 
     def retranslate_ui(self):
         pass

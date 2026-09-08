@@ -161,6 +161,14 @@ class ChemometricsPanel(QWidget):
         session.spectrum_added.connect(self._refresh_sources)
         session.spectrum_removed.connect(self._refresh_sources)
 
+        # Reakcja na cofnięcie/ponowienie modyfikacji danych w pamięci RAM
+        if hasattr(session, 'spectrum_data_changed'):
+            session.spectrum_data_changed.connect(lambda _: self._on_source_changed())
+        if hasattr(session, 'batch_spectra_changed'):
+            session.batch_spectra_changed.connect(lambda _: self._on_source_changed())
+        if hasattr(session, 'series_data_changed'):
+            session.series_data_changed.connect(lambda _: self._on_source_changed())
+
     def showEvent(self, event):
         super().showEvent(event)
         self._refresh_sources()
