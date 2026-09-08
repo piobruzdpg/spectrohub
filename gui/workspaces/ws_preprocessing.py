@@ -669,7 +669,11 @@ class PreprocessingPanel(QWidget):
             "⚖ Normalizacja Min-Max",
             "⚖ Normalizacja L₂",
             "⚖ Offset (Min ➔ 0.0)",
-            "⚖ Offset (w punkcie ν)"
+            "⚖ Offset (w punkcie ν)",
+            "📐 Centrowanie do średniej (Mean-center)",
+            "📐 Autoskalowanie (Unit Variance)",
+            "📐 Skalowanie Pareto",
+            "📐 Korekcja rozproszenia (MSC)"
         ])
         btn_add_step = QPushButton("➕ Dodaj")
         btn_add_step.clicked.connect(self._on_add_pipeline_step)
@@ -905,7 +909,8 @@ class PreprocessingPanel(QWidget):
             elif "Wygładzanie" in choice:
                 win = int(self.ent_sg_win.text())
                 poly = int(self.ent_sg_poly.text())
-                step = {'type': 'sg_smooth', 'name': f"SG Wygładzanie (okno={win}, st={poly})", 'win': win, 'poly': poly}
+                step = {'type': 'sg_smooth', 'name': f"SG Wygładzanie (okno={win}, st={poly})", 'win': win,
+                        'poly': poly}
 
             elif "1. Pochodna" in choice:
                 win = int(self.ent_sg_win.text())
@@ -932,6 +937,19 @@ class PreprocessingPanel(QWidget):
             elif "punkcie ν" in choice:
                 t_wn = float(self.ent_offset_wn.text())
                 step = {'type': 'offset_point', 'name': f"Offset w punkcie {t_wn:.1f} cm⁻¹ ➔ 0", 'target_wn': t_wn}
+
+            # Skalowania chemometryczne
+            elif "Centrowanie" in choice:
+                step = {'type': 'mean_center', 'name': "Centrowanie do średniej"}
+
+            elif "Autoskalowanie" in choice:
+                step = {'type': 'autoscaling', 'name': "Autoskalowanie (Unit Variance)"}
+
+            elif "Pareto" in choice:
+                step = {'type': 'pareto', 'name': "Skalowanie Pareto"}
+
+            elif "MSC" in choice:
+                step = {'type': 'msc', 'name': "Korekcja rozproszenia (MSC)"}
 
         except ValueError:
             QMessageBox.warning(self, tr("app.warning"), "Nieprawidłowe wartości w polach parametrów.")
@@ -981,51 +999,78 @@ class PreprocessingPanel(QWidget):
         for idx, step in enumerate(self.pipeline_steps):
             self.list_pipeline.addItem(f"{idx + 1}. {step['name']}")
 
-    def _apply_pipeline_to_vectors(self, x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Aplikuje sekwencję potoku do pary wektorów (x, y)."""
+    def _apply_pipeline_to_matrix(self, x: np.ndarray, mat: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Zunifikowane wykonanie potoku na macierzy 2D (Liczby falowe x Próbki).
+        Obsługuje filtry pojedynczych widm oraz skalowania chemometryczne całego zespołu.
+        """
         curr_x = x.copy()
-        curr_y = y.copy()
+        curr_mat = mat.copy()
 
         for step in self.pipeline_steps:
             stype = step['type']
 
             if stype == 'crop':
-                curr_x, curr_y = prep.crop_range(curr_x, curr_y, step['min_w'], step['max_w'])
+                curr_x, curr_mat = prep.crop_range(curr_x, curr_mat, step['min_w'], step['max_w'])
 
             elif stype == 'asls':
-                baseline = prep.baseline_asls(curr_y, lam=step['lam'], p=step['p'])
-                curr_y = curr_y - baseline
+                for c in range(curr_mat.shape[1]):
+                    baseline = prep.baseline_asls(curr_mat[:, c], lam=step['lam'], p=step['p'])
+                    curr_mat[:, c] -= baseline
 
             elif stype == 'linear_bl':
-                if len(curr_y) >= 2:
-                    baseline = prep.baseline_linear(curr_x, curr_y, curr_x[0], curr_x[-1])
-                    curr_y = curr_y - baseline
+                if len(curr_x) >= 2:
+                    for c in range(curr_mat.shape[1]):
+                        baseline = prep.baseline_linear(curr_x, curr_mat[:, c], curr_x[0], curr_x[-1])
+                        curr_mat[:, c] -= baseline
 
             elif stype == 'sg_smooth':
-                curr_y = prep.apply_savgol(curr_y, window=step['win'], poly=step['poly'], deriv=0)
+                curr_mat = prep.apply_savgol(curr_mat, window=step['win'], poly=step['poly'], deriv=0)
 
             elif stype == 'deriv1':
-                _, curr_y = prep.get_first_derivative(curr_x, curr_y, window=step['win'], poly=step['poly'])
+                curr_mat = prep.apply_savgol(curr_mat, window=step['win'], poly=step['poly'], deriv=1)
 
             elif stype == 'deriv2':
-                _, curr_y = prep.get_second_derivative_inverted(curr_x, curr_y, window=step['win'], poly=step['poly'])
+                curr_mat = -1.0 * prep.apply_savgol(curr_mat, window=step['win'], poly=step['poly'], deriv=2)
 
             elif stype == 'snv':
-                curr_y = prep.apply_snv(curr_y)
+                curr_mat = prep.apply_snv(curr_mat)
 
             elif stype == 'minmax':
-                curr_y = prep.apply_min_max(curr_y)
+                curr_mat = prep.apply_min_max(curr_mat)
 
             elif stype == 'l2':
-                curr_y = prep.apply_vector_norm_l2(curr_y)
+                curr_mat = prep.apply_vector_norm_l2(curr_mat)
 
             elif stype == 'offset_min':
-                curr_y = curr_y - np.min(curr_y)
+                curr_mat -= np.min(curr_mat, axis=0, keepdims=True)
 
             elif stype == 'offset_point':
-                curr_y = prep.apply_offset(curr_y, curr_x, target_wn=step['target_wn'], target_val=0.0)
+                curr_mat = prep.apply_offset(curr_mat, curr_x, target_wn=step['target_wn'], target_val=0.0)
 
-        return curr_x, curr_y
+            # KROKI MACIERZOWE / CHEMOMETRYCZNE:
+            elif stype == 'mean_center':
+                if curr_mat.shape[1] > 1:
+                    curr_mat, _ = prep.apply_mean_center(curr_mat)
+
+            elif stype == 'autoscaling':
+                if curr_mat.shape[1] > 1:
+                    curr_mat = prep.apply_autoscaling(curr_mat)
+
+            elif stype == 'pareto':
+                if curr_mat.shape[1] > 1:
+                    curr_mat = prep.apply_pareto_scaling(curr_mat)
+
+            elif stype == 'msc':
+                if curr_mat.shape[1] > 1:
+                    curr_mat = prep.apply_msc(curr_mat)
+
+        return curr_x, curr_mat
+
+    def _apply_pipeline_to_vectors(self, x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Aplikuje sekwencję potoku do pojedynczego wektora (deleguje do silnika macierzowego)."""
+        new_x, new_mat = self._apply_pipeline_to_matrix(x, y.reshape(-1, 1))
+        return new_x, new_mat.flatten()
 
     def _on_run_pipeline(self):
         if not self.pipeline_steps:
@@ -1037,12 +1082,21 @@ class PreprocessingPanel(QWidget):
         canvas = self._get_canvas()
         target_win = session.active_window_id if session.active_context == "window" else None
 
-        # 1. TYLKO AKTYWNE WIDMO
+        # 1. TYLKO AKTYWNE WIDMO (SCOPE 0)
         if scope == 0:
             active = session.active_spectrum
             if not active:
                 QMessageBox.warning(self, tr("app.warning"), "Brak aktywnego widma.")
                 return
+
+            has_matrix_step = any(
+                s['type'] in ['mean_center', 'autoscaling', 'pareto', 'msc'] for s in self.pipeline_steps)
+            if has_matrix_step:
+                QMessageBox.warning(
+                    self, tr("app.warning"),
+                    "Potok zawiera skalowania macierzowe (Mean-center / Autoscaling / Pareto / MSC),\n"
+                    "które wymagają serii widm (min. 2). Dla pojedynczego widma kroki te zostaną pominięte."
+                )
 
             new_x, new_y = self._apply_pipeline_to_vectors(active.wavenumbers, active.intensities)
             new_meta = copy.deepcopy(active.metadata)
@@ -1065,8 +1119,7 @@ class PreprocessingPanel(QWidget):
                                              window_id=target_win)
                 session.undo_stack.push(cmd)
 
-        # 2. WSZYSTKIE WIDOCZNE WIDMA (BATCH)
-
+        # 2. WSZYSTKIE WIDOCZNE WIDMA W AKTYWNYM WIDOKU (SCOPE 1)
         elif scope == 1:
             visible_spectra = session.get_display_spectra()
             if not visible_spectra:
@@ -1079,13 +1132,25 @@ class PreprocessingPanel(QWidget):
             self.pipe_progress.setVisible(True)
             self.btn_run_pipeline.setEnabled(False)
 
+            # Tworzymy macierz na wspólnej siatce liczb falowych pierwszego widma
+            ref_wn = visible_spectra[0].wavenumbers
+            mat = np.zeros((len(ref_wn), total), dtype=np.float64)
+            for i, spec in enumerate(visible_spectra):
+                if spec.wavenumbers[0] > spec.wavenumbers[-1]:
+                    mat[:, i] = np.interp(ref_wn, spec.wavenumbers[::-1], spec.intensities[::-1])
+                else:
+                    mat[:, i] = np.interp(ref_wn, spec.wavenumbers, spec.intensities)
+
+            # Wykonanie całego potoku w jednym strzale wektorowym
+            new_x, new_mat = self._apply_pipeline_to_matrix(ref_wn, mat)
+
             batch_records = []
             new_created_spectra = []
 
             for idx, spec in enumerate(visible_spectra):
                 old_x = spec.wavenumbers.copy()
                 old_y = spec.intensities.copy()
-                new_x, new_y = self._apply_pipeline_to_vectors(old_x, old_y)
+                new_y = new_mat[:, idx]
 
                 old_meta = copy.deepcopy(spec.metadata)
                 new_meta = copy.deepcopy(spec.metadata)
@@ -1095,18 +1160,18 @@ class PreprocessingPanel(QWidget):
                     batch_records.append((spec, old_x, old_y, new_x, new_y, old_meta, new_meta))
                 else:
                     new_spec = SpectrumData(
-                        wavenumbers=new_x, intensities=new_y,
+                        wavenumbers=new_x.copy(), intensities=new_y.copy(),
                         name=f"proc_{spec.name}", file_path=spec.file_path,
                         file_type="processed", metadata=new_meta
                     )
                     new_created_spectra.append(new_spec)
 
-                if (idx + 1) % 10 == 0 or idx == total - 1:
-                    self.pipe_progress.setValue(idx + 1)
-                    QApplication.processEvents()
+                self.pipe_progress.setValue(idx + 1)
+                QApplication.processEvents()
 
             if in_place and batch_records:
-                cmd = BatchPipelineCommand(batch_records, f"Potok wsadowy ({len(self.pipeline_steps)} kroków)", canvas=canvas)
+                cmd = BatchPipelineCommand(batch_records, f"Potok wsadowy ({len(self.pipeline_steps)} kroków)",
+                                           canvas=canvas)
                 session.undo_stack.push(cmd)
             elif not in_place and new_created_spectra:
                 cmd = AddBatchSpectraCommand(new_created_spectra, f"Potok wsadowy ({len(new_created_spectra)} widm)",
@@ -1117,7 +1182,7 @@ class PreprocessingPanel(QWidget):
             self.btn_run_pipeline.setEnabled(True)
             QMessageBox.information(self, tr("app.info"), f"Przetworzono {total} widm potokiem.")
 
-        # 3. AKTYWNA SERIA 2D / TENSOR 3D
+        # 3. AKTYWNA SERIA 2D / TENSOR 3D (SCOPE 2)
         elif scope == 2:
             active_s = session.active_series
             if not active_s:
@@ -1125,42 +1190,34 @@ class PreprocessingPanel(QWidget):
                 return
 
             mat = active_s.get_matrix_2d()
-            n_cols = mat.shape[1]
             wn = active_s.wavenumbers
 
-            self.pipe_progress.setMaximum(n_cols)
+            self.pipe_progress.setMaximum(mat.shape[1])
             self.pipe_progress.setValue(0)
             self.pipe_progress.setVisible(True)
             self.btn_run_pipeline.setEnabled(False)
 
-            ref_x, ref_y0 = self._apply_pipeline_to_vectors(wn, mat[:, 0])
-            new_mat = np.zeros((len(ref_x), n_cols), dtype=np.float64)
-            new_mat[:, 0] = ref_y0
-
-            for col in range(1, n_cols):
-                _, new_y = self._apply_pipeline_to_vectors(wn, mat[:, col])
-                new_mat[:, col] = new_y
-                if col % 10 == 0 or col == n_cols - 1:
-                    self.pipe_progress.setValue(col + 1)
-                    QApplication.processEvents()
+            # Cała macierz serii przetwarzana jest bezpośrednio
+            new_x, new_mat = self._apply_pipeline_to_matrix(wn, mat)
 
             if in_place:
                 old_wn = active_s.wavenumbers.copy()
                 old_data = active_s.data.copy()
 
                 if active_s.is_3d:
-                    new_data = new_mat.reshape(len(ref_x), active_s.data.shape[1], active_s.data.shape[2])
+                    new_data = new_mat.reshape(len(new_x), active_s.data.shape[1], active_s.data.shape[2])
                 else:
                     new_data = new_mat
 
                 cmd = ModifySeriesCommand(active_s, f"Potok serii: {active_s.name}",
-                                          old_wn, ref_x, old_data, new_data, canvas=canvas)
+                                          old_wn, new_x, old_data, new_data, canvas=canvas)
                 session.undo_stack.push(cmd)
             else:
-                out_data = new_mat.reshape(len(ref_x), active_s.data.shape[1], active_s.data.shape[2]) if active_s.is_3d else new_mat
+                out_data = new_mat.reshape(len(new_x), active_s.data.shape[1],
+                                           active_s.data.shape[2]) if active_s.is_3d else new_mat
                 new_series = SpectralSeries(
                     name=f"proc_{active_s.name}",
-                    wavenumbers=ref_x,
+                    wavenumbers=new_x,
                     data=out_data,
                     axis_n_name=active_s.axis_n_name,
                     axis_n_values=active_s.axis_n_values,
@@ -1171,7 +1228,8 @@ class PreprocessingPanel(QWidget):
 
             self.pipe_progress.setVisible(False)
             self.btn_run_pipeline.setEnabled(True)
-            QMessageBox.information(self, tr("app.info"), f"Przetworzono serię '{active_s.name}' ({n_cols} widm)!")
+            QMessageBox.information(self, tr("app.info"),
+                                    f"Przetworzono serię '{active_s.name}' ({mat.shape[1]} widm)!")
 
     # ======================================================================
     # POJEDYNCZE OPERACJE MANUALNE
