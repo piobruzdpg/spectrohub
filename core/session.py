@@ -1,7 +1,8 @@
 """
 core/session.py
 Centralny menedżer stanu danych (Single Source of Truth) dla SpectroHub.
-Zarządza Magazynem Danych oraz Niezależnymi Oknami Roboczymi (Workspaces).
+Zarządza Magazynem Danych (Pomiary Eksperymentalne, Wzorce Atmosfery, Serie 2D, DFT)
+oraz Niezależnymi Oknami Roboczymi (Workspaces).
 """
 
 from typing import Dict, List, Optional
@@ -16,6 +17,12 @@ from core.models import SpectrumData, SpectralSeries
 logger = logging.getLogger("SpectroHub")
 
 
+def is_atmospheric_name(name: str) -> bool:
+    """Rozpoznaje wzorce atmosfery wyłącznie na podstawie fraz atm oraz co2."""
+    nl = name.lower()
+    return "atm" in nl or "co2" in nl
+
+
 @dataclass
 class WorkspaceWindow:
     """Reprezentuje niezależne okno wykresu/robocze w projekcie."""
@@ -27,7 +34,7 @@ class WorkspaceWindow:
 
 
 class ProjectSession(QObject):
-    # Sygnały Magazynu
+    # Sygnały Magazynu - Pomiary
     spectrum_added = Signal(object)
     spectra_batch_added = Signal(list)
     spectrum_removed = Signal(str)
@@ -35,9 +42,17 @@ class ProjectSession(QObject):
     visibility_changed = Signal(str, bool)
     session_cleared = Signal()
 
+    # Sygnały Magazynu - Wzorce Atmosfery
+    atm_spectrum_added = Signal(object)
+    atm_spectra_batch_added = Signal(list)
+    atm_spectrum_removed = Signal(str)
+    atm_visibility_changed = Signal(str, bool)
+
+    # Sygnały Mutacji Danych
     spectrum_data_changed = Signal(object)
     batch_spectra_changed = Signal(list)
 
+    # Sygnały Serii 2D / 3D
     series_added = Signal(object)
     series_removed = Signal(str)
     series_visibility_changed = Signal(str, bool)
@@ -55,9 +70,14 @@ class ProjectSession(QObject):
 
     def __init__(self):
         super().__init__()
-        # Magazyn danych (surowe / referencyjne)
+        # Magazyn danych (Pomiary próbek)
         self._spectra: Dict[str, SpectrumData] = {}
         self._visibility: Dict[str, bool] = {}
+
+        # Dedykowany magazyn wzorców atmosfery (H2O vapor / CO2)
+        self._atm_spectra: Dict[str, SpectrumData] = {}
+        self._atm_visibility: Dict[str, bool] = {}
+
         self._active_spectrum_name: Optional[str] = None
         self.undo_stack = QUndoStack(self)
 
@@ -65,12 +85,11 @@ class ProjectSession(QObject):
         self._series_visibility: Dict[str, bool] = {}
         self._active_series_name: Optional[str] = None
 
-        # Okna robocze (Przestrzenie robocze)
+        # Okna robocze
         self._windows: Dict[str, WorkspaceWindow] = {}
         self._active_window_id: Optional[str] = None
         self._window_counter = 0
 
-        # DOMYŚLNY KONTEKST: Magazyn Danych (od razu widzimy wgrane widma)
         self._active_context: str = "storage"
         self.add_window("Okno 1 (Główne)")
 
@@ -113,12 +132,16 @@ class ProjectSession(QObject):
                 new_active = next(iter(self._windows.keys()), None)
                 self.set_active_window(new_active)
 
-    def get_display_spectra(self) -> List[SpectrumData]:
-        """Zwraca widma widoczne na wykresie w zależności od wybranego kontekstu."""
+    def get_display_spectra(self, include_atm: bool = True) -> List[SpectrumData]:
+        """Zwraca widma widoczne na wykresie."""
         if self._active_context == "window" and self.active_window:
             win = self.active_window
             return [s for name, s in win.spectra.items() if win.visibility.get(name, True)]
-        return [s for name, s in self._spectra.items() if self._visibility.get(name, True)]
+
+        display = [s for name, s in self._spectra.items() if self._visibility.get(name, True)]
+        if include_atm:
+            display.extend([s for name, s in self._atm_spectra.items() if self._atm_visibility.get(name, True)])
+        return display
 
     def set_active_window(self, window_id: Optional[str]):
         if window_id is not None and window_id not in self._windows:
@@ -149,7 +172,6 @@ class ProjectSession(QObject):
             self.window_visibility_changed.emit(window_id, spec_name, is_visible)
 
     def add_spectrum_to_window(self, window_id: str, spectrum: SpectrumData) -> SpectrumData:
-        """Klonuje widmo i dodaje je jako niezależną instancję do wskazanego okna."""
         if window_id not in self._windows:
             raise KeyError(f"Nie odnaleziono okna: {window_id}")
 
@@ -182,23 +204,35 @@ class ProjectSession(QObject):
                     win.active_spectrum_name = next(iter(win.spectra.keys()), None)
                 self.window_spectrum_removed.emit(window_id, name)
 
-    # --- KONTEKST I AKTYWNE ŹRÓDŁO WIDOKU ---
+    # --- KONTEKST ---
     @property
     def active_context(self) -> str:
         return self._active_context
 
     def set_context(self, context: str):
-        """Przełącza widok między Magazynem Danych a Oknem Roboczym."""
         if context in ("storage", "window"):
             self._active_context = context
             logger.debug(f"Zmiana kontekstu sesji na: {context}")
             self.context_changed.emit(context)
             self.active_spectrum_changed.emit(self.active_spectrum)
 
-    # --- ZARZĄDZANIE WIDMAMI MAGAZYNU ---
+    # --- ZARZĄDZANIE WIDMAMI MAGAZYNU I WZORCAMI ATMOSFERY ---
     @property
     def spectra(self) -> Dict[str, SpectrumData]:
         return self._spectra
+
+    @property
+    def atm_spectra(self) -> Dict[str, SpectrumData]:
+        return self._atm_spectra
+
+    def get_spectrum(self, name: str) -> Optional[SpectrumData]:
+        if name in self._spectra:
+            return self._spectra[name]
+        if name in self._atm_spectra:
+            return self._atm_spectra[name]
+        if self.active_window and name in self.active_window.spectra:
+            return self.active_window.spectra[name]
+        return None
 
     @property
     def active_spectrum(self) -> Optional[SpectrumData]:
@@ -207,51 +241,99 @@ class ProjectSession(QObject):
             if win.active_spectrum_name and win.active_spectrum_name in win.spectra:
                 return win.spectra[win.active_spectrum_name]
             if win.spectra:
-                # Automatycznie wybierz pierwsze widmo z brzegu jako aktywne
                 first_name = next(iter(win.spectra.keys()))
                 win.active_spectrum_name = first_name
                 return win.spectra[first_name]
             return None
 
-        if self._active_spectrum_name and self._active_spectrum_name in self._spectra:
-            return self._spectra[self._active_spectrum_name]
+        if self._active_spectrum_name:
+            if self._active_spectrum_name in self._spectra:
+                return self._spectra[self._active_spectrum_name]
+            if self._active_spectrum_name in self._atm_spectra:
+                return self._atm_spectra[self._active_spectrum_name]
         return None
 
-    def add_spectrum(self, spectrum: SpectrumData, make_active: bool = True, emit_signal: bool = True):
+    def add_spectrum(self, spectrum: SpectrumData, is_atm: Optional[bool] = None,
+                     make_active: bool = True, emit_signal: bool = True):
+        if is_atm is None:
+            is_atm = is_atmospheric_name(spectrum.name)
+
+        target_dict = self._atm_spectra if is_atm else self._spectra
+        target_vis = self._atm_visibility if is_atm else self._visibility
+
         base_name = spectrum.name
         unique_name = base_name
         counter = 1
-        while unique_name in self._spectra:
+        all_existing = set(self._spectra.keys()) | set(self._atm_spectra.keys())
+        while unique_name in all_existing:
             unique_name = f"{base_name}_{counter}"
             counter += 1
 
         spectrum.name = unique_name
-        self._spectra[unique_name] = spectrum
-        self._visibility[unique_name] = True
+        target_dict[unique_name] = spectrum
+        target_vis[unique_name] = True
 
         if emit_signal:
-            logger.info(f"Dodano widmo do magazynu: '{unique_name}' ({spectrum.file_type})")
-            self.spectrum_added.emit(spectrum)
+            if is_atm:
+                logger.info(f"Dodano wzorzec atmosfery: '{unique_name}'")
+                self.atm_spectrum_added.emit(spectrum)
+            else:
+                logger.info(f"Dodano widmo pomiarowe: '{unique_name}'")
+                self.spectrum_added.emit(spectrum)
+
             if make_active or self._active_spectrum_name is None:
                 self.set_active_spectrum(unique_name)
 
     def add_spectra_batch(self, spectra_list: List[SpectrumData]):
         if not spectra_list:
             return
-        added = []
+
+        added_exp = []
+        added_atm = []
+
         for spec in spectra_list:
-            self.add_spectrum(spec, make_active=False, emit_signal=False)
-            added.append(spec)
+            if is_atmospheric_name(spec.name):
+                self.add_spectrum(spec, is_atm=True, make_active=False, emit_signal=False)
+                added_atm.append(spec)
+            else:
+                self.add_spectrum(spec, is_atm=False, make_active=False, emit_signal=False)
+                added_exp.append(spec)
 
-        logger.info(f"Zarejestrowano wsadowo w magazynie {len(added)} widm.")
-        # Po wgraniu plików zawsze upewniamy się, że patrzymy na magazyn
         self._active_context = "storage"
-        self.spectra_batch_added.emit(added)
+        if added_exp:
+            logger.info(f"Zarejestrowano wsadowo {len(added_exp)} widm eksperymentalnych.")
+            self.spectra_batch_added.emit(added_exp)
+        if added_atm:
+            logger.info(f"Zarejestrowano wsadowo {len(added_atm)} wzorców atmosfery.")
+            self.atm_spectra_batch_added.emit(added_atm)
 
-        if self._active_spectrum_name is None and added:
-            self.set_active_spectrum(added[-1].name)
+        all_added = added_exp or added_atm
+        if self._active_spectrum_name is None and all_added:
+            self.set_active_spectrum(all_added[-1].name)
         else:
             self.context_changed.emit("storage")
+
+    def move_to_atm(self, name: str):
+        """Przenosi widmo z pomiarów eksperymentalnych do wzorców atmosfery."""
+        if name in self._spectra:
+            spec = self._spectra.pop(name)
+            vis = self._visibility.pop(name, True)
+            self._atm_spectra[name] = spec
+            self._atm_visibility[name] = vis
+            self.spectrum_removed.emit(name)
+            self.atm_spectrum_added.emit(spec)
+            logger.info(f"Przeniesiono '{name}' do Wzorców Atmosfery.")
+
+    def move_to_experimental(self, name: str):
+        """Przenosi widmo ze wzorców atmosfery do pomiarów eksperymentalnych."""
+        if name in self._atm_spectra:
+            spec = self._atm_spectra.pop(name)
+            vis = self._atm_visibility.pop(name, True)
+            self._spectra[name] = spec
+            self._visibility[name] = vis
+            self.atm_spectrum_removed.emit(name)
+            self.spectrum_added.emit(spec)
+            logger.info(f"Przeniesiono '{name}' do Pomiarów Eksperymentalnych.")
 
     def remove_spectrum(self, name: str):
         if name in self._spectra:
@@ -260,12 +342,20 @@ class ProjectSession(QObject):
             logger.info(f"Usunięto widmo z magazynu: '{name}'")
             self.spectrum_removed.emit(name)
             if self._active_spectrum_name == name:
-                new_active = next(iter(self._spectra.keys()), None)
+                new_active = next(iter(self._spectra.keys()), next(iter(self._atm_spectra.keys()), None))
+                self.set_active_spectrum(new_active)
+        elif name in self._atm_spectra:
+            del self._atm_spectra[name]
+            self._atm_visibility.pop(name, None)
+            logger.info(f"Usunięto wzorzec atmosfery: '{name}'")
+            self.atm_spectrum_removed.emit(name)
+            if self._active_spectrum_name == name:
+                new_active = next(iter(self._atm_spectra.keys()), next(iter(self._spectra.keys()), None))
                 self.set_active_spectrum(new_active)
 
     def set_active_spectrum(self, name: Optional[str]):
         if name != self._active_spectrum_name:
-            if name is not None and name not in self._spectra:
+            if name is not None and name not in self._spectra and name not in self._atm_spectra:
                 return
             self._active_spectrum_name = name
             self.active_spectrum_changed.emit(self.active_spectrum)
@@ -274,12 +364,46 @@ class ProjectSession(QObject):
         if name in self._spectra and self._visibility.get(name) != is_visible:
             self._visibility[name] = is_visible
             self.visibility_changed.emit(name, is_visible)
+        elif name in self._atm_spectra and self._atm_visibility.get(name) != is_visible:
+            self._atm_visibility[name] = is_visible
+            self.atm_visibility_changed.emit(name, is_visible)
 
     def is_visible(self, name: str) -> bool:
-        return self._visibility.get(name, True)
+        if name in self._spectra:
+            return self._visibility.get(name, True)
+        if name in self._atm_spectra:
+            return self._atm_visibility.get(name, True)
+        return True
 
     def get_visible_spectra(self) -> List[SpectrumData]:
+        """Zwraca widoczne widma pomiarowe z magazynu (kompatybilność wsteczna)."""
         return [s for name, s in self._spectra.items() if self._visibility.get(name, True)]
+
+    def get_visible_atm_spectra(self) -> List[SpectrumData]:
+        """Zwraca widoczne wzorce atmosfery z magazynu."""
+        return [s for name, s in self._atm_spectra.items() if self._atm_visibility.get(name, True)]
+
+    def get_atm_matrix(self, target_wavenumbers: np.ndarray, only_visible: bool = True) -> Optional[np.ndarray]:
+        """Zwraca macierz (N_pkt x K_widm) wzorców atmosfery interpolowanych do podanej osi X."""
+        source_dict = self._atm_spectra
+        if only_visible:
+            specs = [s for name, s in source_dict.items() if self._atm_visibility.get(name, True)]
+        else:
+            specs = list(source_dict.values())
+
+        if not specs:
+            return None
+
+        cols = []
+        for s in specs:
+            xw, yw = s.wavenumbers, s.intensities
+            if xw[0] > xw[-1]:
+                xw_s, yw_s = xw[::-1], yw[::-1]
+            else:
+                xw_s, yw_s = xw, yw
+            cols.append(np.interp(target_wavenumbers, xw_s, yw_s))
+
+        return np.column_stack(cols)
 
     # --- SERIE I TENSORY ---
     @property
@@ -339,6 +463,8 @@ class ProjectSession(QObject):
     def clear_all(self):
         self._spectra.clear()
         self._visibility.clear()
+        self._atm_spectra.clear()
+        self._atm_visibility.clear()
         self._active_spectrum_name = None
 
         self._series.clear()

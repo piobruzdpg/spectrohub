@@ -26,6 +26,7 @@ from core.i18n import tr, i18n
 from algorithms import preprocessing as prep
 from algorithms.atmospheric import AtmosphericCorrectionEngine
 
+
 logger = logging.getLogger("SpectroHub")
 
 # ==============================================================================
@@ -322,12 +323,12 @@ class AddBatchSpectraCommand(QUndoCommand):
 # DIALOG HURTOWEJ KOMPENSACJI ATMOSFERYCZNEJ (BATCH VAPORFIT)
 # ==============================================================================
 class VaporFitDialog(QDialog):
-    """Okno konfiguracji i uruchomienia kompensacji par wody i CO2."""
+    """Okno konfiguracji i uruchomienia kompensacji par wody i CO2 z dedykowanej bazy atmosfery."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(tr("vapor.title", "VaporFit — Hurtowa Kompensacja Atmosferyczna"))
-        self.resize(750, 620)
+        self.resize(760, 620)
         self.setModal(True)
 
         self._init_ui()
@@ -339,7 +340,7 @@ class VaporFitDialog(QDialog):
 
         row_lists = QHBoxLayout()
 
-        # Próbki
+        # 1. Próbki badane
         box_samples = QGroupBox(tr("vapor.samples_group", "1. Widma badane do skorygowania"))
         l_samples = QVBoxLayout(box_samples)
         row_sample_tools = QHBoxLayout()
@@ -359,12 +360,15 @@ class VaporFitDialog(QDialog):
         l_samples.addWidget(self.list_samples)
         row_lists.addWidget(box_samples, stretch=1)
 
-        # Atmosfera
-        box_atm = QGroupBox(tr("vapor.atm_group", "2. Widma odniesienia atmosfery (H₂O / CO₂)"))
+        # 2. Baza wzorców atmosfery
+        box_atm = QGroupBox(tr("vapor.atm_group", "2. Wzorce atmosfery (H₂O / CO₂)"))
         l_atm = QVBoxLayout(box_atm)
         row_atm_tools = QHBoxLayout()
-        btn_atm_none = QPushButton("Odznacz wszystko")
+        btn_atm_all = QPushButton("Zaznacz wszystkie")
+        btn_atm_all.clicked.connect(lambda: self._set_all_checks(self.list_atm, Qt.Checked))
+        btn_atm_none = QPushButton("Odznacz")
         btn_atm_none.clicked.connect(lambda: self._set_all_checks(self.list_atm, Qt.Unchecked))
+        row_atm_tools.addWidget(btn_atm_all)
         row_atm_tools.addWidget(btn_atm_none)
         row_atm_tools.addStretch()
         l_atm.addLayout(row_atm_tools)
@@ -374,7 +378,7 @@ class VaporFitDialog(QDialog):
         row_lists.addWidget(box_atm, stretch=1)
         layout.addLayout(row_lists)
 
-        # Parametry
+        # 3. Parametry
         box_params = QGroupBox(tr("vapor.params_group", "3. Parametry algorytmu optymalizacyjnego"))
         l_params = QVBoxLayout(box_params)
 
@@ -455,7 +459,8 @@ class VaporFitDialog(QDialog):
 
     def _load_available_spectra(self):
         active = session.active_spectrum
-        all_spectra = session.spectra
+        samples = session.spectra
+        atm_specs = session.atm_spectra
 
         self.list_samples.setUpdatesEnabled(False)
         self.list_atm.setUpdatesEnabled(False)
@@ -465,20 +470,27 @@ class VaporFitDialog(QDialog):
         self.list_samples.clear()
         self.list_atm.clear()
 
-        for name, spec in all_spectra.items():
-            item_s = QListWidgetItem(f"{name} ({spec.n_points} pkt)")
+        # 1. Próbki badane (czyste pomiary eksperymentalne)
+        for name, spec in samples.items():
+            item_s = QListWidgetItem(f"📈 {name} ({spec.n_points} pkt)")
             item_s.setData(Qt.UserRole, name)
             item_s.setFlags(item_s.flags() | Qt.ItemIsUserCheckable)
             is_active = (active and name == active.name)
             item_s.setCheckState(Qt.Checked if is_active else Qt.Unchecked)
             self.list_samples.addItem(item_s)
 
-            item_a = QListWidgetItem(f"{name} ({spec.n_points} pkt)")
+        # 2. Wzorce atmosfery (z dedykowanej gałęzi drzewa)
+        for name, spec in atm_specs.items():
+            item_a = QListWidgetItem(f"☁️ {name} ({spec.n_points} pkt)")
             item_a.setData(Qt.UserRole, name)
             item_a.setFlags(item_a.flags() | Qt.ItemIsUserCheckable)
-            is_atm_name = any(k in name.lower() for k in ['vap', 'atm', 'h2o', 'co2', 'para'])
-            item_a.setCheckState(Qt.Checked if is_atm_name and not is_active else Qt.Unchecked)
+            item_a.setCheckState(Qt.Checked)  # Wzorce zaznaczone domyślnie
             self.list_atm.addItem(item_a)
+
+        if not atm_specs:
+            placeholder = QListWidgetItem("(Brak wzorców w gałęzi Atmosfery)")
+            placeholder.setFlags(Qt.NoItemFlags)
+            self.list_atm.addItem(placeholder)
 
         self.list_samples.blockSignals(False)
         self.list_atm.blockSignals(False)
@@ -488,12 +500,16 @@ class VaporFitDialog(QDialog):
         if active:
             self.ent_min_wn.setText(f"{np.min(active.wavenumbers):.1f}")
             self.ent_max_wn.setText(f"{np.max(active.wavenumbers):.1f}")
+        elif samples:
+            first_s = next(iter(samples.values()))
+            self.ent_min_wn.setText(f"{np.min(first_s.wavenumbers):.1f}")
+            self.ent_max_wn.setText(f"{np.max(first_s.wavenumbers):.1f}")
 
     def _get_checked_names(self, list_widget: QListWidget):
         selected = []
         for row in range(list_widget.count()):
             item = list_widget.item(row)
-            if item.checkState() == Qt.Checked:
+            if item.checkState() == Qt.Checked and item.data(Qt.UserRole):
                 selected.append(item.data(Qt.UserRole))
         return selected
 
@@ -501,12 +517,14 @@ class VaporFitDialog(QDialog):
         sample_names = self._get_checked_names(self.list_samples)
         atm_names = self._get_checked_names(self.list_atm)
 
-        if not sample_names or not atm_names:
-            QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"),
-                                "Zaznacz co najmniej jedno widmo próbki i jedno widmo atmosfery.")
+        if not sample_names:
+            QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"), "Zaznacz co najmniej jedno widmo badane.")
+            return
+        if not atm_names:
+            QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"), "Zaznacz co najmniej jedno widmo wzorca atmosfery.")
             return
 
-        sample_spec = session.spectra[sample_names[0]]
+        sample_spec = session.get_spectrum(sample_names[0])
         try:
             poly = int(self.ent_sg_poly.text())
             min_w = float(self.ent_min_wn.text())
@@ -521,7 +539,7 @@ class VaporFitDialog(QDialog):
 
         atm_matrix = []
         for a_name in atm_names:
-            a_spec = session.spectra[a_name]
+            a_spec = session.get_spectrum(a_name)
             if a_spec.wavenumbers[0] > a_spec.wavenumbers[-1]:
                 x_ref, y_ref = a_spec.wavenumbers[::-1], a_spec.intensities[::-1]
             else:
@@ -549,15 +567,11 @@ class VaporFitDialog(QDialog):
         sample_names = self._get_checked_names(self.list_samples)
         atm_names = self._get_checked_names(self.list_atm)
 
-        if not sample_names or not atm_names:
-            QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"),
-                                "Wybierz co najmniej jedno widmo próbki i jedno widmo atmosfery.")
+        if not sample_names:
+            QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"), "Zaznacz co najmniej jedno widmo badane.")
             return
-
-        final_sample_names = [s for s in sample_names if s not in atm_names]
-        if not final_sample_names:
-            QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"),
-                                "Widma badane nie mogą być jednocześnie widmami odniesienia atmosfery.")
+        if not atm_names:
+            QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"), "Zaznacz co najmniej jedno widmo wzorca atmosfery.")
             return
 
         try:
@@ -569,7 +583,7 @@ class VaporFitDialog(QDialog):
             QMessageBox.warning(self, tr("app.warning", "Ostrzeżenie"), "Nieprawidłowe wartości parametrów numerycznych.")
             return
 
-        total_count = len(final_sample_names)
+        total_count = len(sample_names)
         self.btn_apply.setEnabled(False)
         self.progress_bar.setMaximum(total_count)
         self.progress_bar.setValue(0)
@@ -579,18 +593,18 @@ class VaporFitDialog(QDialog):
 
         prepared_atm = []
         for a_name in atm_names:
-            a_spec = session.spectra[a_name]
+            a_spec = session.get_spectrum(a_name)
             if a_spec.wavenumbers[0] > a_spec.wavenumbers[-1]:
                 prepared_atm.append((a_spec.wavenumbers[::-1], a_spec.intensities[::-1]))
             else:
                 prepared_atm.append((a_spec.wavenumbers, a_spec.intensities))
 
-        for idx, s_name in enumerate(final_sample_names):
+        for idx, s_name in enumerate(sample_names):
             self.lbl_status.setText(f"Korygowanie ({idx + 1}/{total_count}): {s_name}...")
             QApplication.processEvents()
 
             try:
-                sample_spec = session.spectra[s_name]
+                sample_spec = session.get_spectrum(s_name)
                 mask = (sample_spec.wavenumbers >= min_w) & (sample_spec.wavenumbers <= max_w)
                 wn_crop = sample_spec.wavenumbers[mask]
                 y_crop = sample_spec.intensities[mask]
@@ -688,6 +702,27 @@ class PreprocessingPanel(QWidget):
         box_pipeline.setStyleSheet("QGroupBox { font-weight: bold; color: #48cae4; }")
         l_pipe = QVBoxLayout(box_pipeline)
         l_pipe.setSpacing(6)
+
+        # NOWY PRZYCISK: WERSJA WĘZŁOWA (BETA)
+        row_pipe_mode = QHBoxLayout()
+        self.btn_open_node_graph = QPushButton("☊ Otwórz Potok Węzłowy (Beta)...")
+        self.btn_open_node_graph.setStyleSheet("""
+                    QPushButton {
+                        background-color: #3a0ca3; 
+                        color: #ffffff; 
+                        font-weight: bold; 
+                        padding: 6px; 
+                        border: 1px solid #7209b7;
+                        border-radius: 4px;
+                    }
+                    QPushButton:hover { background-color: #4361ee; }
+                """)
+        self.btn_open_node_graph.clicked.connect(self._open_node_pipeline_dialog)
+        row_pipe_mode.addWidget(self.btn_open_node_graph)
+        l_pipe.addLayout(row_pipe_mode)
+
+        self.list_pipeline = QListWidget()
+        self.list_pipeline.setFixedHeight(120)
 
         self.list_pipeline = QListWidget()
         self.list_pipeline.setFixedHeight(120)
@@ -1320,6 +1355,12 @@ class PreprocessingPanel(QWidget):
     # ======================================================================
     def _open_vaporfit_dialog(self):
         dlg = VaporFitDialog(self)
+        dlg.exec()
+
+    def _open_node_pipeline_dialog(self):
+        """Uruchamia pełnoekranowy, interaktywny edytor węzłowy potoku."""
+        from gui.node_editor import NodePipelineDialog  # <--- IMPORT TUTAJ
+        dlg = NodePipelineDialog(parent=self.window())
         dlg.exec()
 
     # Nowe metody manualne dla pojedynczych kliknięć:
