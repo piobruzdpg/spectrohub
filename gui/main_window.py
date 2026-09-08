@@ -24,6 +24,7 @@ from gui.workspaces.ws_preprocessing import PreprocessingPanel
 from gui.workspaces.ws_deconvolution import DeconvolutionPanel
 from gui.workspaces.ws_chemometrics import ChemometricsPanel
 from gui.workspaces.ws_quantum import QuantumPanel
+from gui.workspaces.ws_spectral_math import SpectralMathPanel
 
 from io_hub.exporters.excel_exporter import ExcelProjectExporter
 from io_hub.exporters.ascii_exporter import ASCIIExporter
@@ -87,14 +88,16 @@ class MainWindow(QMainWindow):
         self.inspector_stack = QStackedWidget(self)
 
         self.panel_prep = PreprocessingPanel(self)
+        self.panel_math = SpectralMathPanel(self)
         self.panel_deconv = DeconvolutionPanel(self)
         self.panel_chem = ChemometricsPanel(self)
         self.panel_dft = QuantumPanel(self)
 
         self.inspector_stack.addWidget(self.panel_prep)    # Indeks 0
-        self.inspector_stack.addWidget(self.panel_deconv)  # Indeks 1
-        self.inspector_stack.addWidget(self.panel_chem)    # Indeks 2
-        self.inspector_stack.addWidget(self.panel_dft)     # Indeks 3
+        self.inspector_stack.addWidget(self.panel_math)    # Indeks 1
+        self.inspector_stack.addWidget(self.panel_deconv)  # Indeks 2
+        self.inspector_stack.addWidget(self.panel_chem)    # Indeks 3
+        self.inspector_stack.addWidget(self.panel_dft)     # Indeks 4
 
         self.dock_inspector.setWidget(self.inspector_stack)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_inspector)
@@ -166,9 +169,10 @@ class MainWindow(QMainWindow):
         self.ws_buttons = []
         workspaces_keys = [
             ("workspaces.preprocessing", 0),
-            ("workspaces.deconvolution", 1),
-            ("workspaces.chemometrics", 2),
-            ("workspaces.quantum", 3)
+            ("workspaces.spectral_math", 1),
+            ("workspaces.deconvolution", 2),
+            ("workspaces.chemometrics", 3),
+            ("workspaces.quantum", 4)
         ]
 
         for key, idx in workspaces_keys:

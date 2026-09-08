@@ -100,11 +100,11 @@ TRANSLATIONS = {
         "single_success": "Widmo zostało pomyślnie wyeksportowane.",
     },
     "workspaces": {
-        "preprocessing": "1. Preprocessing & Czyszczenie",
-        "deconvolution": "2. Dekonwolucja & Fit",
-        "chemometrics": "3. Chemometria",
-        "quantum": "4. DFT & Wibracje 3D",
-        "pub_studio": "5. Pub-Studio",
+        "preprocessing": "1. Preprocessing",
+        "spectral_math": "2. Matematyka Spektralna",
+        "deconvolution": "3. Dekonwolucja i Fitowanie",
+        "chemometrics": "4. Chemometria",
+        "quantum": "5. DFT i Wibracje 3D",
     },
     "project_tree": {
         "header": "Eksplorator Projektu",

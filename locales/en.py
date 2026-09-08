@@ -100,11 +100,11 @@ TRANSLATIONS = {
         "single_success": "Spectrum exported successfully.",
     },
     "workspaces": {
-        "preprocessing": "1. Preprocessing & Clean",
-        "deconvolution": "2. Deconvolution & Fit",
-        "chemometrics": "3. Chemometrics",
-        "quantum": "4. DFT & 3D Vibrations",
-        "pub_studio": "5. Pub-Studio",
+        "preprocessing": "1. Preprocessing",
+        "spectral_math": "2. Spectral Math",
+        "deconvolution": "3. Deconvolution & Fit",
+        "chemometrics": "4. Chemometrics",
+        "quantum": "5. DFT & 3D Vibrations",
     },
     "project_tree": {
         "header": "Project Explorer",

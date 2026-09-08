@@ -31,6 +31,9 @@ logger = logging.getLogger("SpectroHub")
 # ==============================================================================
 # DIALOG EDYCJI PARAMETRÓW KROKU POTOKU
 # ==============================================================================
+# ==============================================================================
+# DIALOG EDYCJI PARAMETRÓW KROKU POTOKU
+# ==============================================================================
 class StepParamDialog(QDialog):
     """Modalne okno pozwalające edytować parametry dowolnego kroku potoku."""
 
@@ -38,7 +41,7 @@ class StepParamDialog(QDialog):
         super().__init__(parent)
         self.step = step
         self.setWindowTitle(f"Parametry kroku: {step.get('type', '')}")
-        self.resize(340, 200)
+        self.resize(340, 220)
         self.setModal(True)
 
         self.layout = QVBoxLayout(self)
@@ -66,6 +69,30 @@ class StepParamDialog(QDialog):
             self.spin_p.setValue(step.get('p', 0.001))
             self.form.addRow("Gładkość (λ):", self.ent_lam)
             self.form.addRow("Asymetria (p):", self.spin_p)
+
+        elif stype == 'airpls':
+            self.ent_lam = QLineEdit(f"{step.get('lam', 1e5):.0e}")
+            self.spin_iter = QSpinBox()
+            self.spin_iter.setRange(5, 100)
+            self.spin_iter.setValue(step.get('n_iter', 15))
+            self.form.addRow("Gładkość (λ):", self.ent_lam)
+            self.form.addRow("Maks. iteracji:", self.spin_iter)
+
+        elif stype == 'poly_bl':
+            self.spin_deg = QSpinBox()
+            self.spin_deg.setRange(1, 10)
+            self.spin_deg.setValue(step.get('deg', 3))
+            self.form.addRow("Stopień wielomianu:", self.spin_deg)
+
+        elif stype == 'fsd':
+            self.spin_fwhm = QDoubleSpinBox()
+            self.spin_fwhm.setRange(1.0, 100.0)
+            self.spin_fwhm.setValue(step.get('fwhm', 18.0))
+            self.spin_k = QDoubleSpinBox()
+            self.spin_k.setRange(0.1, 10.0)
+            self.spin_k.setValue(step.get('k_factor', 2.0))
+            self.form.addRow("FWHM filtra [cm⁻¹]:", self.spin_fwhm)
+            self.form.addRow("Współczynnik K (Kauppinen):", self.spin_k)
 
         elif stype in ['sg_smooth', 'deriv1', 'deriv2']:
             self.spin_win = QSpinBox()
@@ -105,6 +132,20 @@ class StepParamDialog(QDialog):
                 self.step['p'] = float(self.spin_p.value())
                 self.step['name'] = f"AsLS (λ={self.step['lam']:.0e}, p={self.step['p']})"
 
+            elif stype == 'airpls':
+                self.step['lam'] = float(self.ent_lam.text())
+                self.step['n_iter'] = int(self.spin_iter.value())
+                self.step['name'] = f"airPLS / airALS (λ={self.step['lam']:.0e})"
+
+            elif stype == 'poly_bl':
+                self.step['deg'] = int(self.spin_deg.value())
+                self.step['name'] = f"Wielomian st. {self.step['deg']}"
+
+            elif stype == 'fsd':
+                self.step['fwhm'] = float(self.spin_fwhm.value())
+                self.step['k_factor'] = float(self.spin_k.value())
+                self.step['name'] = f"FSD (FWHM={self.step['fwhm']}, K={self.step['k_factor']})"
+
             elif stype == 'sg_smooth':
                 self.step['win'] = int(self.spin_win.value())
                 self.step['poly'] = int(self.spin_poly.value())
@@ -127,7 +168,6 @@ class StepParamDialog(QDialog):
             self.accept()
         except ValueError:
             QMessageBox.warning(self, "Błąd", "Wprowadzono niepoprawny format liczby.")
-
 
 # ==============================================================================
 # KOMENDY HISTORII (QUndoStack)
@@ -661,12 +701,16 @@ class PreprocessingPanel(QWidget):
         self.combo_step_type.addItems([
             "✂ Przycięcie (Crop)",
             "📏 Linia Bazowa (AsLS)",
+            "📏 Linia Bazowa (airPLS / airALS)",
+            "📏 Linia Bazowa (Wielomianowa)",
             "📏 Linia Bazowa (Dwa krańce)",
+            "🌊 Dekonwolucja Fouriera (FSD)",
             "〰 Wygładzanie (SG)",
             "📉 1. Pochodna (SG)",
             "📉 2. Pochodna (-) (SG)",
             "⚖ Normalizacja SNV",
             "⚖ Normalizacja Min-Max",
+            "⚖ Normalizacja L₁ (Pole)",
             "⚖ Normalizacja L₂",
             "⚖ Offset (Min ➔ 0.0)",
             "⚖ Offset (w punkcie ν)",
@@ -776,23 +820,31 @@ class PreprocessingPanel(QWidget):
         l_baseline = QVBoxLayout(box_baseline)
 
         row_asls = QHBoxLayout()
-        row_asls.addWidget(QLabel("AsLS λ:"))
+        row_asls.addWidget(QLabel("λ:"))
         self.ent_asls_lam = QLineEdit("100000")
         row_asls.addWidget(self.ent_asls_lam)
-
-        row_asls.addWidget(QLabel("p:"))
+        row_asls.addWidget(QLabel("p (AsLS):"))
         self.ent_asls_p = QLineEdit("0.001")
         row_asls.addWidget(self.ent_asls_p)
         l_baseline.addLayout(row_asls)
 
         row_bl_btns = QHBoxLayout()
-        self.btn_asls = QPushButton("Odejmij tło (AsLS)")
+        self.btn_asls = QPushButton("AsLS")
         self.btn_asls.clicked.connect(self._apply_asls)
-        self.btn_linear_bl = QPushButton("Odejmij linię (Dwa krańce)")
-        self.btn_linear_bl.clicked.connect(self._apply_linear_endpoints_bl)
+        self.btn_airpls = QPushButton("airPLS / airALS")
+        self.btn_airpls.clicked.connect(self._apply_airpls)
         row_bl_btns.addWidget(self.btn_asls)
-        row_bl_btns.addWidget(self.btn_linear_bl)
+        row_bl_btns.addWidget(self.btn_airpls)
         l_baseline.addLayout(row_bl_btns)
+
+        row_bl_btns2 = QHBoxLayout()
+        self.btn_poly_bl = QPushButton("Wielomianowa (st. 3)")
+        self.btn_poly_bl.clicked.connect(self._apply_poly_bl)
+        self.btn_linear_bl = QPushButton("Dwa krańce")
+        self.btn_linear_bl.clicked.connect(self._apply_linear_endpoints_bl)
+        row_bl_btns2.addWidget(self.btn_poly_bl)
+        row_bl_btns2.addWidget(self.btn_linear_bl)
+        l_baseline.addLayout(row_bl_btns2)
         layout.addWidget(box_baseline)
 
         # Filtry i pochodne (Savitzky-Golay)
@@ -822,6 +874,10 @@ class PreprocessingPanel(QWidget):
         row_derivs.addWidget(self.btn_deriv2)
         l_filters.addLayout(row_derivs)
         layout.addWidget(box_filters)
+
+        self.btn_fsd = QPushButton("Dekonwolucja Fouriera (FSD Kauppinena)")
+        self.btn_fsd.clicked.connect(self._apply_fsd)
+        l_filters.addWidget(self.btn_fsd)
 
         # Normalizacje i Offset
         box_norm = QGroupBox("⚖ Normalizacje & Offset")
@@ -903,8 +959,18 @@ class PreprocessingPanel(QWidget):
                 p = float(self.ent_asls_p.text())
                 step = {'type': 'asls', 'name': f"AsLS (λ={lam:.0e}, p={p})", 'lam': lam, 'p': p}
 
+            elif "airPLS" in choice or "airALS" in choice:
+                lam = float(self.ent_asls_lam.text())
+                step = {'type': 'airpls', 'name': f"airPLS / airALS (λ={lam:.0e})", 'lam': lam, 'n_iter': 15}
+
+            elif "Wielomianowa" in choice:
+                step = {'type': 'poly_bl', 'name': "Wielomian st. 3", 'deg': 3}
+
             elif "Dwa krańce" in choice:
                 step = {'type': 'linear_bl', 'name': "Linia bazowa (krańce)"}
+
+            elif "FSD" in choice or "Dekonwolucja" in choice:
+                step = {'type': 'fsd', 'name': "FSD (FWHM=18.0, K=2.0)", 'fwhm': 18.0, 'k_factor': 2.0}
 
             elif "Wygładzanie" in choice:
                 win = int(self.ent_sg_win.text())
@@ -928,7 +994,10 @@ class PreprocessingPanel(QWidget):
             elif "Min-Max" in choice:
                 step = {'type': 'minmax', 'name': "Normalizacja Min-Max"}
 
-            elif "Norma L" in choice:
+            elif "Norma L₁" in choice:
+                step = {'type': 'l1', 'name': "Normalizacja L₁ (Pole)"}
+
+            elif "Norma L₂" in choice:
                 step = {'type': 'l2', 'name': "Normalizacja L₂"}
 
             elif "Min ➔ 0.0" in choice:
@@ -938,7 +1007,6 @@ class PreprocessingPanel(QWidget):
                 t_wn = float(self.ent_offset_wn.text())
                 step = {'type': 'offset_point', 'name': f"Offset w punkcie {t_wn:.1f} cm⁻¹ ➔ 0", 'target_wn': t_wn}
 
-            # Skalowania chemometryczne
             elif "Centrowanie" in choice:
                 step = {'type': 'mean_center', 'name': "Centrowanie do średniej"}
 
@@ -1000,10 +1068,7 @@ class PreprocessingPanel(QWidget):
             self.list_pipeline.addItem(f"{idx + 1}. {step['name']}")
 
     def _apply_pipeline_to_matrix(self, x: np.ndarray, mat: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Zunifikowane wykonanie potoku na macierzy 2D (Liczby falowe x Próbki).
-        Obsługuje filtry pojedynczych widm oraz skalowania chemometryczne całego zespołu.
-        """
+        """Zunifikowane wykonanie potoku na macierzy 2D."""
         curr_x = x.copy()
         curr_mat = mat.copy()
 
@@ -1018,11 +1083,28 @@ class PreprocessingPanel(QWidget):
                     baseline = prep.baseline_asls(curr_mat[:, c], lam=step['lam'], p=step['p'])
                     curr_mat[:, c] -= baseline
 
+            elif stype == 'airpls':
+                for c in range(curr_mat.shape[1]):
+                    baseline = prep.baseline_airpls(curr_mat[:, c], lam=step.get('lam', 1e5),
+                                                    n_iter=step.get('n_iter', 15))
+                    curr_mat[:, c] -= baseline
+
+            elif stype == 'poly_bl':
+                for c in range(curr_mat.shape[1]):
+                    baseline = prep.baseline_polynomial(curr_mat[:, c], curr_x, deg=step.get('deg', 3))
+                    curr_mat[:, c] -= baseline
+
             elif stype == 'linear_bl':
                 if len(curr_x) >= 2:
                     for c in range(curr_mat.shape[1]):
                         baseline = prep.baseline_linear(curr_x, curr_mat[:, c], curr_x[0], curr_x[-1])
                         curr_mat[:, c] -= baseline
+
+            elif stype == 'fsd':
+                for c in range(curr_mat.shape[1]):
+                    curr_mat[:, c] = prep.fourier_self_deconvolution(
+                        curr_x, curr_mat[:, c], fwhm=step.get('fwhm', 18.0), k_factor=step.get('k_factor', 2.0)
+                    )
 
             elif stype == 'sg_smooth':
                 curr_mat = prep.apply_savgol(curr_mat, window=step['win'], poly=step['poly'], deriv=0)
@@ -1039,6 +1121,9 @@ class PreprocessingPanel(QWidget):
             elif stype == 'minmax':
                 curr_mat = prep.apply_min_max(curr_mat)
 
+            elif stype == 'l1':
+                curr_mat = prep.apply_norm_l1(curr_mat)
+
             elif stype == 'l2':
                 curr_mat = prep.apply_vector_norm_l2(curr_mat)
 
@@ -1048,7 +1133,6 @@ class PreprocessingPanel(QWidget):
             elif stype == 'offset_point':
                 curr_mat = prep.apply_offset(curr_mat, curr_x, target_wn=step['target_wn'], target_val=0.0)
 
-            # KROKI MACIERZOWE / CHEMOMETRYCZNE:
             elif stype == 'mean_center':
                 if curr_mat.shape[1] > 1:
                     curr_mat, _ = prep.apply_mean_center(curr_mat)
@@ -1237,6 +1321,51 @@ class PreprocessingPanel(QWidget):
     def _open_vaporfit_dialog(self):
         dlg = VaporFitDialog(self)
         dlg.exec()
+
+    # Nowe metody manualne dla pojedynczych kliknięć:
+    def _apply_airpls(self):
+        if not self._verify_single_tool_permission():
+            return
+        spec = session.active_spectrum
+        if not spec:
+            return
+        try:
+            lam = float(self.ent_asls_lam.text())
+            baseline = prep.baseline_airpls(spec.intensities, lam=lam)
+            new_y = spec.intensities - baseline
+            cmd = ModifySpectrumCommand(spec, "airPLS Baseline", spec.intensities, new_y, canvas=self._get_canvas())
+            session.undo_stack.push(cmd)
+        except Exception as e:
+            QMessageBox.critical(self, tr("app.error"), f"Błąd airPLS: {e}")
+
+    def _apply_poly_bl(self):
+        if not self._verify_single_tool_permission():
+            return
+        spec = session.active_spectrum
+        if not spec:
+            return
+        try:
+            baseline = prep.baseline_polynomial(spec.intensities, spec.wavenumbers, deg=3)
+            new_y = spec.intensities - baseline
+            cmd = ModifySpectrumCommand(spec, "Wielomianowa st. 3", spec.intensities, new_y,
+                                        canvas=self._get_canvas())
+            session.undo_stack.push(cmd)
+        except Exception as e:
+            QMessageBox.critical(self, tr("app.error"), f"Błąd linii wielomianowej: {e}")
+
+    def _apply_fsd(self):
+        if not self._verify_single_tool_permission():
+            return
+        spec = session.active_spectrum
+        if not spec:
+            return
+        try:
+            new_y = prep.fourier_self_deconvolution(spec.wavenumbers, spec.intensities, fwhm=18.0, k_factor=2.0)
+            cmd = ModifySpectrumCommand(spec, "FSD (FWHM=18, K=2)", spec.intensities, new_y,
+                                        canvas=self._get_canvas())
+            session.undo_stack.push(cmd)
+        except Exception as e:
+            QMessageBox.critical(self, tr("app.error"), f"Błąd FSD: {e}")
 
     def _apply_asls(self):
         if not self._verify_single_tool_permission():

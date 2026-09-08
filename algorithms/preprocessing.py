@@ -102,6 +102,28 @@ def baseline_linear(x: np.ndarray, y: np.ndarray, x1: float, x2: float) -> np.nd
     return slope * x + intercept
 
 
+def baseline_polynomial(y: np.ndarray, x: np.ndarray, deg: int = 3, n_iter: int = 10) -> np.ndarray:
+    """
+    Iteracyjna korekcja linii bazowej wielomianem zadanego stopnia (deg).
+    W kolejnych iteracjach wagi punktów leżących powyżej dopasowania są wygaszane.
+    """
+    y_arr = np.asarray(y, dtype=np.float64)
+    x_arr = np.asarray(x, dtype=np.float64)
+
+    # Normalizacja osi X dla stabilności numerycznej wielomianu
+    x_norm = (x_arr - np.mean(x_arr)) / (np.std(x_arr) + 1e-12)
+
+    w = np.ones_like(y_arr)
+    poly_baseline = np.zeros_like(y_arr)
+
+    for _ in range(n_iter):
+        coeffs = np.polyfit(x_norm, y_arr, deg=deg, w=np.sqrt(w))
+        poly_baseline = np.polyval(coeffs, x_norm)
+        # Odrzucamy piki (punkty powyżej wielomianu dostają minimalne wagi)
+        w = np.where(y_arr > poly_baseline, 1e-4, 1.0)
+
+    return poly_baseline
+
 # =====================================================================
 # 2. FOURIER SELF-DECONVOLUTION (FSD)
 # =====================================================================
