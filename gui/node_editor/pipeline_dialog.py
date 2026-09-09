@@ -1,7 +1,7 @@
 """
 gui/node_editor/pipeline_dialog.py
-Główne okno dialogowe edytora węzłów (Niemodalne, Hybrydowe).
-Domyślnym celem jest 'Wszystkie widoczne w aktywnym oknie / gałęzi' z pełną izolacją magazynu.
+Główne okno edytora węzłów (QMainWindow) z architekturą wielozakładkową (Multi-Tab),
+przypięciem do lewej, wydzielaniem przez przeciągnięcie (Tear-off) lub menu PPM oraz dokowalną paletą.
 """
 
 from typing import List, Dict, Any, Optional, Tuple
@@ -11,11 +11,13 @@ import json
 import logging
 
 from PySide6.QtWidgets import (
-    QDialog, QWidget, QVBoxLayout, QPushButton, QGraphicsView,
-    QGraphicsScene, QMenu, QLabel, QComboBox, QCheckBox,
-    QMessageBox, QToolBar, QFileDialog
+    QMainWindow, QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QGraphicsView, QGraphicsScene, QMenu, QLabel,
+    QComboBox, QCheckBox, QMessageBox, QToolBar, QFileDialog,
+    QTabWidget, QTabBar, QInputDialog, QProxyStyle, QStyle
 )
-from PySide6.QtCore import Qt, QPointF, QRectF
+
+from PySide6.QtCore import Qt, QPointF, QRectF, QTimer, QSettings, Signal
 from PySide6.QtGui import QPainter, QBrush, QColor, QPen
 
 from core.session import session
@@ -26,8 +28,61 @@ from gui.workspaces.ws_preprocessing import (
 )
 from gui.node_editor.items import NodeItem, PortItem, ConnectionItem
 from gui.node_editor.evaluator import DAGEvaluator
+from gui.node_editor.palette import NodeLibraryWidget, MIME_NODE_TYPE
 
 logger = logging.getLogger("SpectroHub")
+
+
+class PipelineTabInfo:
+    """Kontener metadanych pojedynczej zakładki potoku."""
+    def __init__(self, title: str, view: 'NodeView', scene: 'NodeScene',
+                 scope: int = 0, in_place: bool = True):
+        self.title = title
+        self.view = view
+        self.scene = scene
+        self.scope = scope
+        self.in_place = in_place
+        self.floating_window: Optional['FloatingPipelineWindow'] = None
+
+
+class LeftAlignedTabStyle(QProxyStyle):
+    """Wymusza wyrównanie zakładek do lewej krawędzi (omija domyślne centrowanie na macOS)."""
+    def styleHint(self, hint, option=None, widget=None, returnData=None):
+        hint_val = int(hint.value) if hasattr(hint, 'value') else int(hint)
+        target_val = int(QStyle.StyleHint.SH_TabBar_Alignment.value) if hasattr(QStyle.StyleHint.SH_TabBar_Alignment, 'value') else int(QStyle.StyleHint.SH_TabBar_Alignment)
+        if hint_val == target_val:
+            return int(Qt.AlignmentFlag.AlignLeft)
+        return super().styleHint(hint, option, widget, returnData)
+
+class DetachableTabBar(QTabBar):
+    """Pasek zakładek z obsługą odrywania przez przeciągnięcie poza pasek oraz lewostronnego układu."""
+    tabDetached = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setMovable(True)
+        self.setExpanding(False)
+        self._press_pos = QPointF()
+        self._drag_tab_idx = -1
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._press_pos = event.position()
+            self._drag_tab_idx = self.tabAt(event.position().toPoint())
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._drag_tab_idx >= 0:
+            drop_pos = event.position().toPoint()
+            # Jeśli kursor został upuszczony poza paskiem zakładek
+            if not self.rect().adjusted(-30, -30, 30, 45).contains(drop_pos):
+                idx = self._drag_tab_idx
+                self._drag_tab_idx = -1
+                self.tabDetached.emit(idx)
+                event.accept()
+                return
+        self._drag_tab_idx = -1
+        super().mouseReleaseEvent(event)
 
 
 class NodeScene(QGraphicsScene):
@@ -58,7 +113,7 @@ class NodeScene(QGraphicsScene):
                 clone.setSelected(True)
                 clone.setZValue(node.zValue() + 1.0)
                 super().mousePressEvent(event)
-                self.dialog_owner.recalculate_graph_preview()
+                self.dialog_owner.recalculate_graph_preview(target_scene=self)
                 self.dialog_owner.sync_state_to_session()
                 return
 
@@ -82,7 +137,7 @@ class NodeScene(QGraphicsScene):
                 item.connections.append(self.temp_connection)
                 self.temp_connection.update_path()
                 self.temp_connection = None
-                self.dialog_owner.recalculate_graph_preview()
+                self.dialog_owner.recalculate_graph_preview(target_scene=self)
                 self.dialog_owner.sync_state_to_session()
             else:
                 self.temp_connection.disconnect()
@@ -91,14 +146,20 @@ class NodeScene(QGraphicsScene):
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
-            self.dialog_owner._delete_selected()
+            self.dialog_owner._delete_selected(scene=self)
             event.accept()
             return
 
         if event.key() == Qt.Key_D and (event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)):
             selected_nodes = [item for item in self.selectedItems() if isinstance(item, NodeItem)]
             for node in selected_nodes:
-                self.dialog_owner.duplicate_node(node)
+                self.dialog_owner.duplicate_node(node, scene=self)
+            event.accept()
+            return
+
+        if event.key() == Qt.Key_F and not (event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)):
+            if self.views():
+                self.views()[0].fit_to_content()
             event.accept()
             return
 
@@ -111,7 +172,7 @@ class NodeScene(QGraphicsScene):
             menu_title = menu.addAction("➕ Dodaj węzeł:")
             menu_title.setEnabled(False)
             menu.addSeparator()
-            self.dialog_owner._populate_node_menu(menu, pos=event.scenePos())
+            self.dialog_owner._populate_node_menu(menu, pos=event.scenePos(), target_scene=self)
             menu.exec(event.screenPos())
             event.accept()
             return
@@ -119,13 +180,101 @@ class NodeScene(QGraphicsScene):
 
 
 class NodeView(QGraphicsView):
-    """Widok z siatką współrzędnych i zoomem kółkiem myszy."""
+    """Widok z siatką współrzędnych, zoomem, panoramowaniem i obsługą upuszczania węzłów."""
 
     def __init__(self, scene: QGraphicsScene, parent=None):
         super().__init__(scene, parent)
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
         self.setDragMode(QGraphicsView.RubberBandDrag)
         self.setBackgroundBrush(QBrush(QColor("#18181e")))
+        self.setAcceptDrops(True)
+        self._is_panning = False
+        self._pan_start = QPointF()
+
+    def fit_to_content(self, margin: float = 60.0):
+        """Centruje i skaluje widok tak, aby objąć wszystkie bloczki węzłów."""
+        nodes = [item for item in self.scene().items() if isinstance(item, NodeItem)]
+        if not nodes:
+            return
+
+        rect = nodes[0].sceneBoundingRect()
+        for node in nodes[1:]:
+            rect = rect.united(node.sceneBoundingRect())
+
+        if rect.width() < 700:
+            cx = rect.center().x()
+            rect.setLeft(cx - 350)
+            rect.setRight(cx + 350)
+        if rect.height() < 400:
+            cy = rect.center().y()
+            rect.setTop(cy - 200)
+            rect.setBottom(cy + 200)
+
+        rect.adjust(-margin, -margin, margin, margin)
+        self.fitInView(rect, Qt.KeepAspectRatio)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_F and not (event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)):
+            self.fit_to_content()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MiddleButton or (event.button() == Qt.LeftButton and (event.modifiers() & Qt.AltModifier)):
+            self._is_panning = True
+            self._pan_start = event.position()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._is_panning:
+            delta = event.position() - self._pan_start
+            self._pan_start = event.position()
+            self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - int(delta.x()))
+            self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(delta.y()))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._is_panning and (event.button() in (Qt.MiddleButton, Qt.LeftButton)):
+            self._is_panning = False
+            self.setCursor(Qt.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasFormat(MIME_NODE_TYPE):
+            event.acceptProposedAction()
+        else:
+            super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasFormat(MIME_NODE_TYPE):
+            event.acceptProposedAction()
+        else:
+            super().dragMoveEvent(event)
+
+    def dropEvent(self, event):
+        if event.mimeData().hasFormat(MIME_NODE_TYPE):
+            raw_data = event.mimeData().data(MIME_NODE_TYPE).data().decode("utf-8")
+            payload = json.loads(raw_data)
+            scene_pos = self.mapToScene(event.position().toPoint())
+
+            if hasattr(self.scene(), 'dialog_owner'):
+                self.scene().dialog_owner._add_processing_node(
+                    title=payload["title"],
+                    step_data=payload["step_data"],
+                    pos=scene_pos,
+                    scene=self.scene()
+                )
+            event.acceptProposedAction()
+        else:
+            super().dropEvent(event)
 
     def wheelEvent(self, event):
         zoom_factor = 1.15 if event.angleDelta().y() > 0 else 1.0 / 1.15
@@ -149,45 +298,390 @@ class NodeView(QGraphicsView):
             painter.drawLine(p1, p2)
 
 
-class NodePipelineDialog(QDialog):
-    """Niemodalny edytor potoku DAG z pełną obsługą chemometrii i terminali okien."""
+class FloatingPipelineWindow(QMainWindow):
+    """Niezależne okno pływające dla wydzielonej zakładki potoku."""
+
+    def __init__(self, tab_info: PipelineTabInfo, dialog_owner: 'NodePipelineDialog'):
+        super().__init__(dialog_owner)
+        self.tab_info = tab_info
+        self.dialog_owner = dialog_owner
+        self.setWindowTitle(f"Potok: {tab_info.title} — SpectroHub")
+        self.resize(1020, 720)
+        self.setWindowFlags(Qt.Window)
+
+        toolbar = QToolBar("Narzędzia", self)
+        toolbar.setStyleSheet("background-color: #252530; spacing: 8px; padding: 4px;")
+        self.addToolBar(Qt.TopToolBarArea, toolbar)
+
+        btn_redock = QPushButton("📌 Przypnij z powrotem do zakładek")
+        btn_redock.setStyleSheet("background-color: #3d5a80; font-weight: bold; padding: 5px 12px;")
+        btn_redock.clicked.connect(self.redock)
+        toolbar.addWidget(btn_redock)
+
+        btn_fit = QPushButton("⛶ Dopasuj (F)")
+        btn_fit.clicked.connect(self.tab_info.view.fit_to_content)
+        toolbar.addWidget(btn_fit)
+
+        toolbar.addSeparator()
+
+        btn_run = QPushButton("⚡ Uruchom ten potok")
+        btn_run.setStyleSheet("background-color: #2a9d8f; font-weight: bold; padding: 5px 14px;")
+        btn_run.clicked.connect(lambda: self.dialog_owner.execute_tab_pipeline(self.tab_info))
+        toolbar.addWidget(btn_run)
+
+        # Kluczowe: przywrócenie widoczności widoku po wyjęciu z QTabWidget
+        self.tab_info.view.setVisible(True)
+        self.tab_info.view.show()
+        self.setCentralWidget(self.tab_info.view)
+
+        QTimer.singleShot(60, self._on_initial_show)
+
+    def _on_initial_show(self):
+        self.tab_info.view.setVisible(True)
+        self.tab_info.view.show()
+        self.tab_info.view.viewport().update()
+        self.tab_info.view.fit_to_content()
+
+    def redock(self):
+        self.dialog_owner.reattach_tab(self.tab_info)
+        self.close()
+
+    def closeEvent(self, event):
+        self.dialog_owner.reattach_tab(self.tab_info)
+        super().closeEvent(event)
+
+
+class NodePipelineDialog(QMainWindow):
+    """Główne okno edytora potoku DAG z architekturą wielozakładkową i wydzielanymi oknami."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Potok Przetwarzania Węzłowego (DAG Node Engine)")
-        self.resize(1280, 800)
+        self.resize(1360, 840)
+        self.setWindowFlags(Qt.Window)
 
-        self.setModal(False)
-        self.setWindowFlags(self.windowFlags() | Qt.Window)
+        self.tabs: List[PipelineTabInfo] = []
+        self._tab_counter = 0
 
-        self.scene = NodeScene(dialog_owner=self, parent=self)
-        self.view = NodeView(self.scene, self)
-        self.scene.selectionChanged.connect(self._on_selection_changed)
+        # Centralny widget zakładek z własnym paskiem
+        self.tab_widget = QTabWidget(self)
+        self.tab_widget.setDocumentMode(False)  # Wyłączone: zapobiega natywnemu centrowaniu macOS
+        self.tab_bar = DetachableTabBar(self)
+        self.tab_widget.setTabBar(self.tab_bar)
 
-        self._init_ui()
+        self.tab_widget.setTabsClosable(True)
+        self.tab_bar.tabDetached.connect(self._detach_tab_by_index)
 
-        if session.dag_state and "nodes" in session.dag_state and session.dag_state["nodes"]:
+        self.tab_bar.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tab_bar.customContextMenuRequested.connect(self._on_tab_bar_context_menu)
+
+        self.tab_widget.tabCloseRequested.connect(self._on_tab_close_requested)
+        self.tab_widget.currentChanged.connect(self._on_tab_changed)
+        self.tab_widget.tabBarDoubleClicked.connect(self._on_tab_double_clicked)
+
+        # Arkusz stylów zakładek
+        self.tab_widget.setStyleSheet("""
+                    QTabWidget::pane {
+                        border-top: 1px solid #2d2d3a;
+                        background-color: #18181e;
+                    }
+                    QTabWidget::tab-bar {
+                        left: 0px;
+                    }
+                    QTabBar {
+                        qproperty-expanding: false;
+                        background-color: #18181e;
+                    }
+                    QTabBar::tab {
+                        background-color: #22222f;
+                        color: #b0b0c0;
+                        padding: 7px 16px;
+                        margin-right: 2px;
+                        border-top-left-radius: 4px;
+                        border-top-right-radius: 4px;
+                        border: 1px solid #2d2d3a;
+                        border-bottom: none;
+                        font-size: 12px;
+                    }
+                    QTabBar::tab:selected {
+                        background-color: #18181e;
+                        color: #48cae4;
+                        border: 1px solid #3d3d4e;
+                        border-bottom: 1px solid #18181e;
+                        font-weight: bold;
+                    }
+                    QTabBar::tab:hover:!selected {
+                        background-color: #2b2b3d;
+                        color: #ffffff;
+                    }
+                """)
+
+        # KLUCZOWY KROK:
+        # Opakowujemy styl QStyleSheetStyle stworzony przez powyższy setStyleSheet
+        # i trzymamy referencję w self._tab_bar_style, aby zapobiec usunięciu przez GC.
+        self._tab_bar_style = LeftAlignedTabStyle(self.tab_bar.style())
+        self.tab_bar.setStyle(self._tab_bar_style)
+        self.tab_bar.setExpanding(False)
+
+        # Przycisk [+] po prawej stronie
+        corner_widget = QWidget()
+        corner_layout = QHBoxLayout(corner_widget)
+        corner_layout.setContentsMargins(0, 0, 6, 0)
+        btn_new_tab = QPushButton("➕ Nowy potok")
+        btn_new_tab.setStyleSheet("""
+                    QPushButton {
+                        background-color: #2a2a38;
+                        color: #48cae4;
+                        border: 1px solid #3d3d4e;
+                        border-radius: 3px;
+                        padding: 4px 10px;
+                        font-weight: bold;
+                        font-size: 11px;
+                    }
+                    QPushButton:hover {
+                        background-color: #3d5a80;
+                        color: #ffffff;
+                    }
+                """)
+        btn_new_tab.clicked.connect(lambda: self.add_pipeline_tab())
+        corner_layout.addWidget(btn_new_tab)
+        self.tab_widget.setCornerWidget(corner_widget, Qt.TopRightCorner)
+
+        self.setCentralWidget(self.tab_widget)
+
+        self._setup_docks()
+        self._init_toolbar()
+        self._restore_ui_state()
+
+        if session.dag_state:
             self.import_graph_state(session.dag_state)
         else:
-            self._spawn_default_pipeline()
+            self.add_pipeline_tab(title="Główny potok")
             self.sync_state_to_session()
 
         session.active_spectrum_changed.connect(self._on_session_active_spectrum_changed)
+
+    # --- WŁAŚCIWOŚCI DLA AKTYWNEJ ZAKŁADKI ---
+    @property
+    def current_tab(self) -> Optional[PipelineTabInfo]:
+        curr_widget = self.tab_widget.currentWidget()
+        if not curr_widget:
+            return None
+        return self._get_tab_info_by_view(curr_widget)
+
+    @property
+    def scene(self) -> Optional[NodeScene]:
+        tab = self.current_tab
+        return tab.scene if tab else None
+
+    @property
+    def view(self) -> Optional[NodeView]:
+        tab = self.current_tab
+        return tab.view if tab else None
+
+    def _get_tab_info_by_view(self, view: QWidget) -> Optional[PipelineTabInfo]:
+        for t in self.tabs:
+            if t.view == view:
+                return t
+        return None
+
+    # --- ZARZĄDZANIE ZAKŁADKAMI ---
+    def add_pipeline_tab(self, title: Optional[str] = None, graph_data: Optional[Dict[str, Any]] = None,
+                         make_active: bool = True) -> PipelineTabInfo:
+        self._tab_counter += 1
+        t_name = title or f"Potok {self._tab_counter}"
+
+        scene = NodeScene(dialog_owner=self, parent=self)
+        view = NodeView(scene, self)
+        scene.selectionChanged.connect(self._on_selection_changed)
+
+        scope = graph_data.get("scope", 0) if graph_data else 0
+        in_place = graph_data.get("in_place", True) if graph_data else True
+
+        if graph_data and "nodes" in graph_data:
+            self._deserialize_to_scene(scene, graph_data)
+        else:
+            self._spawn_default_pipeline(scene)
+
+        tab_info = PipelineTabInfo(t_name, view, scene, scope=scope, in_place=in_place)
+        self.tabs.append(tab_info)
+
+        idx = self.tab_widget.addTab(view, t_name)
+        if make_active:
+            self.tab_widget.setCurrentIndex(idx)
+
+        QTimer.singleShot(60, view.fit_to_content)
+        self.recalculate_graph_preview(target_scene=scene)
+        self.sync_state_to_session()
+        return tab_info
+
+    def _on_tab_changed(self, index: int):
+        tab = self.current_tab
+        if not tab:
+            return
+
+        self.combo_scope.blockSignals(True)
+        self.chk_inplace.blockSignals(True)
+        self.combo_scope.setCurrentIndex(tab.scope)
+        self.chk_inplace.setChecked(tab.in_place)
+        self.combo_scope.blockSignals(False)
+        self.chk_inplace.blockSignals(False)
+
         self.recalculate_graph_preview()
+        self._update_live_canvas_preview()
+        self.sync_state_to_session()
 
-    def _init_ui(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(4, 4, 4, 4)
+    def _on_tab_double_clicked(self, index: int):
+        if index < 0 or index >= self.tab_widget.count():
+            return
+        cur_title = self.tab_widget.tabText(index)
+        new_title, ok = QInputDialog.getText(self, "Zmień nazwę potoku", "Wprowadź nową nazwę zakładki:", text=cur_title)
+        if ok and new_title.strip():
+            new_title = new_title.strip()
+            self.tab_widget.setTabText(index, new_title)
+            tab = self._get_tab_info_by_view(self.tab_widget.widget(index))
+            if tab:
+                tab.title = new_title
+                if tab.floating_window:
+                    tab.floating_window.setWindowTitle(f"Potok: {new_title} — SpectroHub")
+            self.sync_state_to_session()
 
-        toolbar = QToolBar(self)
+    def _on_tab_close_requested(self, index: int):
+        if index < 0 or index >= self.tab_widget.count():
+            return
+
+        if self.tab_widget.count() == 1:
+            reply = QMessageBox.question(
+                self, "Resetuj potok",
+                "To jest jedyna otwarta zakładka. Czy chcesz zresetować potok do stanu domyślnego?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self._clear_graph()
+            return
+
+        view = self.tab_widget.widget(index)
+        tab_info = self._get_tab_info_by_view(view)
+        if tab_info and tab_info.floating_window:
+            tab_info.floating_window.close()
+
+        self.tab_widget.removeTab(index)
+        if tab_info in self.tabs:
+            self.tabs.remove(tab_info)
+
+        self.recalculate_graph_preview()
+        self.sync_state_to_session()
+
+    def _on_tab_bar_context_menu(self, point):
+        tab_idx = self.tab_bar.tabAt(point)
+        if tab_idx < 0:
+            menu = QMenu(self)
+            act_new = menu.addAction("➕ Nowy potok")
+            act_new.triggered.connect(lambda: self.add_pipeline_tab())
+            menu.exec(self.tab_bar.mapToGlobal(point))
+            return
+
+        menu = QMenu(self)
+        act_detach = menu.addAction("⧉ Wydziel do osobnego okna")
+        act_detach.triggered.connect(lambda: self._detach_tab_by_index(tab_idx))
+
+        act_rename = menu.addAction("✏️ Zmień nazwę zakładki...")
+        act_rename.triggered.connect(lambda: self._on_tab_double_clicked(tab_idx))
+
+        act_duplicate = menu.addAction("📋 Duplikuj potok")
+        act_duplicate.triggered.connect(lambda: self._duplicate_tab_by_index(tab_idx))
+
+        menu.addSeparator()
+        act_close = menu.addAction("✕ Zamknij zakładkę")
+        act_close.triggered.connect(lambda: self._on_tab_close_requested(tab_idx))
+
+        menu.exec(self.tab_bar.mapToGlobal(point))
+
+    def _duplicate_tab_by_index(self, index: int):
+        view = self.tab_widget.widget(index)
+        tab = self._get_tab_info_by_view(view)
+        if not tab:
+            return
+
+        nodes_list, conns_list = self._serialize_scene(tab.scene)
+        data = {
+            "nodes": nodes_list,
+            "connections": conns_list,
+            "scope": tab.scope,
+            "in_place": tab.in_place
+        }
+        self.add_pipeline_tab(title=f"{tab.title} (Kopia)", graph_data=data, make_active=True)
+
+    # --- WYDZIELANIE I PRZYPINANIE OKIEN ---
+    def _detach_tab_by_index(self, index: int):
+        if index < 0 or index >= self.tab_widget.count():
+            return
+        view = self.tab_widget.widget(index)
+        tab = self._get_tab_info_by_view(view)
+        if not tab or tab.floating_window is not None:
+            return
+
+        self.tab_widget.removeTab(index)
+
+        floating_win = FloatingPipelineWindow(tab, self)
+        tab.floating_window = floating_win
+        floating_win.show()
+        floating_win.raise_()
+        floating_win.activateWindow()
+
+        if self.tab_widget.count() == 0:
+            self.add_pipeline_tab(title="Nowy potok", make_active=True)
+
+    def reattach_tab(self, tab_info: PipelineTabInfo):
+        tab_info.floating_window = None
+        tab_info.view.setVisible(True)
+        tab_info.view.show()
+        if self.tab_widget.indexOf(tab_info.view) == -1:
+            idx = self.tab_widget.addTab(tab_info.view, tab_info.title)
+            self.tab_widget.setCurrentIndex(idx)
+            QTimer.singleShot(60, tab_info.view.fit_to_content)
+            self.recalculate_graph_preview()
+            self.sync_state_to_session()
+
+    # --- CYKL ŻYCIA I ZAPIS UKŁADU ---
+    def closeEvent(self, event):
+        for tab in list(self.tabs):
+            if tab.floating_window:
+                tab.floating_window.close()
+
+        self._save_ui_state()
+        self._clear_canvas_preview()
+        self.sync_state_to_session()
+        super().closeEvent(event)
+
+    def reject(self):
+        self.close()
+
+    def _save_ui_state(self):
+        settings = QSettings("SpectroHub", "NodeEditor")
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("windowState", self.saveState())
+
+    def _restore_ui_state(self):
+        settings = QSettings("SpectroHub", "NodeEditor")
+        geo = settings.value("geometry")
+        state = settings.value("windowState")
+        if geo:
+            self.restoreGeometry(geo)
+        if state:
+            self.restoreState(state)
+
+    def _init_toolbar(self):
+        toolbar = QToolBar("Główny pasek narzędzi", self)
         toolbar.setStyleSheet("background-color: #252530; spacing: 8px; padding: 4px;")
+        self.addToolBar(Qt.TopToolBarArea, toolbar)
 
-        btn_add = QPushButton("➕ Dodaj Węzeł...")
-        btn_add.setStyleSheet("background-color: #3d5a80; padding: 5px 12px;")
-        menu_nodes = QMenu(self)
-        self._populate_node_menu(menu_nodes)
-        btn_add.setMenu(menu_nodes)
-        toolbar.addWidget(btn_add)
+        toolbar.addAction(self.dock_library.toggleViewAction())
+
+        btn_fit = QPushButton("⛶ Dopasuj widok (F)")
+        btn_fit.setToolTip("Centruje i dopasowuje skalę do wszystkich węzłów (Skrót: F)")
+        btn_fit.clicked.connect(lambda: self.view.fit_to_content() if self.view else None)
+        toolbar.addWidget(btn_fit)
 
         btn_presets = QPushButton("📑 Szablony Potoków...")
         btn_presets.setStyleSheet("background-color: #4a4e69; font-weight: bold; padding: 5px 12px;")
@@ -201,17 +695,16 @@ class NodePipelineDialog(QDialog):
         toolbar.addWidget(QLabel(" Cel potoku: "))
         self.combo_scope = QComboBox()
         self.combo_scope.addItems([
-            "Wszystkie widoczne w aktywnym oknie / gałęzi",  # Indeks 0 (DOMYŚLNY)
-            "Tylko aktywne widmo",                         # Indeks 1
-            "Aktywna seria 2D / Tensor"                    # Indeks 2
+            "Wszystkie widoczne w aktywnym oknie / gałęzi",
+            "Tylko aktywne widmo",
+            "Aktywna seria 2D / Tensor"
         ])
-        self.combo_scope.setCurrentIndex(0)
-        self.combo_scope.currentIndexChanged.connect(lambda: [self.recalculate_graph_preview(), self.sync_state_to_session()])
+        self.combo_scope.currentIndexChanged.connect(self._on_scope_changed)
         toolbar.addWidget(self.combo_scope)
 
         self.chk_inplace = QCheckBox("In-place (z Undo)")
         self.chk_inplace.setChecked(True)
-        self.chk_inplace.toggled.connect(lambda: self.sync_state_to_session())
+        self.chk_inplace.toggled.connect(self._on_inplace_toggled)
         toolbar.addWidget(self.chk_inplace)
 
         toolbar.addSeparator()
@@ -225,7 +718,7 @@ class NodePipelineDialog(QDialog):
         toolbar.addSeparator()
 
         btn_del = QPushButton("✕ Usuń (Del)")
-        btn_del.clicked.connect(self._delete_selected)
+        btn_del.clicked.connect(lambda: self._delete_selected())
         toolbar.addWidget(btn_del)
 
         btn_clear = QPushButton("Reset grafu")
@@ -241,21 +734,38 @@ class NodePipelineDialog(QDialog):
         btn_run.clicked.connect(self._execute_pipeline)
         toolbar.addWidget(btn_run)
 
-        layout.addWidget(toolbar)
-        layout.addWidget(self.view)
-
-    def sync_state_to_session(self):
-        session.dag_state = self.export_graph_state()
-
-    def _on_session_active_spectrum_changed(self, spec):
-        if self.isVisible():
+    def _on_scope_changed(self, idx: int):
+        if self.current_tab:
+            self.current_tab.scope = idx
             self.recalculate_graph_preview()
+            self.sync_state_to_session()
 
-    # ==========================================================================
-    # MENU WĘZŁÓW
-    # ==========================================================================
-    def _populate_node_menu(self, menu: QMenu, pos: Optional[QPointF] = None):
-        categories = {
+    def _on_inplace_toggled(self, checked: bool):
+        if self.current_tab:
+            self.current_tab.in_place = checked
+            self.sync_state_to_session()
+
+    def _setup_docks(self):
+        self.dock_library = QDockWidget("📚 Biblioteka Węzłów", self)
+        self.dock_library.setObjectName("DockNodeLibrary")
+        self.dock_library.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+
+        categories = self._get_node_categories()
+        self.palette_widget = NodeLibraryWidget(
+            categories_dict=categories,
+            on_node_double_clicked=self._on_palette_node_double_clicked,
+            parent=self.dock_library
+        )
+        self.dock_library.setWidget(self.palette_widget)
+        self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_library)
+
+    def _on_palette_node_double_clicked(self, title: str, step_data: dict):
+        if self.view:
+            center_scene = self.view.mapToScene(self.view.viewport().rect().center())
+            self._add_processing_node(title, step_data, pos=center_scene)
+
+    def _get_node_categories(self) -> Dict[str, list]:
+        return {
             "Chemometria & Analiza Wielowymiarowa": [
                 ("📊 Odszumiacz SVD / PCA (Rank-k)", {'type': 'svd_denoise', 'name': "SVD Denoise (k=2)", 'k': 2, 'center': False}),
                 ("🔬 Dekompozycja MCR-ALS / SPEXFA", {'type': 'mcr_decompose', 'name': "MCR-ALS (k=2)", 'method': "mcr_als", 'k': 2, 'non_negative': True, 'closure': False, 'unimodal': False, 'max_iter': 500}),
@@ -272,8 +782,8 @@ class NodePipelineDialog(QDialog):
                 ("🔄 Konwerter Fotometryczny (A ↔ T ↔ %T ↔ KM)", {'type': 'photometry', 'name': "Fotometria: %T ➔ A", 'photo_mode': "tpct_to_a"})
             ],
             "Kompensacja Atmosferyczna": [
-                ("VaporFit (Para wodna i CO₂)", {'type': 'vaporfit', 'name': "VaporFit (SG=11)", 'sg_points': 11, 'sg_poly': 3, 'sign_mode': "auto"}),
-                ("Widmo Odniesienia z Projektu", {'type': 'spectrum_select', 'name': "Ref: (wybierz)", 'selected_spectrum': ""})
+                ("☁️ VaporFit (Para wodna i CO₂)", {'type': 'vaporfit', 'name': "VaporFit (SG=11)", 'sg_points': 11, 'sg_poly': 3}),
+                ("📌 Widmo Odniesienia z Projektu", {'type': 'spectrum_select', 'name': "Ref: (wybierz)", 'selected_spectrum': ""})
             ],
             "Matematyka Spektralna i Skalary": [
                 ("Operacja Dwuwidmowa (A ± k·B)", {'type': 'math_op', 'name': "A - 1.000·B", 'op': 'sub', 'k': 1.0}),
@@ -307,80 +817,103 @@ class NodePipelineDialog(QDialog):
             ]
         }
 
+    def _populate_node_menu(self, menu: QMenu, pos: Optional[QPointF] = None, target_scene: Optional[NodeScene] = None):
+        categories = self._get_node_categories()
         for cat_name, items in categories.items():
             sub = menu.addMenu(cat_name)
             for label, data in items:
                 act = sub.addAction(label)
-                act.triggered.connect(lambda chk=False, d=data, l=label, p=pos: self._add_processing_node(l, d, p))
+                act.triggered.connect(lambda chk=False, d=data, l=label, p=pos, s=target_scene: self._add_processing_node(l, d, p, scene=s))
 
-    def _add_processing_node(self, title: str, step_data: Dict[str, Any], pos: Optional[QPointF] = None):
+    def _add_processing_node(self, title: str, step_data: Dict[str, Any],
+                             pos: Optional[QPointF] = None, scene: Optional[NodeScene] = None):
+        target_scene = scene or self.scene
+        if not target_scene:
+            return
+
         node = NodeItem(node_type=step_data['type'], title=title, step_data=copy.deepcopy(step_data))
         if pos is not None:
             node.setPos(pos)
         else:
-            node.setPos(self.view.mapToScene(self.view.viewport().rect().center()) + QPointF(np.random.randint(-40, 40), np.random.randint(-40, 40)))
-        self.scene.addItem(node)
-        self.recalculate_graph_preview()
+            v = self.view
+            center = v.mapToScene(v.viewport().rect().center()) if v else QPointF(100, 100)
+            node.setPos(center + QPointF(np.random.randint(-40, 40), np.random.randint(-40, 40)))
+
+        target_scene.addItem(node)
+        self.recalculate_graph_preview(target_scene=target_scene)
         self.sync_state_to_session()
 
-    def duplicate_node(self, node: NodeItem, offset: QPointF = QPointF(35, 35)) -> Optional[NodeItem]:
-        if node.node_type in ("input", "output"):
+    def duplicate_node(self, node: NodeItem, offset: QPointF = QPointF(35, 35),
+                       scene: Optional[NodeScene] = None) -> Optional[NodeItem]:
+        target_scene = scene or self.scene
+        if not target_scene or node.node_type in ("input", "output"):
             return None
+
         clone = NodeItem(node.node_type, node.title, copy.deepcopy(node.step_data))
         clone.setPos(node.pos() + offset)
-        self.scene.addItem(clone)
-        self.scene.clearSelection()
+        target_scene.addItem(clone)
+        target_scene.clearSelection()
         clone.setSelected(True)
-        self.recalculate_graph_preview()
+
+        self.recalculate_graph_preview(target_scene=target_scene)
         self.sync_state_to_session()
         return clone
 
-    def _spawn_default_pipeline(self):
+    def _spawn_default_pipeline(self, scene: Optional[NodeScene] = None):
+        target_scene = scene or self.scene
+        if not target_scene:
+            return
+
         in_node = NodeItem(node_type="input", title="📥 ŹRÓDŁO DANYCH")
         in_node.setPos(40, 120)
-        self.scene.addItem(in_node)
+        target_scene.addItem(in_node)
 
         crop_node = NodeItem(node_type="crop", title="Przycięcie (Crop)",
                              step_data={'type': 'crop', 'name': "Przycięcie [1000–1800]", 'min_w': 1000.0, 'max_w': 1800.0})
         crop_node.setPos(280, 120)
-        self.scene.addItem(crop_node)
+        target_scene.addItem(crop_node)
 
         asls_node = NodeItem(node_type="asls", title="Linia Bazowa AsLS",
                              step_data={'type': 'asls', 'name': "AsLS (λ=1e5, p=0.001)", 'lam': 1e5, 'p': 0.001})
         asls_node.setPos(520, 120)
-        self.scene.addItem(asls_node)
+        target_scene.addItem(asls_node)
 
         out_node = NodeItem(node_type="output", title="💾 ZAPIS WYNIKU")
         out_node.setPos(760, 120)
-        self.scene.addItem(out_node)
+        target_scene.addItem(out_node)
 
-        self.scene.addItem(ConnectionItem(in_node.out_ports["out"], crop_node.in_ports["in"]))
-        self.scene.addItem(ConnectionItem(crop_node.out_ports["out"], asls_node.in_ports["in"]))
-        self.scene.addItem(ConnectionItem(asls_node.out_ports["out"], out_node.in_ports["in"]))
+        target_scene.addItem(ConnectionItem(in_node.out_ports["out"], crop_node.in_ports["in"]))
+        target_scene.addItem(ConnectionItem(crop_node.out_ports["out"], asls_node.in_ports["in"]))
+        target_scene.addItem(ConnectionItem(asls_node.out_ports["out"], out_node.in_ports["in"]))
 
-    def _delete_selected(self):
-        for item in self.scene.selectedItems():
+    def _delete_selected(self, scene: Optional[NodeScene] = None):
+        target_scene = scene or self.scene
+        if not target_scene:
+            return
+
+        for item in target_scene.selectedItems():
             if isinstance(item, NodeItem):
                 if item.node_type in ("input", "output"):
                     continue
                 for p in list(item.in_ports.values()) + list(item.out_ports.values()):
                     for c in list(p.connections):
                         c.disconnect()
-                self.scene.removeItem(item)
+                target_scene.removeItem(item)
             elif isinstance(item, ConnectionItem):
                 item.disconnect()
-        self.recalculate_graph_preview()
+
+        self.recalculate_graph_preview(target_scene=target_scene)
         self.sync_state_to_session()
 
     def _clear_graph(self):
+        if not self.scene:
+            return
         self.scene.clear()
-        self._spawn_default_pipeline()
-        self.recalculate_graph_preview()
+        self._spawn_default_pipeline(self.scene)
+        self.recalculate_graph_preview(target_scene=self.scene)
         self.sync_state_to_session()
 
-    # ==========================================================================
-    # MENU SZABLONÓW (PRESETS)
-    # ==========================================================================
+    # --- PROCEDURY LABORATORYJNE (PRESETS) ---
     def _populate_presets_menu(self, menu: QMenu):
         sub_factory = menu.addMenu("🧪 Wbudowane procedury laboratoryjne")
 
@@ -427,8 +960,7 @@ class NodePipelineDialog(QDialog):
                 {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"}
             ]
         }
-        self.import_graph_state(data)
-        self.sync_state_to_session()
+        self.add_pipeline_tab(title="Odszumianie SVD", graph_data=data, make_active=True)
 
     def _load_preset_mcr_pipeline(self):
         data = {
@@ -444,14 +976,13 @@ class NodePipelineDialog(QDialog):
                 {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"}
             ]
         }
-        self.import_graph_state(data)
-        self.sync_state_to_session()
+        self.add_pipeline_tab(title="MCR-ALS", graph_data=data, make_active=True)
 
     def _load_preset_atmospheric_asls(self):
         data = {
             "nodes": [
                 {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło"}},
-                {"id": "n1", "type": "vaporfit", "title": "VaporFit (Para wodna i CO₂)", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "vaporfit", "name": "VaporFit (SG=11)", "sg_points": 11, "sg_poly": 3, "sign_mode": "auto"}},
+                {"id": "n1", "type": "vaporfit", "title": "VaporFit (Para wodna i CO₂)", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "vaporfit", "name": "VaporFit (SG=11)", "sg_points": 11, "sg_poly": 3}},
                 {"id": "n2", "type": "crop", "title": "Przycięcie (Crop)", "pos_x": 520.0, "pos_y": 140.0, "step_data": {"type": "crop", "name": "Przycięcie [1000–1800]", "min_w": 1000.0, "max_w": 1800.0}},
                 {"id": "n3", "type": "asls", "title": "Linia Bazowa AsLS", "pos_x": 760.0, "pos_y": 140.0, "step_data": {"type": "asls", "name": "AsLS (λ=1e5, p=0.001)", "lam": 1e5, "p": 0.001}},
                 {"id": "n4", "type": "output", "title": "💾 ZAPIS WYNIKU", "pos_x": 1000.0, "pos_y": 140.0, "step_data": {"type": "output", "name": "Zapis"}}
@@ -463,8 +994,7 @@ class NodePipelineDialog(QDialog):
                 {"from_node": "n3", "from_port": "out", "to_node": "n4", "to_port": "in"}
             ]
         }
-        self.import_graph_state(data)
-        self.sync_state_to_session()
+        self.add_pipeline_tab(title="VaporFit + AsLS", graph_data=data, make_active=True)
 
     def _load_preset_amide_i(self):
         data = {
@@ -482,8 +1012,7 @@ class NodePipelineDialog(QDialog):
                 {"from_node": "n3", "from_port": "out", "to_node": "n4", "to_port": "in"}
             ]
         }
-        self.import_graph_state(data)
-        self.sync_state_to_session()
+        self.add_pipeline_tab(title="Amid I", graph_data=data, make_active=True)
 
     def _load_preset_second_derivative(self):
         data = {
@@ -503,8 +1032,7 @@ class NodePipelineDialog(QDialog):
                 {"from_node": "n4", "from_port": "out", "to_node": "n5", "to_port": "in"}
             ]
         }
-        self.import_graph_state(data)
-        self.sync_state_to_session()
+        self.add_pipeline_tab(title="2. Pochodna", graph_data=data, make_active=True)
 
     def _load_preset_differential_math(self):
         data = {
@@ -522,8 +1050,7 @@ class NodePipelineDialog(QDialog):
                 {"from_node": "n3", "from_port": "out", "to_node": "n4", "to_port": "in"}
             ]
         }
-        self.import_graph_state(data)
-        self.sync_state_to_session()
+        self.add_pipeline_tab(title="Różnicowa", graph_data=data, make_active=True)
 
     def _load_preset_dft_comparison(self):
         data = {
@@ -539,8 +1066,7 @@ class NodePipelineDialog(QDialog):
                 {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"}
             ]
         }
-        self.import_graph_state(data)
-        self.sync_state_to_session()
+        self.add_pipeline_tab(title="Porównanie DFT", graph_data=data, make_active=True)
 
     def _save_preset_to_json(self):
         path, _ = QFileDialog.getSaveFileName(
@@ -548,7 +1074,17 @@ class NodePipelineDialog(QDialog):
         )
         if path:
             try:
-                state = self.export_graph_state()
+                curr = self.current_tab
+                if not curr:
+                    return
+                nodes_list, conns_list = self._serialize_scene(curr.scene)
+                state = {
+                    "title": curr.title,
+                    "nodes": nodes_list,
+                    "connections": conns_list,
+                    "scope": curr.scope,
+                    "in_place": curr.in_place
+                }
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(state, f, indent=2, ensure_ascii=False)
                 QMessageBox.information(self, "Zapisano", f"Pomyślnie zapisano szablon potoku do pliku:\n{path}")
@@ -562,22 +1098,17 @@ class NodePipelineDialog(QDialog):
         if path:
             try:
                 with open(path, "r", encoding="utf-8") as f:
-                    state = json.load(f)
-                self.import_graph_state(state)
-                self.sync_state_to_session()
-                QMessageBox.information(self, "Załadowano", "Pomyślnie wczytano szablon potoku.")
+                    data = json.load(f)
+                title = data.get("title", "Wczytany potok")
+                self.add_pipeline_tab(title=title, graph_data=data, make_active=True)
+                QMessageBox.information(self, "Załadowano", f"Wczytano szablon potoku jako nową zakładkę:\n'{title}'.")
             except Exception as e:
                 QMessageBox.critical(self, "Błąd odczytu", f"Nie udało się wczytać szablonu:\n{e}")
 
-    # ==========================================================================
-    # SERIALIZACJA GRAFU DAG (DLA PROJEKTU .SHUB)
-    # ==========================================================================
-    def export_graph_state(self) -> Dict[str, Any]:
-        """Eksportuje pełną topologię węzłów, współrzędne i kable grafu DAG."""
-        nodes_list = []
-        conns_list = []
-
-        all_nodes = [item for item in self.scene.items() if isinstance(item, NodeItem)]
+    # --- SERIALIZACJA GRAFU ---
+    def _serialize_scene(self, scene: NodeScene) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        nodes_list, conns_list = [], []
+        all_nodes = [item for item in scene.items() if isinstance(item, NodeItem)]
         node_to_id = {node: f"node_{idx}" for idx, node in enumerate(all_nodes)}
 
         for node, n_id in node_to_id.items():
@@ -602,21 +1133,14 @@ class NodePipelineDialog(QDialog):
                             "to_port": conn.in_port.port_id
                         })
 
-        return {
-            "nodes": nodes_list,
-            "connections": conns_list,
-            "scope": self.combo_scope.currentIndex(),
-            "in_place": self.chk_inplace.isChecked()
-        }
+        return nodes_list, conns_list
 
-    def import_graph_state(self, data: Dict[str, Any]):
-        """Odtwarza graf z zapisanego stanu manifestu projektu."""
+    def _deserialize_to_scene(self, scene: NodeScene, data: Dict[str, Any]):
+        scene.clear()
         if not data or "nodes" not in data:
             return
 
-        self.scene.clear()
         id_to_node: Dict[str, NodeItem] = {}
-
         for n_dict in data["nodes"]:
             node = NodeItem(
                 node_type=n_dict["type"],
@@ -624,7 +1148,7 @@ class NodePipelineDialog(QDialog):
                 step_data=copy.deepcopy(n_dict["step_data"])
             )
             node.setPos(n_dict["pos_x"], n_dict["pos_y"])
-            self.scene.addItem(node)
+            scene.addItem(node)
             id_to_node[n_dict["id"]] = node
 
         for c_dict in data.get("connections", []):
@@ -634,18 +1158,71 @@ class NodePipelineDialog(QDialog):
                 out_p = src_node.out_ports.get(c_dict["from_port"])
                 in_p = dst_node.in_ports.get(c_dict["to_port"])
                 if out_p and in_p:
-                    self.scene.addItem(ConnectionItem(out_p, in_p))
+                    scene.addItem(ConnectionItem(out_p, in_p))
 
-        if "scope" in data:
-            self.combo_scope.setCurrentIndex(data["scope"])
-        if "in_place" in data:
-            self.chk_inplace.setChecked(data["in_place"])
+    def export_graph_state(self) -> Dict[str, Any]:
+        tabs_data = []
+        for tab in self.tabs:
+            n_list, c_list = self._serialize_scene(tab.scene)
+            tabs_data.append({
+                "title": tab.title,
+                "nodes": n_list,
+                "connections": c_list,
+                "scope": tab.scope,
+                "in_place": tab.in_place
+            })
 
-        self.recalculate_graph_preview()
+        active_idx = self.tab_widget.currentIndex()
+        if active_idx < 0 and tabs_data:
+            active_idx = 0
 
-    # ==========================================================================
-    # OBLICZENIA I LIVE PREVIEW
-    # ==========================================================================
+        active_dict = tabs_data[active_idx] if (0 <= active_idx < len(tabs_data)) else (tabs_data[0] if tabs_data else {})
+
+        return {
+            "version": 2,
+            "active_tab": active_idx,
+            "tabs": tabs_data,
+            "nodes": active_dict.get("nodes", []),
+            "connections": active_dict.get("connections", []),
+            "scope": active_dict.get("scope", 0),
+            "in_place": active_dict.get("in_place", True)
+        }
+
+    def import_graph_state(self, data: Dict[str, Any]):
+        if not data:
+            return
+
+        for tab in list(self.tabs):
+            if tab.floating_window:
+                tab.floating_window.close()
+
+        self.tab_widget.blockSignals(True)
+        self.tab_widget.clear()
+        self.tabs.clear()
+
+        if "tabs" in data and isinstance(data["tabs"], list) and len(data["tabs"]) > 0:
+            for t_dict in data["tabs"]:
+                t_title = t_dict.get("title", "Potok")
+                self.add_pipeline_tab(title=t_title, graph_data=t_dict, make_active=False)
+            act_idx = data.get("active_tab", 0)
+            if 0 <= act_idx < self.tab_widget.count():
+                self.tab_widget.setCurrentIndex(act_idx)
+        elif "nodes" in data:
+            self.add_pipeline_tab(title="Główny potok", graph_data=data, make_active=True)
+        else:
+            self.add_pipeline_tab(title="Główny potok", make_active=True)
+
+        self.tab_widget.blockSignals(False)
+        self._on_tab_changed(self.tab_widget.currentIndex())
+
+    def sync_state_to_session(self):
+        session.dag_state = self.export_graph_state()
+
+    def _on_session_active_spectrum_changed(self, spec):
+        if self.isVisible():
+            self.recalculate_graph_preview()
+
+    # --- OBLICZENIA I PODGLĄD NA ŻYWO ---
     def _get_base_preview_data(self) -> Tuple[np.ndarray, np.ndarray]:
         active = session.active_spectrum
         if active is not None and len(active.wavenumbers) > 2:
@@ -655,10 +1232,13 @@ class NodePipelineDialog(QDialog):
         y = 0.8 * np.exp(-((wn - 1650) / 35) ** 2) + 0.4 * np.exp(-((wn - 1540) / 40) ** 2) + 0.05 * np.random.normal(0, 0.02, len(wn))
         return wn, y
 
-    def recalculate_graph_preview(self):
-        all_nodes = [item for item in self.scene.items() if isinstance(item, NodeItem)]
-        ordered_nodes, has_cycle = DAGEvaluator.topological_sort(all_nodes)
+    def recalculate_graph_preview(self, target_scene: Optional[NodeScene] = None):
+        scene = target_scene or self.scene
+        if not scene:
+            return
 
+        all_nodes = [item for item in scene.items() if isinstance(item, NodeItem)]
+        ordered_nodes, has_cycle = DAGEvaluator.topological_sort(all_nodes)
         if has_cycle:
             return
 
@@ -676,7 +1256,8 @@ class NodePipelineDialog(QDialog):
             node.preview_y = res_y
             node.update()
 
-        self._update_live_canvas_preview()
+        if scene == self.scene:
+            self._update_live_canvas_preview()
 
     def _get_canvas(self):
         main_win = self.parent()
@@ -705,7 +1286,8 @@ class NodePipelineDialog(QDialog):
             canvas.redraw_all()
 
     def _on_selection_changed(self):
-        self.view.viewport().update()
+        if self.view:
+            self.view.viewport().update()
         self._update_live_canvas_preview()
 
     def _toggle_live_preview(self, enabled: bool):
@@ -729,7 +1311,7 @@ class NodePipelineDialog(QDialog):
             self._trigger_canvas_draw(canvas, ax)
 
     def _update_live_canvas_preview(self):
-        if not self.chk_live_preview.isChecked():
+        if not self.chk_live_preview.isChecked() or not self.scene:
             return
 
         canvas = self._get_canvas()
@@ -772,21 +1354,15 @@ class NodePipelineDialog(QDialog):
 
         self._trigger_canvas_draw(canvas, ax)
 
-    def closeEvent(self, event):
-        self._clear_canvas_preview()
-        self.sync_state_to_session()
-        super().closeEvent(event)
-
-    def reject(self):
-        self._clear_canvas_preview()
-        self.sync_state_to_session()
-        super().reject()
-
-    # ==========================================================================
-    # WYKONANIE POTOKU DAG (EXECUTION)
-    # ==========================================================================
+    # --- WYKONANIE POTOKU (EXECUTE) ---
     def _execute_pipeline(self):
-        all_nodes = [item for item in self.scene.items() if isinstance(item, NodeItem)]
+        if not self.current_tab:
+            return
+        self.execute_tab_pipeline(self.current_tab)
+
+    def execute_tab_pipeline(self, tab: PipelineTabInfo):
+        scene = tab.scene
+        all_nodes = [item for item in scene.items() if isinstance(item, NodeItem)]
         ordered_nodes, has_cycle = DAGEvaluator.topological_sort(all_nodes)
 
         if has_cycle:
@@ -803,8 +1379,8 @@ class NodePipelineDialog(QDialog):
         main_win = self.parent()
         canvas = getattr(main_win, 'canvas_2d', None)
 
-        scope = self.combo_scope.currentIndex()
-        in_place = self.chk_inplace.isChecked()
+        scope = tab.scope
+        in_place = tab.in_place
 
         try:
             for term_node in terminals:
@@ -821,7 +1397,7 @@ class NodePipelineDialog(QDialog):
                     if not target_window_id:
                         target_window_id = session.add_window(name=win_name)
 
-                # 1. WSZYSTKIE WIDOCZNE W AKTYWNYM OKNIE / GAŁĘZI (SCOPE 0 - DOMYŚLNY)
+                # 1. Scope 0: Wszystkie widoczne w aktywnym oknie / gałęzi
                 if scope == 0:
                     visible = session.get_pipeline_target_spectra()
                     if not visible:
@@ -842,7 +1418,6 @@ class NodePipelineDialog(QDialog):
                     batch_records = []
                     new_created = []
 
-                    # Przypadek A: Wyjście MCR (k czystych składników)
                     if new_y.ndim == 2 and new_y.shape[1] != len(visible):
                         for col in range(new_y.shape[1]):
                             new_created.append(SpectrumData(
@@ -854,7 +1429,6 @@ class NodePipelineDialog(QDialog):
                             new_created, f"DAG MCR ({len(new_created)} składników)",
                             canvas=canvas, window_id=target_window_id
                         ))
-                    # Przypadek B: Przetworzone widma
                     else:
                         for idx, spec in enumerate(visible):
                             old_x, old_y = spec.wavenumbers.copy(), spec.intensities.copy()
@@ -888,7 +1462,7 @@ class NodePipelineDialog(QDialog):
                             target_win = session.active_window_id if session.active_context == "window" else None
                             session.undo_stack.push(AddBatchSpectraCommand(new_created, f"DAG Batch ({len(new_created)} widm)", canvas=canvas, window_id=target_win))
 
-                # 2. TYLKO AKTYWNE WIDMO (SCOPE 1)
+                # 2. Scope 1: Tylko aktywne widmo
                 elif scope == 1:
                     active = session.active_spectrum
                     if not active:
@@ -936,7 +1510,7 @@ class NodePipelineDialog(QDialog):
                         cmd = AddBatchSpectraCommand([new_spec], f"DAG: {active.name}", canvas=canvas, window_id=target_win)
                         session.undo_stack.push(cmd)
 
-                # 3. SERIA 2D / TENSOR 3D (SCOPE 2)
+                # 3. Scope 2: Aktywna seria 2D / Tensor 3D
                 elif scope == 2:
                     active_s = session.active_series
                     if not active_s:
@@ -982,8 +1556,8 @@ class NodePipelineDialog(QDialog):
                             axis_m_name=active_s.axis_m_name, axis_m_values=active_s.axis_m_values
                         ), make_active=True)
 
-            QMessageBox.information(self, "Sukces", f"Pomyślnie wykonano potok DAG!")
-            self.recalculate_graph_preview()
+            QMessageBox.information(self, "Sukces", f"Pomyślnie wykonano potok z zakładki '{tab.title}'!")
+            self.recalculate_graph_preview(target_scene=scene)
             self.sync_state_to_session()
 
         except Exception as e:

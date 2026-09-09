@@ -395,11 +395,6 @@ class VaporFitDialog(QDialog):
         self.ent_sg_poly.setFixedWidth(30)
         row_inputs.addWidget(self.ent_sg_poly)
 
-        row_inputs.addWidget(QLabel("Kierunek:"))
-        self.combo_sign = QComboBox()
-        self.combo_sign.addItems(["Auto (Wygładź)", "Odejmij (-)", "Dodaj (+)"])
-        row_inputs.addWidget(self.combo_sign)
-
         self.btn_find_opt = QPushButton("🔍 Szukaj SG")
         self.btn_find_opt.clicked.connect(self._on_find_optimal_window)
         row_inputs.addWidget(self.btn_find_opt)

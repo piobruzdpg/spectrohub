@@ -9,10 +9,11 @@ Dialogi konfiguracyjne węzłów DAG:
 """
 
 import numpy as np
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QFormLayout, QDialogButtonBox,
+    QDialog, QVBoxLayout, QHBoxLayout, QFormLayout, QDialogButtonBox,
     QComboBox, QDoubleSpinBox, QSpinBox, QLineEdit, QLabel,
-    QPushButton, QMessageBox, QCheckBox
+    QPushButton, QMessageBox, QCheckBox, QListWidget, QListWidgetItem
 )
 from core.session import session
 from algorithms.atmospheric import AtmosphericCorrectionEngine
@@ -27,7 +28,7 @@ class NodeParamDialog(QDialog):
         self.node = node_item
         self.step = node_item.step_data
         self.setWindowTitle(f"Parametry węzła: {node_item.title}")
-        self.resize(420, 260)
+        self.resize(460, 380)
 
         layout = QVBoxLayout(self)
         self.form = QFormLayout()
@@ -227,18 +228,8 @@ class NodeParamDialog(QDialog):
             self.spin_poly.setRange(1, 6)
             self.spin_poly.setValue(int(self.step.get('sg_poly', 3)))
 
-            self.combo_sign = QComboBox()
-            self.combo_sign.addItem("Auto (Wygładź)", "auto")
-            self.combo_sign.addItem("Odejmij (-)", "subtract")
-            self.combo_sign.addItem("Dodaj (+)", "add")
-            cur_sign = self.step.get('sign_mode', 'auto')
-            idx = self.combo_sign.findData(cur_sign)
-            if idx >= 0:
-                self.combo_sign.setCurrentIndex(idx)
-
             self.form.addRow("Szerokość okna SG (pkt):", self.spin_sg)
             self.form.addRow("Stopień wielomianu:", self.spin_poly)
-            self.form.addRow("Kierunek korekty:", self.combo_sign)
 
             self.btn_opt_sg = QPushButton("🔍 Szukaj optymalnego okna SG")
             self.btn_opt_sg.clicked.connect(self._on_find_optimal_sg)
@@ -254,36 +245,75 @@ class NodeParamDialog(QDialog):
                 self.form.addRow("Metryki gładkości:", lbl_met)
 
         # =====================================================================
-        # 10. WIDMO ODNIESIENIA
+        # 10. WIDMO / WZORCE ODNIESIENIA (MULTI-SELECT)
         # =====================================================================
         elif stype == 'spectrum_select':
-            self.combo_spec = QComboBox()
+            self.list_specs = QListWidget()
+            self.list_specs.setFixedHeight(140)
+
+            # Odczyt aktualnie wybranych (lista lub pojedynczy klucz ze starych projektów)
+            current_selected = self.step.get('selected_spectra', [])
+            if not current_selected and self.step.get('selected_spectrum'):
+                current_selected = [self.step.get('selected_spectrum')]
+
+            # Wzorce atmosfery
             if session.atm_spectra:
-                self.combo_spec.addItem("── WZORCE ATMOSFERY (ATM / CO₂) ──", "")
-                self.combo_spec.model().item(self.combo_spec.count() - 1).setEnabled(False)
+                sep_atm = QListWidgetItem("── WZORCE ATMOSFERY (ATM / CO₂) ──")
+                sep_atm.setFlags(Qt.NoItemFlags)
+                self.list_specs.addItem(sep_atm)
                 for name in session.atm_spectra.keys():
-                    self.combo_spec.addItem(f"☁️ {name}", name)
+                    item = QListWidgetItem(f"☁️ {name}")
+                    item.setData(Qt.UserRole, name)
+                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    item.setCheckState(Qt.Checked if name in current_selected else Qt.Unchecked)
+                    self.list_specs.addItem(item)
 
+            # Pomiary eksperymentalne
             if session.spectra:
-                self.combo_spec.addItem("── POMIARY EKSPERYMENTALNE ──", "")
-                self.combo_spec.model().item(self.combo_spec.count() - 1).setEnabled(False)
+                sep_exp = QListWidgetItem("── POMIARY EKSPERYMENTALNE ──")
+                sep_exp.setFlags(Qt.NoItemFlags)
+                self.list_specs.addItem(sep_exp)
                 for name in session.spectra.keys():
-                    self.combo_spec.addItem(f"📈 {name}", name)
+                    item = QListWidgetItem(f"📈 {name}")
+                    item.setData(Qt.UserRole, name)
+                    item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                    item.setCheckState(Qt.Checked if name in current_selected else Qt.Unchecked)
+                    self.list_specs.addItem(item)
 
-            if self.combo_spec.count() == 0:
-                self.combo_spec.addItem("(Brak widm w projekcie)", "")
+            if self.list_specs.count() == 0:
+                empty_item = QListWidgetItem("(Brak widm w projekcie)")
+                empty_item.setFlags(Qt.NoItemFlags)
+                self.list_specs.addItem(empty_item)
 
-            cur_sel = self.step.get('selected_spectrum', '')
-            idx = self.combo_spec.findData(cur_sel)
-            if idx >= 0:
-                self.combo_spec.setCurrentIndex(idx)
+            # Przyciski pomocnicze do szybkiej selekcji
+            row_btns = QHBoxLayout()
+            btn_sel_atm = QPushButton("Zaznacz wszystkie ATM")
+            btn_sel_atm.clicked.connect(self._select_all_atm_specs)
+            btn_clear = QPushButton("Odznacz")
+            btn_clear.clicked.connect(self._clear_all_specs)
+            row_btns.addWidget(btn_sel_atm)
+            row_btns.addWidget(btn_clear)
 
-            self.form.addRow("Widmo odniesienia:", self.combo_spec)
+            self.form.addRow("Wybierz widma odniesienia:", self.list_specs)
+            self.form.addRow("", row_btns)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self._save_and_accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
+
+    def _select_all_atm_specs(self):
+        for i in range(self.list_specs.count()):
+            item = self.list_specs.item(i)
+            name = item.data(Qt.UserRole)
+            if name and name in session.atm_spectra:
+                item.setCheckState(Qt.Checked)
+
+    def _clear_all_specs(self):
+        for i in range(self.list_specs.count()):
+            item = self.list_specs.item(i)
+            if item.flags() & Qt.ItemIsUserCheckable:
+                item.setCheckState(Qt.Unchecked)
 
     def _on_find_optimal_sg(self):
         p_sig = self.node.in_ports.get("in_signal")
@@ -415,16 +445,27 @@ class NodeParamDialog(QDialog):
         elif stype == 'vaporfit':
             self.step['sg_points'] = int(self.spin_sg.value())
             self.step['sg_poly'] = int(self.spin_poly.value())
-            self.step['sign_mode'] = self.combo_sign.currentData()
             self.step['name'] = f"VaporFit (SG={self.step['sg_points']})"
 
         elif stype == 'spectrum_select':
-            sel_name = self.combo_spec.currentData()
-            self.step['selected_spectrum'] = sel_name
-            if sel_name:
-                icon = "☁️" if sel_name in session.atm_spectra else "📈"
-                self.step['name'] = f"{icon} {sel_name}"
+            selected = []
+            for i in range(self.list_specs.count()):
+                item = self.list_specs.item(i)
+                if (item.flags() & Qt.ItemIsUserCheckable) and item.checkState() == Qt.Checked:
+                    val = item.data(Qt.UserRole)
+                    if val:
+                        selected.append(val)
+
+            self.step['selected_spectra'] = selected
+            if selected:
+                self.step['selected_spectrum'] = selected[0]  # kompatybilność wsteczna
+                if len(selected) == 1:
+                    icon = "☁️" if selected[0] in session.atm_spectra else "📈"
+                    self.step['name'] = f"{icon} {selected[0]}"
+                else:
+                    self.step['name'] = f"☁️ {len(selected)} wzorców"
             else:
+                self.step['selected_spectrum'] = ""
                 self.step['name'] = "Ref: (brak)"
 
         self.accept()

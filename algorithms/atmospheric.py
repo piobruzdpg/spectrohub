@@ -39,17 +39,17 @@ class AtmosphericCorrectionEngine:
 
     @classmethod
     def fit_and_subtract(
-        cls,
-        wavenumbers: np.ndarray,
-        sample_spectrum: np.ndarray,
-        atm_spectra: np.ndarray,
-        sg_points: int = 11,
-        sg_poly: int = 3,
-        sign_mode: str = "auto"  # 'auto', 'subtract', 'add'
+            cls,
+            wavenumbers: np.ndarray,
+            sample_spectrum: np.ndarray,
+            atm_spectra: np.ndarray,
+            sg_points: int = 11,
+            sg_poly: int = 3,
+            sign_mode: Optional[str] = None  # zachowane dla wstecznej kompatybilności API
     ) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
         """
-        Analityczne dopasowanie wag widm atmosfery za pomocą liniowej regresji składowych ostrych
-        oraz automatyczna detekcja znaku usuwającego oscylacje.
+        Analityczne dopasowanie wag widm atmosfery za pomocą liniowej regresji składowych ostrych (High-Pass)
+        oraz bezpośrednia kompensacja S_corr = S - sum(c_i * A_i).
         """
         wavenb = np.asarray(wavenumbers, dtype=np.float64)
         sample = np.asarray(sample_spectrum, dtype=np.float64)
@@ -64,7 +64,7 @@ class AtmosphericCorrectionEngine:
             )
 
         w = sg_points if sg_points % 2 != 0 else sg_points + 1
-        poly = sg_poly if w > sg_poly else w - 2
+        poly = sg_poly if w > sg_poly else max(1, w - 2)
 
         # 1. Wyodrębnienie ostrych struktur (High-Pass: Sygnał surowy minus SG)
         y_sharp = sample - savgol_filter(sample, window_length=w, polyorder=poly)
@@ -74,38 +74,20 @@ class AtmosphericCorrectionEngine:
             X_sharp[:, col] = atm[:, col] - savgol_filter(atm[:, col], window_length=w, polyorder=poly)
 
         # 2. Analityczne rozwiązanie OLS: minimalizacja ||X_sharp * c - y_sharp||^2
-        # Gwarantuje idealne dopasowanie bez ryzyka utknięcia solwera nieliniowego
+        # Dokładny odpowiednik dopasowania z oryginalnego VaporFit
         coeffs, _, _, _ = np.linalg.lstsq(X_sharp, y_sharp, rcond=None)
 
-        atm_total = np.sum(coeffs * atm, axis=1)
-
-        # 3. Weryfikacja kierunku kompensacji (Auto-detekcja znaku)
-        cand_minus = sample - atm_total
-        cand_plus = sample + atm_total
-
-        sdv_raw = cls.calculate_sdv(wavenb, sample)
-        sdv_minus = cls.calculate_sdv(wavenb, cand_minus)
-        sdv_plus = cls.calculate_sdv(wavenb, cand_plus)
-
-        if sign_mode == "auto":
-            # Wybieramy ten wariant, który daje gładsze widmo (mniejsze SDV)
-            if sdv_plus < sdv_minus:
-                corrected_spectrum = cand_plus
-                coeffs = -coeffs
-                logger.info(f"[VaporFit] Auto-korekta znaku: wybrano (+) SDV={sdv_plus:.2e} vs (-){sdv_minus:.2e}")
-            else:
-                corrected_spectrum = cand_minus
-                logger.info(f"[VaporFit] Auto-korekta znaku: wybrano (-) SDV={sdv_minus:.2e} vs (+){sdv_plus:.2e}")
-        elif sign_mode == "add":
-            corrected_spectrum = cand_plus
-            coeffs = -coeffs
-        else:
-            corrected_spectrum = cand_minus
+        # 3. Bezpośrednia kompensacja widma: S_corr = S - (A @ c)
+        # Znak c_i wynika wprost z algebry liniowej:
+        # - nadmiar pasm w próbce -> c > 0 -> piki są odejmowane
+        # - deficyt pasm (dołki) w próbce -> c < 0 -> dołki są kompensowane (odejmowanie wartości ujemnej = dodawanie)
+        atm_total = atm @ coeffs
+        corrected_spectrum = sample - atm_total
 
         metrics = {
             'ssi_raw': cls.calculate_ssi(sample),
             'ssi_corr': cls.calculate_ssi(corrected_spectrum),
-            'sdv_raw': sdv_raw,
+            'sdv_raw': cls.calculate_sdv(wavenb, sample),
             'sdv_corr': cls.calculate_sdv(wavenb, corrected_spectrum),
             'std_raw': cls.calculate_std_sg(sample, w, poly),
             'std_corr': cls.calculate_std_sg(corrected_spectrum, w, poly)
@@ -134,7 +116,7 @@ class AtmosphericCorrectionEngine:
         for win in valid_windows:
             _, _, metrics = cls.fit_and_subtract(
                 wavenumbers, sample_spectrum, atm_spectra,
-                sg_points=win, sg_poly=sg_poly, sign_mode="auto"
+                sg_points=win, sg_poly=sg_poly
             )
             ssi_list.append(metrics['ssi_corr'])
             sdv_list.append(metrics['sdv_corr'])

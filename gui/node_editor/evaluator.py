@@ -207,10 +207,23 @@ class DAGEvaluator:
 
             # 2. WIDMO REFERENCYJNE
             elif ntype == "spectrum_select":
-                spec_name = node.step_data.get('selected_spectrum', '')
-                s = session.get_spectrum(spec_name)
-                if s is not None:
-                    port_results[(node, "out")] = (s.wavenumbers.copy(), s.intensities.copy())
+                # Obsługa zarówno pojedynczego wyboru, jak i listy wielu wzorców
+                selected = node.step_data.get('selected_spectra', [])
+                if not selected and node.step_data.get('selected_spectrum'):
+                    selected = [node.step_data['selected_spectrum']]
+
+                valid_specs = [session.get_spectrum(name) for name in selected if session.get_spectrum(name)]
+
+                if valid_specs:
+                    ref_x = valid_specs[0].wavenumbers.copy()
+                    cols = []
+                    for s in valid_specs:
+                        sx, sy = s.wavenumbers, s.intensities
+                        sx_s, sy_s = (sx[::-1], sy[::-1]) if sx[0] > sx[-1] else (sx, sy)
+                        cols.append(np.interp(ref_x, sx_s, sy_s))
+
+                    y_out = np.column_stack(cols) if len(cols) > 1 else cols[0]
+                    port_results[(node, "out")] = (ref_x, y_out)
                 else:
                     port_results[(node, "out")] = (input_x.copy(), np.zeros_like(input_x))
 
@@ -400,7 +413,8 @@ class DAGEvaluator:
                 data_sig = get_source_data(node.in_ports.get("in_signal"))
                 p_atm = node.in_ports.get("in_atm")
 
-                atm_sources = [c.out_port for c in p_atm.connections if c.out_port and c.out_port.node_item] if p_atm else []
+                atm_sources = [c.out_port for c in p_atm.connections if
+                               c.out_port and c.out_port.node_item] if p_atm else []
                 atm_datasets = [port_results.get((p.node_item, p.port_id), (None, None)) for p in atm_sources]
                 atm_datasets = [ds for ds in atm_datasets if ds[0] is not None]
 
@@ -408,8 +422,16 @@ class DAGEvaluator:
                     xs, ys = data_sig
                     atm_cols = []
                     for xa, ya in atm_datasets:
-                        xa_s, ya_s = (xa[::-1], ya[::-1]) if xa[0] > xa[-1] else (xa, ya)
-                        atm_cols.append(np.interp(xs, xa_s, ya_s))
+                        xa_s = xa[::-1] if xa[0] > xa[-1] else xa
+                        # Jeśli węzeł przekazuje macierz wielu widm (2D)
+                        if ya.ndim == 2:
+                            for c in range(ya.shape[1]):
+                                ya_col = ya[::-1, c] if xa[0] > xa[-1] else ya[:, c]
+                                atm_cols.append(np.interp(xs, xa_s, ya_col))
+                        else:
+                            # Pojedyncze widmo (1D)
+                            ya_s = ya[::-1] if xa[0] > xa[-1] else ya
+                            atm_cols.append(np.interp(xs, xa_s, ya_s))
                     atm_matrix = np.column_stack(atm_cols)
                 elif data_sig[0] is not None and len(session.atm_spectra) > 0:
                     xs, ys = data_sig
@@ -423,14 +445,13 @@ class DAGEvaluator:
                     xs, ys = data_sig
                     sg_pts = int(node.step_data.get('sg_points', 11))
                     sg_poly = int(node.step_data.get('sg_poly', 3))
-                    sign = node.step_data.get('sign_mode', 'auto')
 
                     try:
                         if ys.ndim == 2:
                             corr_cols, atm_fit_cols = [], []
                             for c in range(ys.shape[1]):
                                 cy, coeffs, _ = AtmosphericCorrectionEngine.fit_and_subtract(
-                                    xs, ys[:, c], atm_matrix, sg_points=sg_pts, sg_poly=sg_poly, sign_mode=sign
+                                    xs, ys[:, c], atm_matrix, sg_points=sg_pts, sg_poly=sg_poly
                                 )
                                 corr_cols.append(cy)
                                 atm_fit_cols.append(atm_matrix @ coeffs)
@@ -438,7 +459,7 @@ class DAGEvaluator:
                             port_results[(node, "out_atm")] = (xs.copy(), np.column_stack(atm_fit_cols))
                         else:
                             corr_y, coeffs, metrics = AtmosphericCorrectionEngine.fit_and_subtract(
-                                xs, ys, atm_matrix, sg_points=sg_pts, sg_poly=sg_poly, sign_mode=sign
+                                xs, ys, atm_matrix, sg_points=sg_pts, sg_poly=sg_poly
                             )
                             node.step_data['metrics'] = metrics
                             node.step_data['coeffs'] = coeffs.tolist()
