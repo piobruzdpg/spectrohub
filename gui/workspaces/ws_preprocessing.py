@@ -3,6 +3,7 @@ gui/workspaces/ws_preprocessing.py
 Panel preprocessingu i przygotowania danych spektroskopowych (Workspace 1).
 Zintegrowany z silnikiem Pipeline Managera (edycja parametrów, reordering, batch, in-place z Undo),
 korekcją offsetu w wybranym punkcie oraz pełną obsługą historii QUndoStack.
+Okna narzędziowe działają w trybie niemodalnym z izolacją celów potoku.
 """
 
 import copy
@@ -26,12 +27,9 @@ from core.i18n import tr, i18n
 from algorithms import preprocessing as prep
 from algorithms.atmospheric import AtmosphericCorrectionEngine
 
-
 logger = logging.getLogger("SpectroHub")
 
-# ==============================================================================
-# DIALOG EDYCJI PARAMETRÓW KROKU POTOKU
-# ==============================================================================
+
 # ==============================================================================
 # DIALOG EDYCJI PARAMETRÓW KROKU POTOKU
 # ==============================================================================
@@ -170,10 +168,6 @@ class StepParamDialog(QDialog):
         except ValueError:
             QMessageBox.warning(self, "Błąd", "Wprowadzono niepoprawny format liczby.")
 
-# ==============================================================================
-# KOMENDY HISTORII (QUndoStack)
-# ==============================================================================
-# gui/workspaces/ws_preprocessing.py — poprawione klasy komend historii
 
 # ==============================================================================
 # KOMENDY HISTORII (QUndoStack)
@@ -284,7 +278,7 @@ class ModifySeriesCommand(QUndoCommand):
 
 
 class AddBatchSpectraCommand(QUndoCommand):
-    """Cofa lub ponawia dodanie wygenerowanych widm (np. proc_*, corr_*) do sesji lub okna."""
+    """Cofa lub ponawia dodanie wygenerowanych widm do sesji lub okna roboczego."""
 
     def __init__(self, spectra_list: List[SpectrumData], description: str,
                  canvas=None, window_id: Optional[str] = None):
@@ -323,13 +317,14 @@ class AddBatchSpectraCommand(QUndoCommand):
 # DIALOG HURTOWEJ KOMPENSACJI ATMOSFERYCZNEJ (BATCH VAPORFIT)
 # ==============================================================================
 class VaporFitDialog(QDialog):
-    """Okno konfiguracji i uruchomienia kompensacji par wody i CO2 z dedykowanej bazy atmosfery."""
+    """Okno konfiguracji i uruchomienia kompensacji par wody i CO2 z bazy atmosfery."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle(tr("vapor.title", "VaporFit — Hurtowa Kompensacja Atmosferyczna"))
         self.resize(760, 620)
-        self.setModal(True)
+        self.setModal(False)
+        self.setWindowFlags(self.windowFlags() | Qt.Window)
 
         self._init_ui()
         self._load_available_spectra()
@@ -435,7 +430,7 @@ class VaporFitDialog(QDialog):
         self.btn_apply.clicked.connect(self._on_apply_batch_correction)
 
         self.btn_cancel = QPushButton("Zamknij")
-        self.btn_cancel.clicked.connect(self.reject)
+        self.btn_cancel.clicked.connect(self.close)
 
         row_actions.addWidget(self.btn_apply)
         row_actions.addWidget(self.btn_cancel)
@@ -470,7 +465,6 @@ class VaporFitDialog(QDialog):
         self.list_samples.clear()
         self.list_atm.clear()
 
-        # 1. Próbki badane (czyste pomiary eksperymentalne)
         for name, spec in samples.items():
             item_s = QListWidgetItem(f"📈 {name} ({spec.n_points} pkt)")
             item_s.setData(Qt.UserRole, name)
@@ -479,12 +473,11 @@ class VaporFitDialog(QDialog):
             item_s.setCheckState(Qt.Checked if is_active else Qt.Unchecked)
             self.list_samples.addItem(item_s)
 
-        # 2. Wzorce atmosfery (z dedykowanej gałęzi drzewa)
         for name, spec in atm_specs.items():
             item_a = QListWidgetItem(f"☁️ {name} ({spec.n_points} pkt)")
             item_a.setData(Qt.UserRole, name)
             item_a.setFlags(item_a.flags() | Qt.ItemIsUserCheckable)
-            item_a.setCheckState(Qt.Checked)  # Wzorce zaznaczone domyślnie
+            item_a.setCheckState(Qt.Checked)
             self.list_atm.addItem(item_a)
 
         if not atm_specs:
@@ -653,7 +646,6 @@ class VaporFitDialog(QDialog):
             msg += f"\n\nBłędy w {len(errors)} plikach:\n" + "\n".join(errors[:5])
 
         QMessageBox.information(self, tr("app.info", "Informacja"), msg)
-        self.accept()
 
 
 # ==============================================================================
@@ -663,7 +655,6 @@ class PreprocessingPanel(QWidget):
     """Widok narzędzi obróbki i przygotowania danych z wbudowanym Pipeline Managerem."""
 
     def _verify_single_tool_permission(self) -> bool:
-        """Chroni magazyn przed przypadkową edycją pojedynczego widma."""
         if getattr(session, 'active_context', 'storage') == 'storage':
             QMessageBox.information(
                 self, tr("app.info", "Informacja"),
@@ -679,8 +670,18 @@ class PreprocessingPanel(QWidget):
         super().__init__(parent)
         self.pipeline_steps: List[Dict[str, Any]] = []
 
+        self._vaporfit_dialog: Optional[VaporFitDialog] = None
+        self._node_dialog: Optional[QWidget] = None
+
         self._init_ui()
         i18n.language_changed.connect(self.retranslate_ui)
+
+    def get_pipeline_state(self) -> List[Dict[str, Any]]:
+        return copy.deepcopy(self.pipeline_steps)
+
+    def set_pipeline_state(self, steps: List[Dict[str, Any]]):
+        self.pipeline_steps = copy.deepcopy(steps) if steps else []
+        self._refresh_pipeline_list()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
@@ -695,34 +696,28 @@ class PreprocessingPanel(QWidget):
         layout.setSpacing(10)
         layout.setContentsMargins(4, 4, 4, 4)
 
-        # ======================================================================
-        # SEKCJA 1: PIPELINE MANAGER (POTOK PRZETWARZANIA WSADOWEGO)
-        # ======================================================================
+        # SEKCJA 1: PIPELINE MANAGER
         box_pipeline = QGroupBox("⚙️ Potok Przetwarzania (Pipeline Manager)")
         box_pipeline.setStyleSheet("QGroupBox { font-weight: bold; color: #48cae4; }")
         l_pipe = QVBoxLayout(box_pipeline)
         l_pipe.setSpacing(6)
 
-        # NOWY PRZYCISK: WERSJA WĘZŁOWA (BETA)
         row_pipe_mode = QHBoxLayout()
         self.btn_open_node_graph = QPushButton("☊ Otwórz Potok Węzłowy (Beta)...")
         self.btn_open_node_graph.setStyleSheet("""
-                    QPushButton {
-                        background-color: #3a0ca3; 
-                        color: #ffffff; 
-                        font-weight: bold; 
-                        padding: 6px; 
-                        border: 1px solid #7209b7;
-                        border-radius: 4px;
-                    }
-                    QPushButton:hover { background-color: #4361ee; }
-                """)
+            QPushButton {
+                background-color: #3a0ca3; 
+                color: #ffffff; 
+                font-weight: bold; 
+                padding: 6px; 
+                border: 1px solid #7209b7;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #4361ee; }
+        """)
         self.btn_open_node_graph.clicked.connect(self._open_node_pipeline_dialog)
         row_pipe_mode.addWidget(self.btn_open_node_graph)
         l_pipe.addLayout(row_pipe_mode)
-
-        self.list_pipeline = QListWidget()
-        self.list_pipeline.setFixedHeight(120)
 
         self.list_pipeline = QListWidget()
         self.list_pipeline.setFixedHeight(120)
@@ -730,7 +725,6 @@ class PreprocessingPanel(QWidget):
         self.list_pipeline.itemDoubleClicked.connect(self._on_edit_pipeline_step)
         l_pipe.addWidget(self.list_pipeline)
 
-        # Pasek kontrolny potoku
         row_pipe_tools = QHBoxLayout()
         self.combo_step_type = QComboBox()
         self.combo_step_type.addItems([
@@ -763,17 +757,14 @@ class PreprocessingPanel(QWidget):
 
         btn_up = QPushButton("▲")
         btn_up.setFixedWidth(26)
-        btn_up.setToolTip("Przesuń krok w górę")
         btn_up.clicked.connect(self._on_move_step_up)
 
         btn_down = QPushButton("▼")
         btn_down.setFixedWidth(26)
-        btn_down.setToolTip("Przesuń krok w dół")
         btn_down.clicked.connect(self._on_move_step_down)
 
         btn_del_step = QPushButton("✕")
         btn_del_step.setFixedWidth(26)
-        btn_del_step.setToolTip("Usuń zaznaczony krok z potoku")
         btn_del_step.clicked.connect(self._on_remove_pipeline_step)
 
         btn_clear_pipe = QPushButton("Wyczyść")
@@ -788,31 +779,28 @@ class PreprocessingPanel(QWidget):
         row_pipe_tools.addWidget(btn_clear_pipe)
         l_pipe.addLayout(row_pipe_tools)
 
-        # Cel potoku i tryb zapisu
         row_target = QHBoxLayout()
         row_target.addWidget(QLabel("Cel:"))
         self.combo_target_scope = QComboBox()
         self.combo_target_scope.addItems([
+            "Wszystkie widoczne w aktywnym oknie / gałęzi",  # Domyślny cel
             "Tylko aktywne widmo",
-            "Wszystkie widoczne widma w drzewie",
             "Aktywna seria 2D / Tensor"
         ])
+        self.combo_target_scope.setCurrentIndex(0)
         row_target.addWidget(self.combo_target_scope, 1)
         l_pipe.addLayout(row_target)
 
         self.chk_inplace = QCheckBox("Modyfikuj w miejscu (In-place z Undo)")
         self.chk_inplace.setChecked(True)
-        self.chk_inplace.setToolTip("Jeśli odznaczone, potok utworzy nowe widma z przedrostkiem 'proc_'")
         l_pipe.addWidget(self.chk_inplace)
 
-        # Pasek postępu potoku
         self.pipe_progress = QProgressBar()
         self.pipe_progress.setValue(0)
         self.pipe_progress.setFixedHeight(14)
         self.pipe_progress.setVisible(False)
         l_pipe.addWidget(self.pipe_progress)
 
-        # Przycisk uruchomienia potoku
         self.btn_run_pipeline = QPushButton("⚡ Uruchom Potok na Wybranych Danych")
         self.btn_run_pipeline.setStyleSheet("background-color: #2a9d8f; font-weight: bold; padding: 8px;")
         self.btn_run_pipeline.clicked.connect(self._on_run_pipeline)
@@ -820,11 +808,7 @@ class PreprocessingPanel(QWidget):
 
         layout.addWidget(box_pipeline)
 
-        # ======================================================================
-        # SEKCJA 2: POJEDYNCZE NARZĘDZIA / PARAMETRY KROKÓW
-        # ======================================================================
-
-        # Kompensacja VaporFit
+        # SEKCJA 2: POJEDYNCZE NARZĘDZIA
         box_vapor = QGroupBox("💨 Kompensacja Atmosferyczna (VaporFit)")
         l_vapor = QVBoxLayout(box_vapor)
         self.btn_vaporfit = QPushButton("Otwórz VaporFit (Batch)...")
@@ -833,7 +817,6 @@ class PreprocessingPanel(QWidget):
         l_vapor.addWidget(self.btn_vaporfit)
         layout.addWidget(box_vapor)
 
-        # Przycinanie widma (Crop)
         box_crop = QGroupBox("✂ Przycinanie Zakresu (Crop)")
         l_crop = QVBoxLayout(box_crop)
         row_crop = QHBoxLayout()
@@ -850,7 +833,6 @@ class PreprocessingPanel(QWidget):
         l_crop.addWidget(self.btn_crop)
         layout.addWidget(box_crop)
 
-        # Korekcja linii bazowej
         box_baseline = QGroupBox("📏 Linia Bazowa")
         l_baseline = QVBoxLayout(box_baseline)
 
@@ -882,7 +864,6 @@ class PreprocessingPanel(QWidget):
         l_baseline.addLayout(row_bl_btns2)
         layout.addWidget(box_baseline)
 
-        # Filtry i pochodne (Savitzky-Golay)
         box_filters = QGroupBox("〰 Filtr Savitzky-Golay & Pochodne")
         l_filters = QVBoxLayout(box_filters)
 
@@ -914,7 +895,6 @@ class PreprocessingPanel(QWidget):
         self.btn_fsd.clicked.connect(self._apply_fsd)
         l_filters.addWidget(self.btn_fsd)
 
-        # Normalizacje i Offset
         box_norm = QGroupBox("⚖ Normalizacje & Offset")
         l_norm = QVBoxLayout(box_norm)
 
@@ -936,7 +916,6 @@ class PreprocessingPanel(QWidget):
         row_norm2.addWidget(self.btn_offset_zero)
         l_norm.addLayout(row_norm2)
 
-        # Punktowy offset w wybranym nu
         row_offset_pt = QHBoxLayout()
         row_offset_pt.addWidget(QLabel("Offset przy ν:"))
         self.ent_offset_wn = QLineEdit("2000")
@@ -951,7 +930,6 @@ class PreprocessingPanel(QWidget):
 
         layout.addWidget(box_norm)
 
-        # Globalne Undo / Redo
         box_history = QGroupBox("↺ Historia Operacji")
         l_hist = QHBoxLayout(box_history)
         self.btn_undo = QPushButton("↶ Cofnij (⌘Z / Ctrl+Z)")
@@ -976,9 +954,25 @@ class PreprocessingPanel(QWidget):
         main_win = self.window()
         return getattr(main_win, 'canvas_2d', None)
 
-    # ======================================================================
-    # LOGIKA PIPELINE MANAGERA
-    # ======================================================================
+    def _open_vaporfit_dialog(self):
+        if self._vaporfit_dialog is None:
+            self._vaporfit_dialog = VaporFitDialog(parent=self.window())
+        self._vaporfit_dialog.show()
+        self._vaporfit_dialog.raise_()
+        self._vaporfit_dialog.activateWindow()
+
+    def _open_node_pipeline_dialog(self):
+        main_win = self.window()
+        if self._node_dialog is None:
+            from gui.node_editor import NodePipelineDialog
+            self._node_dialog = NodePipelineDialog(parent=main_win)
+            if hasattr(main_win, 'cached_dag_state') and main_win.cached_dag_state:
+                self._node_dialog.import_graph_state(main_win.cached_dag_state)
+
+        self._node_dialog.show()
+        self._node_dialog.raise_()
+        self._node_dialog.activateWindow()
+
     def _on_add_pipeline_step(self):
         choice = self.combo_step_type.currentText()
         step = {}
@@ -1103,7 +1097,6 @@ class PreprocessingPanel(QWidget):
             self.list_pipeline.addItem(f"{idx + 1}. {step['name']}")
 
     def _apply_pipeline_to_matrix(self, x: np.ndarray, mat: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Zunifikowane wykonanie potoku na macierzy 2D."""
         curr_x = x.copy()
         curr_mat = mat.copy()
 
@@ -1187,7 +1180,6 @@ class PreprocessingPanel(QWidget):
         return curr_x, curr_mat
 
     def _apply_pipeline_to_vectors(self, x: np.ndarray, y: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Aplikuje sekwencję potoku do pojedynczego wektora (deleguje do silnika macierzowego)."""
         new_x, new_mat = self._apply_pipeline_to_matrix(x, y.reshape(-1, 1))
         return new_x, new_mat.flatten()
 
@@ -1201,48 +1193,11 @@ class PreprocessingPanel(QWidget):
         canvas = self._get_canvas()
         target_win = session.active_window_id if session.active_context == "window" else None
 
-        # 1. TYLKO AKTYWNE WIDMO (SCOPE 0)
+        # 1. WSZYSTKIE WIDOCZNE W AKTYWNYM WIDOKU / GAŁĘZI (SCOPE 0 - DOMYŚLNY)
         if scope == 0:
-            active = session.active_spectrum
-            if not active:
-                QMessageBox.warning(self, tr("app.warning"), "Brak aktywnego widma.")
-                return
-
-            has_matrix_step = any(
-                s['type'] in ['mean_center', 'autoscaling', 'pareto', 'msc'] for s in self.pipeline_steps)
-            if has_matrix_step:
-                QMessageBox.warning(
-                    self, tr("app.warning"),
-                    "Potok zawiera skalowania macierzowe (Mean-center / Autoscaling / Pareto / MSC),\n"
-                    "które wymagają serii widm (min. 2). Dla pojedynczego widma kroki te zostaną pominięte."
-                )
-
-            new_x, new_y = self._apply_pipeline_to_vectors(active.wavenumbers, active.intensities)
-            new_meta = copy.deepcopy(active.metadata)
-            new_meta["last_pipeline"] = [s['name'] for s in self.pipeline_steps]
-
-            if in_place:
-                cmd = ModifySpectrumCommand(
-                    active, f"Potok: {active.name}",
-                    active.intensities, new_y, active.wavenumbers, new_x,
-                    old_meta=active.metadata, new_meta=new_meta, canvas=canvas
-                )
-                session.undo_stack.push(cmd)
-            else:
-                new_spec = SpectrumData(
-                    wavenumbers=new_x, intensities=new_y,
-                    name=f"proc_{active.name}", file_path=active.file_path,
-                    file_type="processed", metadata=new_meta
-                )
-                cmd = AddBatchSpectraCommand([new_spec], f"Potok: proc_{active.name}", canvas=canvas,
-                                             window_id=target_win)
-                session.undo_stack.push(cmd)
-
-        # 2. WSZYSTKIE WIDOCZNE WIDMA W AKTYWNYM WIDOKU (SCOPE 1)
-        elif scope == 1:
-            visible_spectra = session.get_display_spectra()
+            visible_spectra = session.get_pipeline_target_spectra()
             if not visible_spectra:
-                QMessageBox.warning(self, tr("app.warning"), "Brak widocznych widm w aktywnym widoku.")
+                QMessageBox.warning(self, tr("app.warning"), "Brak widocznych widm w aktywnym oknie lub gałęzi.")
                 return
 
             total = len(visible_spectra)
@@ -1251,7 +1206,6 @@ class PreprocessingPanel(QWidget):
             self.pipe_progress.setVisible(True)
             self.btn_run_pipeline.setEnabled(False)
 
-            # Tworzymy macierz na wspólnej siatce liczb falowych pierwszego widma
             ref_wn = visible_spectra[0].wavenumbers
             mat = np.zeros((len(ref_wn), total), dtype=np.float64)
             for i, spec in enumerate(visible_spectra):
@@ -1260,7 +1214,6 @@ class PreprocessingPanel(QWidget):
                 else:
                     mat[:, i] = np.interp(ref_wn, spec.wavenumbers, spec.intensities)
 
-            # Wykonanie całego potoku w jednym strzale wektorowym
             new_x, new_mat = self._apply_pipeline_to_matrix(ref_wn, mat)
 
             batch_records = []
@@ -1301,6 +1254,43 @@ class PreprocessingPanel(QWidget):
             self.btn_run_pipeline.setEnabled(True)
             QMessageBox.information(self, tr("app.info"), f"Przetworzono {total} widm potokiem.")
 
+        # 2. TYLKO AKTYWNE WIDMO (SCOPE 1)
+        elif scope == 1:
+            active = session.active_spectrum
+            if not active:
+                QMessageBox.warning(self, tr("app.warning"), "Brak aktywnego widma.")
+                return
+
+            has_matrix_step = any(
+                s['type'] in ['mean_center', 'autoscaling', 'pareto', 'msc'] for s in self.pipeline_steps)
+            if has_matrix_step:
+                QMessageBox.warning(
+                    self, tr("app.warning"),
+                    "Potok zawiera skalowania macierzowe (Mean-center / Autoscaling / Pareto / MSC),\n"
+                    "które wymagają serii widm (min. 2). Dla pojedynczego widma kroki te zostaną pominięte."
+                )
+
+            new_x, new_y = self._apply_pipeline_to_vectors(active.wavenumbers, active.intensities)
+            new_meta = copy.deepcopy(active.metadata)
+            new_meta["last_pipeline"] = [s['name'] for s in self.pipeline_steps]
+
+            if in_place:
+                cmd = ModifySpectrumCommand(
+                    active, f"Potok: {active.name}",
+                    active.intensities, new_y, active.wavenumbers, new_x,
+                    old_meta=active.metadata, new_meta=new_meta, canvas=canvas
+                )
+                session.undo_stack.push(cmd)
+            else:
+                new_spec = SpectrumData(
+                    wavenumbers=new_x, intensities=new_y,
+                    name=f"proc_{active.name}", file_path=active.file_path,
+                    file_type="processed", metadata=new_meta
+                )
+                cmd = AddBatchSpectraCommand([new_spec], f"Potok: proc_{active.name}", canvas=canvas,
+                                             window_id=target_win)
+                session.undo_stack.push(cmd)
+
         # 3. AKTYWNA SERIA 2D / TENSOR 3D (SCOPE 2)
         elif scope == 2:
             active_s = session.active_series
@@ -1316,7 +1306,6 @@ class PreprocessingPanel(QWidget):
             self.pipe_progress.setVisible(True)
             self.btn_run_pipeline.setEnabled(False)
 
-            # Cała macierz serii przetwarzana jest bezpośrednio
             new_x, new_mat = self._apply_pipeline_to_matrix(wn, mat)
 
             if in_place:
@@ -1353,17 +1342,6 @@ class PreprocessingPanel(QWidget):
     # ======================================================================
     # POJEDYNCZE OPERACJE MANUALNE
     # ======================================================================
-    def _open_vaporfit_dialog(self):
-        dlg = VaporFitDialog(self)
-        dlg.exec()
-
-    def _open_node_pipeline_dialog(self):
-        """Uruchamia pełnoekranowy, interaktywny edytor węzłowy potoku."""
-        from gui.node_editor import NodePipelineDialog  # <--- IMPORT TUTAJ
-        dlg = NodePipelineDialog(parent=self.window())
-        dlg.exec()
-
-    # Nowe metody manualne dla pojedynczych kliknięć:
     def _apply_airpls(self):
         if not self._verify_single_tool_permission():
             return

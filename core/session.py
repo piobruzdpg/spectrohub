@@ -1,18 +1,18 @@
 """
 core/session.py
 Centralny menedżer stanu danych (Single Source of Truth) dla SpectroHub.
-Zarządza Magazynem Danych (Pomiary Eksperymentalne, Wzorce Atmosfery, Serie 2D, DFT)
-oraz Niezależnymi Oknami Roboczymi (Workspaces).
+Wprowadza ścisłą separację gałęzi Magazynu Danych (pomiary eksperymentalne vs wzorce atmosfery).
 """
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
+import datetime
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QUndoStack
 import logging
 
-from core.models import SpectrumData, SpectralSeries
+from core.models import SpectrumData, SpectralSeries, ProjectMetadata
 
 logger = logging.getLogger("SpectroHub")
 
@@ -59,17 +59,25 @@ class ProjectSession(QObject):
     active_series_changed = Signal(object)
     series_data_changed = Signal(object)
 
-    # Sygnały Okien Roboczych
+    # Sygnały Okien Roboczych i Kontekstu
     window_added = Signal(str, str)
     window_removed = Signal(str)
     active_window_changed = Signal(str)
     window_spectrum_added = Signal(str, object)
     window_spectrum_removed = Signal(str, str)
     window_visibility_changed = Signal(str, str, bool)
-    context_changed = Signal(str)  # 'storage' | 'window'
+    context_changed = Signal(str)            # 'storage' | 'window'
+    storage_branch_changed = Signal(str)     # 'experimental' | 'atm' | 'dft' | 'series'
+
+    # Sygnał Metadanych Projektu
+    metadata_changed = Signal(object)
 
     def __init__(self):
         super().__init__()
+        self.metadata = ProjectMetadata()
+        self.project_file_path: Optional[str] = None
+        self.dag_state: Dict[str, Any] = {}
+
         # Magazyn danych (Pomiary próbek)
         self._spectra: Dict[str, SpectrumData] = {}
         self._visibility: Dict[str, bool] = {}
@@ -90,8 +98,24 @@ class ProjectSession(QObject):
         self._active_window_id: Optional[str] = None
         self._window_counter = 0
 
+        # Kontekst globalny i gałąź magazynu
         self._active_context: str = "storage"
+        self._active_storage_branch: str = "experimental"
+
         self.add_window("Okno 1 (Główne)")
+
+    # --- METADANE PROJEKTU ---
+    def update_metadata(self, title: Optional[str] = None, author: Optional[str] = None,
+                        variant: Optional[str] = None, description: Optional[str] = None,
+                        notes: Optional[str] = None):
+        if title is not None: self.metadata.title = title
+        if author is not None: self.metadata.author = author
+        if variant is not None: self.metadata.variant = variant
+        if description is not None: self.metadata.description = description
+        if notes is not None: self.metadata.notes = notes
+
+        self.metadata.modified_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.metadata_changed.emit(self.metadata)
 
     # --- ZARZĄDZANIE OKNAMI ROBOCZYMI ---
     @property
@@ -108,19 +132,19 @@ class ProjectSession(QObject):
     def active_window_id(self) -> Optional[str]:
         return self._active_window_id
 
-    def add_window(self, name: Optional[str] = None) -> str:
+    def add_window(self, name: Optional[str] = None, window_id: Optional[str] = None) -> str:
         self._window_counter += 1
-        window_id = f"win_{self._window_counter}"
-        window_name = name or f"Okno {self._window_counter}"
+        win_id = window_id or f"win_{self._window_counter}"
+        win_name = name or f"Okno {self._window_counter}"
 
-        win = WorkspaceWindow(window_id=window_id, name=window_name)
-        self._windows[window_id] = win
-        logger.info(f"Utworzono nowe okno robocze: '{window_name}' (ID: {window_id})")
-        self.window_added.emit(window_id, window_name)
+        win = WorkspaceWindow(window_id=win_id, name=win_name)
+        self._windows[win_id] = win
+        logger.info(f"Utworzono okno robocze: '{win_name}' (ID: {win_id})")
+        self.window_added.emit(win_id, win_name)
 
         if self._active_window_id is None:
-            self.set_active_window(window_id)
-        return window_id
+            self.set_active_window(win_id)
+        return win_id
 
     def remove_window(self, window_id: str):
         if window_id in self._windows:
@@ -131,17 +155,6 @@ class ProjectSession(QObject):
             if self._active_window_id == window_id:
                 new_active = next(iter(self._windows.keys()), None)
                 self.set_active_window(new_active)
-
-    def get_display_spectra(self, include_atm: bool = True) -> List[SpectrumData]:
-        """Zwraca widma widoczne na wykresie."""
-        if self._active_context == "window" and self.active_window:
-            win = self.active_window
-            return [s for name, s in win.spectra.items() if win.visibility.get(name, True)]
-
-        display = [s for name, s in self._spectra.items() if self._visibility.get(name, True)]
-        if include_atm:
-            display.extend([s for name, s in self._atm_spectra.items() if self._atm_visibility.get(name, True)])
-        return display
 
     def set_active_window(self, window_id: Optional[str]):
         if window_id is not None and window_id not in self._windows:
@@ -155,7 +168,6 @@ class ProjectSession(QObject):
             if (not win.active_spectrum_name or win.active_spectrum_name not in win.spectra) and win.spectra:
                 win.active_spectrum_name = next(iter(win.spectra.keys()))
 
-        logger.debug(f"Aktywne okno robocze: {window_id}")
         self.active_window_changed.emit(window_id)
         self.active_spectrum_changed.emit(self.active_spectrum)
 
@@ -190,7 +202,6 @@ class ProjectSession(QObject):
         win.visibility[unique_name] = True
         win.active_spectrum_name = unique_name
 
-        logger.info(f"Dodano sklonowane widmo '{unique_name}' do okna '{win.name}'")
         self.window_spectrum_added.emit(window_id, cloned_spec)
         return cloned_spec
 
@@ -204,17 +215,60 @@ class ProjectSession(QObject):
                     win.active_spectrum_name = next(iter(win.spectra.keys()), None)
                 self.window_spectrum_removed.emit(window_id, name)
 
-    # --- KONTEKST ---
+    # --- KONTEKST I GAŁĘZIE MAGAZYNU ---
     @property
     def active_context(self) -> str:
         return self._active_context
 
     def set_context(self, context: str):
-        if context in ("storage", "window"):
+        if context in ("storage", "window") and context != self._active_context:
             self._active_context = context
             logger.debug(f"Zmiana kontekstu sesji na: {context}")
             self.context_changed.emit(context)
             self.active_spectrum_changed.emit(self.active_spectrum)
+
+    @property
+    def active_storage_branch(self) -> str:
+        return self._active_storage_branch
+
+    def set_storage_branch(self, branch: str):
+        """Ustawia aktywną gałąź magazynu danych ('experimental' | 'atm' | 'dft' | 'series')."""
+        if branch in ("experimental", "atm", "dft", "series") and branch != self._active_storage_branch:
+            self._active_storage_branch = branch
+            logger.debug(f"Zmiana aktywnej gałęzi magazynu na: {branch}")
+            self.storage_branch_changed.emit(branch)
+            self.active_spectrum_changed.emit(self.active_spectrum)
+
+    # --- SELEKCJA WIDM DLA WYKRESU I POTOKU ---
+    def get_display_spectra(self, include_atm: bool = False) -> List[SpectrumData]:
+        """
+        Zwraca widma widoczne na wykresie głównym.
+        Izoluje gałęzie: będąc w pomiarach eksperymentalnych NIE wyświetla wzorców atmosfery!
+        """
+        if self._active_context == "window" and self.active_window:
+            win = self.active_window
+            return [s for name, s in win.spectra.items() if win.visibility.get(name, True)]
+
+        if self._active_storage_branch == "atm":
+            return [s for name, s in self._atm_spectra.items() if self._atm_visibility.get(name, True)]
+
+        # Domyślnie w magazynie (Pomiary Eksperymentalne / DFT)
+        return [s for name, s in self._spectra.items() if self._visibility.get(name, True)]
+
+    def get_pipeline_target_spectra(self) -> List[SpectrumData]:
+        """
+        Zwraca widma będące celem przetwarzania wsadowego potoku (DAG / Pipeline Manager).
+        Ściśle izoluje aktywne okno lub aktywną gałąź magazynu.
+        """
+        if self._active_context == "window" and self.active_window:
+            win = self.active_window
+            return [s for name, s in win.spectra.items() if win.visibility.get(name, True)]
+
+        if self._active_storage_branch == "atm":
+            return [s for name, s in self._atm_spectra.items() if self._atm_visibility.get(name, True)]
+
+        # Pomiary eksperymentalne
+        return [s for name, s in self._spectra.items() if self._visibility.get(name, True)]
 
     # --- ZARZĄDZANIE WIDMAMI MAGAZYNU I WZORCAMI ATMOSFERY ---
     @property
@@ -246,11 +300,17 @@ class ProjectSession(QObject):
                 return win.spectra[first_name]
             return None
 
-        if self._active_spectrum_name:
-            if self._active_spectrum_name in self._spectra:
-                return self._spectra[self._active_spectrum_name]
+        if self._active_storage_branch == "atm":
             if self._active_spectrum_name in self._atm_spectra:
                 return self._atm_spectra[self._active_spectrum_name]
+            if self._atm_spectra:
+                return next(iter(self._atm_spectra.values()))
+            return None
+
+        if self._active_spectrum_name in self._spectra:
+            return self._spectra[self._active_spectrum_name]
+        if self._spectra:
+            return next(iter(self._spectra.values()))
         return None
 
     def add_spectrum(self, spectrum: SpectrumData, is_atm: Optional[bool] = None,
@@ -275,10 +335,8 @@ class ProjectSession(QObject):
 
         if emit_signal:
             if is_atm:
-                logger.info(f"Dodano wzorzec atmosfery: '{unique_name}'")
                 self.atm_spectrum_added.emit(spectrum)
             else:
-                logger.info(f"Dodano widmo pomiarowe: '{unique_name}'")
                 self.spectrum_added.emit(spectrum)
 
             if make_active or self._active_spectrum_name is None:
@@ -300,11 +358,11 @@ class ProjectSession(QObject):
                 added_exp.append(spec)
 
         self._active_context = "storage"
+        self._active_storage_branch = "experimental"
+
         if added_exp:
-            logger.info(f"Zarejestrowano wsadowo {len(added_exp)} widm eksperymentalnych.")
             self.spectra_batch_added.emit(added_exp)
         if added_atm:
-            logger.info(f"Zarejestrowano wsadowo {len(added_atm)} wzorców atmosfery.")
             self.atm_spectra_batch_added.emit(added_atm)
 
         all_added = added_exp or added_atm
@@ -314,7 +372,6 @@ class ProjectSession(QObject):
             self.context_changed.emit("storage")
 
     def move_to_atm(self, name: str):
-        """Przenosi widmo z pomiarów eksperymentalnych do wzorców atmosfery."""
         if name in self._spectra:
             spec = self._spectra.pop(name)
             vis = self._visibility.pop(name, True)
@@ -322,10 +379,8 @@ class ProjectSession(QObject):
             self._atm_visibility[name] = vis
             self.spectrum_removed.emit(name)
             self.atm_spectrum_added.emit(spec)
-            logger.info(f"Przeniesiono '{name}' do Wzorców Atmosfery.")
 
     def move_to_experimental(self, name: str):
-        """Przenosi widmo ze wzorców atmosfery do pomiarów eksperymentalnych."""
         if name in self._atm_spectra:
             spec = self._atm_spectra.pop(name)
             vis = self._atm_visibility.pop(name, True)
@@ -333,24 +388,21 @@ class ProjectSession(QObject):
             self._visibility[name] = vis
             self.atm_spectrum_removed.emit(name)
             self.spectrum_added.emit(spec)
-            logger.info(f"Przeniesiono '{name}' do Pomiarów Eksperymentalnych.")
 
     def remove_spectrum(self, name: str):
         if name in self._spectra:
             del self._spectra[name]
             self._visibility.pop(name, None)
-            logger.info(f"Usunięto widmo z magazynu: '{name}'")
             self.spectrum_removed.emit(name)
             if self._active_spectrum_name == name:
-                new_active = next(iter(self._spectra.keys()), next(iter(self._atm_spectra.keys()), None))
+                new_active = next(iter(self._spectra.keys()), None)
                 self.set_active_spectrum(new_active)
         elif name in self._atm_spectra:
             del self._atm_spectra[name]
             self._atm_visibility.pop(name, None)
-            logger.info(f"Usunięto wzorzec atmosfery: '{name}'")
             self.atm_spectrum_removed.emit(name)
             if self._active_spectrum_name == name:
-                new_active = next(iter(self._atm_spectra.keys()), next(iter(self._spectra.keys()), None))
+                new_active = next(iter(self._atm_spectra.keys()), None)
                 self.set_active_spectrum(new_active)
 
     def set_active_spectrum(self, name: Optional[str]):
@@ -376,15 +428,12 @@ class ProjectSession(QObject):
         return True
 
     def get_visible_spectra(self) -> List[SpectrumData]:
-        """Zwraca widoczne widma pomiarowe z magazynu (kompatybilność wsteczna)."""
         return [s for name, s in self._spectra.items() if self._visibility.get(name, True)]
 
     def get_visible_atm_spectra(self) -> List[SpectrumData]:
-        """Zwraca widoczne wzorce atmosfery z magazynu."""
         return [s for name, s in self._atm_spectra.items() if self._atm_visibility.get(name, True)]
 
     def get_atm_matrix(self, target_wavenumbers: np.ndarray, only_visible: bool = True) -> Optional[np.ndarray]:
-        """Zwraca macierz (N_pkt x K_widm) wzorców atmosfery interpolowanych do podanej osi X."""
         source_dict = self._atm_spectra
         if only_visible:
             specs = [s for name, s in source_dict.items() if self._atm_visibility.get(name, True)]
@@ -430,7 +479,6 @@ class ProjectSession(QObject):
         series_obj.name = unique_name
         self._series[unique_name] = series_obj
         self._series_visibility[unique_name] = True
-        logger.info(f"Dodano serię do magazynu: '{unique_name}'")
         self.series_added.emit(series_obj)
         if make_active or self._active_series_name is None:
             self.set_active_series(unique_name)
@@ -461,6 +509,10 @@ class ProjectSession(QObject):
 
     # --- CZYSZCZENIE SESJI ---
     def clear_all(self):
+        self.metadata = ProjectMetadata()
+        self.project_file_path = None
+        self.dag_state.clear()
+
         self._spectra.clear()
         self._visibility.clear()
         self._atm_spectra.clear()
@@ -478,6 +530,7 @@ class ProjectSession(QObject):
         self.undo_stack.clear()
         logger.info("Wyczyszczono sesję projektu.")
         self.session_cleared.emit()
+        self.metadata_changed.emit(self.metadata)
         self.add_window("Okno 1 (Główne)")
 
 

@@ -1,15 +1,16 @@
 """
 gui/main_window.py
 Główne okno aplikacji SpectroHub w technologii PySide6 (Qt6).
+Synchronizuje SpectroCanvas ze zmianą aktywnej gałęzi magazynu.
 """
 
 import os
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QDockWidget, QStackedWidget,
     QToolBar, QButtonGroup, QPushButton, QLabel, QFileDialog,
-    QMessageBox, QStatusBar
+    QMessageBox, QStatusBar, QSplitter, QVBoxLayout
 )
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QFont, QKeySequence
 import logging
 
@@ -17,9 +18,10 @@ from core.i18n import tr, i18n
 from core.session import session
 from gui.canvas import SpectroCanvas
 from gui.project_tree import ProjectTreeWidget
-from io_hub.dispatcher import SpectrumImportDispatcher
+from gui.project_metadata_widget import ProjectMetadataWidget
+from io_hub.project_io import ProjectBundleIO
 
-# Import paneli roboczych
+# Panele robocze
 from gui.workspaces.ws_preprocessing import PreprocessingPanel
 from gui.workspaces.ws_deconvolution import DeconvolutionPanel
 from gui.workspaces.ws_chemometrics import ChemometricsPanel
@@ -47,8 +49,11 @@ QPushButton:checked { background-color: #3d5a80; border: 1px solid #98c1d9; }
 QTableWidget { background-color: #252530; color: #ffffff; gridline-color: #383848; border: 1px solid #383848; }
 QHeaderView::section { background-color: #2b2b36; color: #ffffff; padding: 4px; border: 1px solid #383848; }
 QLabel { color: #dcdcdc; }
-QSpinBox, QDoubleSpinBox, QComboBox { background-color: #2b2b36; color: #ffffff; border: 1px solid #4a4a5a; padding: 4px; border-radius: 3px; }
+QSpinBox, QDoubleSpinBox, QComboBox, QLineEdit, QTextEdit { 
+    background-color: #2b2b36; color: #ffffff; border: 1px solid #4a4a5a; padding: 4px; border-radius: 3px; 
+}
 QCheckBox { color: #dcdcdc; }
+QSplitter::handle { background-color: #383848; height: 3px; }
 """
 
 
@@ -57,32 +62,52 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.resize(1400, 900)
+        self.resize(1400, 920)
         self.setStyleSheet(DARK_STYLE)
+
+        self.cached_dag_state = {}
 
         self._setup_ui()
         i18n.language_changed.connect(self.retranslate_ui)
+        session.metadata_changed.connect(self._update_window_title)
+
+        # Reaktywność canvasu na zmianę gałęzi magazynu i kontekstu okna
+        session.storage_branch_changed.connect(lambda _: self.canvas_2d.redraw_all())
+        session.context_changed.connect(lambda _: self.canvas_2d.redraw_all())
+
         self.retranslate_ui()
 
     def _setup_ui(self):
-        # 1. Pasek menu
         self._create_menu_bar()
-
-        # 2. Górny pasek perspektyw roboczych (Workspaces)
         self._create_workspace_toolbar()
 
-        # 3. Lewy dok: Drzewo projektu
+        # Lewy dok: Drzewo + Metadane
         self.dock_tree = QDockWidget(self)
         self.dock_tree.setObjectName("DockProjectTree")
+
+        left_container = QWidget()
+        left_layout = QVBoxLayout(left_container)
+        left_layout.setContentsMargins(2, 2, 2, 2)
+        left_layout.setSpacing(0)
+
+        self.left_splitter = QSplitter(Qt.Vertical)
         self.project_tree = ProjectTreeWidget(self)
-        self.dock_tree.setWidget(self.project_tree)
+        self.project_meta_widget = ProjectMetadataWidget(self)
+
+        self.left_splitter.addWidget(self.project_tree)
+        self.left_splitter.addWidget(self.project_meta_widget)
+        self.left_splitter.setStretchFactor(0, 4)
+        self.left_splitter.setStretchFactor(1, 1)
+
+        left_layout.addWidget(self.left_splitter)
+        self.dock_tree.setWidget(left_container)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_tree)
 
-        # 4. Centralny widget: Wykres 2D FTIR (Canvas)
+        # Centralny Canvas
         self.canvas_2d = SpectroCanvas(self)
         self.setCentralWidget(self.canvas_2d)
 
-        # 5. Prawy dok: Dynamiczny Inspektor Parametrów
+        # Prawy dok: Workspace Inspector
         self.dock_inspector = QDockWidget(self)
         self.dock_inspector.setObjectName("DockInspector")
         self.inspector_stack = QStackedWidget(self)
@@ -93,26 +118,46 @@ class MainWindow(QMainWindow):
         self.panel_chem = ChemometricsPanel(self)
         self.panel_dft = QuantumPanel(self)
 
-        self.inspector_stack.addWidget(self.panel_prep)    # Indeks 0
-        self.inspector_stack.addWidget(self.panel_math)    # Indeks 1
-        self.inspector_stack.addWidget(self.panel_deconv)  # Indeks 2
-        self.inspector_stack.addWidget(self.panel_chem)    # Indeks 3
-        self.inspector_stack.addWidget(self.panel_dft)     # Indeks 4
+        self.inspector_stack.addWidget(self.panel_prep)    # 0
+        self.inspector_stack.addWidget(self.panel_math)    # 1
+        self.inspector_stack.addWidget(self.panel_deconv)  # 2
+        self.inspector_stack.addWidget(self.panel_chem)    # 3
+        self.inspector_stack.addWidget(self.panel_dft)     # 4
 
         self.dock_inspector.setWidget(self.inspector_stack)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_inspector)
 
-        # 6. Pasek stanu
         self.status_bar = QStatusBar(self)
         self.setStatusBar(self.status_bar)
 
     def _create_menu_bar(self):
         menu = self.menuBar()
 
-        # 1. Menu Plik
         self.menu_file = menu.addMenu("")
+
+        self.act_new_proj = QAction("Nowy projekt", self)
+        self.act_new_proj.setShortcut(QKeySequence.New)
+        self.act_new_proj.triggered.connect(self._on_new_project)
+        self.menu_file.addAction(self.act_new_proj)
+
+        self.act_open_proj = QAction("Otwórz projekt (.shub)...", self)
+        self.act_open_proj.setShortcut(QKeySequence.Open)
+        self.act_open_proj.triggered.connect(self._on_open_project)
+        self.menu_file.addAction(self.act_open_proj)
+
+        self.act_save_proj = QAction("Zapisz projekt", self)
+        self.act_save_proj.setShortcut(QKeySequence.Save)
+        self.act_save_proj.triggered.connect(self._on_save_project)
+        self.menu_file.addAction(self.act_save_proj)
+
+        self.act_save_proj_as = QAction("Zapisz projekt jako...", self)
+        self.act_save_proj_as.setShortcut(QKeySequence.SaveAs)
+        self.act_save_proj_as.triggered.connect(self._on_save_project_as)
+        self.menu_file.addAction(self.act_save_proj_as)
+
+        self.menu_file.addSeparator()
+
         self.act_open = QAction(self)
-        self.act_open.setShortcut(QKeySequence.Open)
         self.act_open.triggered.connect(self._on_open_files)
         self.menu_file.addAction(self.act_open)
 
@@ -133,18 +178,17 @@ class MainWindow(QMainWindow):
         self.act_exit.triggered.connect(self.close)
         self.menu_file.addAction(self.act_exit)
 
-        # 2. Menu Edycja (Globalne Undo / Redo)
+        # Edycja
         self.menu_edit = menu.addMenu("Edycja")
-
         self.act_undo = session.undo_stack.createUndoAction(self, "Cofnij")
-        self.act_undo.setShortcut(QKeySequence.Undo)  # Ctrl+Z / Cmd+Z
+        self.act_undo.setShortcut(QKeySequence.Undo)
         self.menu_edit.addAction(self.act_undo)
 
         self.act_redo = session.undo_stack.createRedoAction(self, "Ponów")
-        self.act_redo.setShortcut(QKeySequence.Redo)  # Ctrl+Y / Cmd+Shift+Z
+        self.act_redo.setShortcut(QKeySequence.Redo)
         self.menu_edit.addAction(self.act_redo)
 
-        # 3. Menu Narzędzia
+        # Narzędzia
         self.menu_tools = menu.addMenu("")
         self.act_clear = QAction(self)
         self.act_clear.triggered.connect(session.clear_all)
@@ -187,7 +231,6 @@ class MainWindow(QMainWindow):
 
         self.ws_group.idClicked.connect(self._on_workspace_selected)
 
-        # Prawy narożnik paska: Przełącznik języka (PL / EN)
         spacer = QWidget()
         spacer.setSizePolicy(spacer.sizePolicy().horizontalPolicy(), spacer.sizePolicy().verticalPolicy())
         toolbar.addWidget(spacer)
@@ -201,7 +244,6 @@ class MainWindow(QMainWindow):
         self.inspector_stack.setCurrentIndex(idx)
         self.status_bar.showMessage(f"{tr('app.ready')}: Workspace {idx + 1}")
 
-        # Jeśli wracamy do Preprocessingu (lub DFT), przywracamy domyślny podgląd projektu
         if idx in (0, 3):
             self.canvas_2d.prepare_axes(shared_x=True)
             self.canvas_2d.redraw_all()
@@ -210,14 +252,83 @@ class MainWindow(QMainWindow):
         new_lang = "en" if i18n.current_language == "pl" else "pl"
         i18n.set_language(new_lang)
 
+    def _update_window_title(self, meta=None):
+        meta = meta or session.metadata
+        proj_name = meta.title or "Bez tytułu"
+        fpath = f" — [{os.path.basename(session.project_file_path)}]" if session.project_file_path else ""
+        self.setWindowTitle(f"SpectroHub - {proj_name}{fpath}")
+
+    def _on_new_project(self):
+        reply = QMessageBox.question(
+            self, "Nowy Projekt",
+            "Czy na pewno chcesz utworzyć nowy projekt?\nWszystkie niezapisane zmiany zostaną utracone.",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            session.clear_all()
+            self.cached_dag_state = {}
+            self.panel_prep.set_pipeline_state([])
+            self.canvas_2d.redraw_all()
+            self.status_bar.showMessage("Utworzono nowy, czysty projekt.")
+
+    def _on_save_project(self):
+        if session.project_file_path:
+            self._save_to_path(session.project_file_path)
+        else:
+            self._on_save_project_as()
+
+    def _on_save_project_as(self):
+        def_name = f"{session.metadata.title.replace(' ', '_')}.shub" if session.metadata.title else "Projekt_SpectroHub.shub"
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Zapisz projekt SpectroHub", def_name, "SpectroHub Project Bundle (*.shub)"
+        )
+        if path:
+            if not path.endswith(".shub"):
+                path += ".shub"
+            self._save_to_path(path)
+
+    def _save_to_path(self, path: str):
+        try:
+            linear_pipe = self.panel_prep.get_pipeline_state()
+            ProjectBundleIO.save_project(
+                file_path=path,
+                session=session,
+                dag_state=self.cached_dag_state,
+                linear_pipeline=linear_pipe
+            )
+            self._update_window_title()
+            self.status_bar.showMessage(f"Projekt został pomyślnie zapisany: {path}", 5000)
+            QMessageBox.information(self, "Zapisano", f"Projekt pomyślnie zapisany do:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Błąd zapisu", f"Nie udało się zapisać projektu:\n{e}")
+
+    def _on_open_project(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Otwórz projekt SpectroHub", "", "SpectroHub Project Bundle (*.shub)"
+        )
+        if not path:
+            return
+
+        try:
+            dag_state, linear_pipe = ProjectBundleIO.load_project(path, session)
+            self.cached_dag_state = dag_state
+            self.panel_prep.set_pipeline_state(linear_pipe)
+
+            self.canvas_2d.prepare_axes(shared_x=True)
+            self.canvas_2d.redraw_all()
+            self._update_window_title()
+
+            self.status_bar.showMessage(f"Załadowano projekt: {path}", 5000)
+            QMessageBox.information(self, "Wczytano projekt", f"Pomyślnie załadowano projekt:\n{session.metadata.title}")
+        except Exception as e:
+            QMessageBox.critical(self, "Błąd odczytu", f"Nie udało się wczytać pliku projektu:\n{e}")
+
     def _on_open_files(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self, tr("menu.open_spectra"), "",
             "Obsługiwane widma (*.0 *.[0-9]* *.opus *.spa *.spg *.spc *.dx *.jdx *.csv *.dpt *.txt *.log);;Wszystkie (*.*)"
         )
         if paths:
-            # Uruchamiamy FileImportWorker w tle przez globalny QThreadPool,
-            # żeby nie blokować interfejsu i załadować wszystko jednym wsadem!
             from PySide6.QtCore import QThreadPool
             from gui.project_tree import FileImportWorker
             worker = FileImportWorker(paths)
@@ -277,8 +388,6 @@ class MainWindow(QMainWindow):
                 SPCExporter.export_spectrum(active, path)
             elif "JCAMP" in selected_filter:
                 JCAMPExporter.export_spectrum(active, path)
-            elif "DPT" in selected_filter:
-                ASCIIExporter.export_spectrum_data(active, path, style="EU")
             else:
                 ASCIIExporter.export_spectrum_data(active, path, style="EU")
 
@@ -288,7 +397,7 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, tr("app.error"), f"Błąd zapisu widma:\n{e}")
 
     def retranslate_ui(self):
-        self.setWindowTitle(tr("app.title", "SpectroHub - Platforma Analizy FTIR & DFT"))
+        self._update_window_title()
         self.menu_file.setTitle(tr("menu.file", "Plik"))
         self.act_open.setText(tr("menu.open_spectra", "Dodaj pliki widm..."))
         self.act_export_excel.setText(tr("menu.export_excel", "Eksportuj projekt do Excela (.xlsx)..."))

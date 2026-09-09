@@ -1,11 +1,47 @@
 """
 core/models.py
-Kluczowe struktury danych spektroskopowych dla SpectroHub.
+Kluczowe struktury danych spektroskopowych oraz metadane projektu dla SpectroHub.
 """
 
 from dataclasses import dataclass, field
+import datetime
 import numpy as np
 from typing import Optional, Dict, Any, List
+
+
+@dataclass
+class ProjectMetadata:
+    """Metadane opisowe całego projektu badawczego."""
+    title: str = "Nowy Projekt SpectroHub"
+    author: str = ""
+    created_at: str = field(default_factory=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    modified_at: str = field(default_factory=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+    variant: str = "Standardowy"  # np. 'Surowy', 'Korekcja ATM', 'Po dekonwolucji', 'Publikacja'
+    description: str = ""
+    notes: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "title": self.title,
+            "author": self.author,
+            "created_at": self.created_at,
+            "modified_at": self.modified_at,
+            "variant": self.variant,
+            "description": self.description,
+            "notes": self.notes
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ProjectMetadata":
+        return cls(
+            title=d.get("title", "Projekt"),
+            author=d.get("author", ""),
+            created_at=d.get("created_at", ""),
+            modified_at=d.get("modified_at", ""),
+            variant=d.get("variant", "Standardowy"),
+            description=d.get("description", ""),
+            notes=d.get("notes", "")
+        )
 
 
 @dataclass
@@ -15,7 +51,7 @@ class SpectrumData:
     intensities: np.ndarray      # Oś Y (float64, absorbancja/transmisja)
     name: str                    # Nazwa widma / identyfikator
     file_path: str               # Oryginalna ścieżka do pliku
-    file_type: str               # 'opus', 'spa', 'spg', 'spc', 'csv', 'jcamp', 'gaussian'
+    file_type: str               # 'opus', 'spa', 'spg', 'spc', 'csv', 'jcamp', 'gaussian', 'processed'
     time_str: str = "00:00:00"   # Stempel czasu (HH:MM:SS)
     units_x: str = "cm^-1"
     units_y: str = "absorbance"
@@ -48,6 +84,7 @@ class SpectrumData:
             units_y=self.units_y,
             metadata=copy.deepcopy(self.metadata)
         )
+
 
 @dataclass
 class SpectralSeries:

@@ -15,7 +15,6 @@ from gui.main_window import MainWindow
 # 1. Reguła z gwiazdką dla podkategorii dostępności
 os.environ["QT_LOGGING_RULES"] = "qt.qpa.accessibility*=false;qt.accessibility*=false"
 
-
 def qt_message_filter(mode, context, message):
     """Przechwytuje i wycisza fałszywe alarmy Cocoa Accessibility na macOS."""
     if "Called attribute on invalid object" in message:
