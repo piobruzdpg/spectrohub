@@ -1,7 +1,8 @@
 """
 gui/node_editor/pipeline_dialog.py
 Główne okno edytora węzłów (QMainWindow) z architekturą wielozakładkową (Multi-Tab),
-przypięciem do lewej, wydzielaniem przez przeciągnięcie (Tear-off) lub menu PPM oraz dokowalną paletą.
+przypięciem do lewej, wydzielaniem przez przeciągnięcie (Tear-off) lub menu PPM, dokowalną paletą
+oraz modalnym oknem postępu Monte Carlo.
 """
 
 from typing import List, Dict, Any, Optional, Tuple
@@ -14,7 +15,8 @@ from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QGraphicsView, QGraphicsScene, QMenu, QLabel,
     QComboBox, QCheckBox, QMessageBox, QToolBar, QFileDialog,
-    QTabWidget, QTabBar, QInputDialog, QProxyStyle, QStyle
+    QTabWidget, QTabBar, QInputDialog, QProxyStyle, QStyle,
+    QProgressDialog, QApplication
 )
 
 from PySide6.QtCore import Qt, QPointF, QRectF, QTimer, QSettings, Signal
@@ -35,13 +37,10 @@ logger = logging.getLogger("SpectroHub")
 
 class PipelineTabInfo:
     """Kontener metadanych pojedynczej zakładki potoku."""
-    def __init__(self, title: str, view: 'NodeView', scene: 'NodeScene',
-                 scope: int = 0, in_place: bool = True):
+    def __init__(self, title: str, view: 'NodeView', scene: 'NodeScene'):
         self.title = title
         self.view = view
         self.scene = scene
-        self.scope = scope
-        self.in_place = in_place
         self.floating_window: Optional['FloatingPipelineWindow'] = None
 
 
@@ -53,6 +52,7 @@ class LeftAlignedTabStyle(QProxyStyle):
         if hint_val == target_val:
             return int(Qt.AlignmentFlag.AlignLeft)
         return super().styleHint(hint, option, widget, returnData)
+
 
 class DetachableTabBar(QTabBar):
     """Pasek zakładek z obsługą odrywania przez przeciągnięcie poza pasek oraz lewostronnego układu."""
@@ -74,7 +74,6 @@ class DetachableTabBar(QTabBar):
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton and self._drag_tab_idx >= 0:
             drop_pos = event.position().toPoint()
-            # Jeśli kursor został upuszczony poza paskiem zakładek
             if not self.rect().adjusted(-30, -30, 30, 45).contains(drop_pos):
                 idx = self._drag_tab_idx
                 self._drag_tab_idx = -1
@@ -104,8 +103,9 @@ class NodeScene(QGraphicsScene):
             return
 
         if event.button() == Qt.LeftButton and (event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)):
-            node = item if isinstance(item, NodeItem) else (item.parentItem() if (item and isinstance(item.parentItem(), NodeItem)) else None)
-            if isinstance(node, NodeItem) and node.node_type not in ("input", "output") and not isinstance(item, PortItem):
+            node = item if isinstance(item, NodeItem) else (
+                item.parentItem() if (item and isinstance(item.parentItem(), NodeItem)) else None)
+            if isinstance(node, NodeItem) and node.node_type != "input" and not isinstance(item, PortItem):
                 clone = NodeItem(node.node_type, node.title, copy.deepcopy(node.step_data))
                 clone.setPos(node.pos())
                 self.addItem(clone)
@@ -131,7 +131,7 @@ class NodeScene(QGraphicsScene):
             item = self.itemAt(event.scenePos(), self.views()[0].transform())
             if (isinstance(item, PortItem) and not item.is_output and
                     item.node_item != self.temp_connection.out_port.node_item):
-                if item.connections and item.port_id != "in_atm":
+                if item.connections and not getattr(item, 'allow_multiple', False):
                     item.connections[0].disconnect()
                 self.temp_connection.in_port = item
                 item.connections.append(self.temp_connection)
@@ -192,7 +192,6 @@ class NodeView(QGraphicsView):
         self._pan_start = QPointF()
 
     def fit_to_content(self, margin: float = 60.0):
-        """Centruje i skaluje widok tak, aby objąć wszystkie bloczki węzłów."""
         nodes = [item for item in self.scene().items() if isinstance(item, NodeItem)]
         if not nodes:
             return
@@ -310,6 +309,7 @@ class FloatingPipelineWindow(QMainWindow):
         self.setWindowFlags(Qt.Window)
 
         toolbar = QToolBar("Narzędzia", self)
+        toolbar.setObjectName("FloatingNodeToolBar")
         toolbar.setStyleSheet("background-color: #252530; spacing: 8px; padding: 4px;")
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
@@ -329,7 +329,6 @@ class FloatingPipelineWindow(QMainWindow):
         btn_run.clicked.connect(lambda: self.dialog_owner.execute_tab_pipeline(self.tab_info))
         toolbar.addWidget(btn_run)
 
-        # Kluczowe: przywrócenie widoczności widoku po wyjęciu z QTabWidget
         self.tab_info.view.setVisible(True)
         self.tab_info.view.show()
         self.setCentralWidget(self.tab_info.view)
@@ -363,9 +362,8 @@ class NodePipelineDialog(QMainWindow):
         self.tabs: List[PipelineTabInfo] = []
         self._tab_counter = 0
 
-        # Centralny widget zakładek z własnym paskiem
         self.tab_widget = QTabWidget(self)
-        self.tab_widget.setDocumentMode(False)  # Wyłączone: zapobiega natywnemu centrowaniu macOS
+        self.tab_widget.setDocumentMode(False)
         self.tab_bar = DetachableTabBar(self)
         self.tab_widget.setTabBar(self.tab_bar)
 
@@ -379,7 +377,6 @@ class NodePipelineDialog(QMainWindow):
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
         self.tab_widget.tabBarDoubleClicked.connect(self._on_tab_double_clicked)
 
-        # Arkusz stylów zakładek
         self.tab_widget.setStyleSheet("""
                     QTabWidget::pane {
                         border-top: 1px solid #2d2d3a;
@@ -416,14 +413,10 @@ class NodePipelineDialog(QMainWindow):
                     }
                 """)
 
-        # KLUCZOWY KROK:
-        # Opakowujemy styl QStyleSheetStyle stworzony przez powyższy setStyleSheet
-        # i trzymamy referencję w self._tab_bar_style, aby zapobiec usunięciu przez GC.
         self._tab_bar_style = LeftAlignedTabStyle(self.tab_bar.style())
         self.tab_bar.setStyle(self._tab_bar_style)
         self.tab_bar.setExpanding(False)
 
-        # Przycisk [+] po prawej stronie
         corner_widget = QWidget()
         corner_layout = QHBoxLayout(corner_widget)
         corner_layout.setContentsMargins(0, 0, 6, 0)
@@ -461,7 +454,6 @@ class NodePipelineDialog(QMainWindow):
 
         session.active_spectrum_changed.connect(self._on_session_active_spectrum_changed)
 
-    # --- WŁAŚCIWOŚCI DLA AKTYWNEJ ZAKŁADKI ---
     @property
     def current_tab(self) -> Optional[PipelineTabInfo]:
         curr_widget = self.tab_widget.currentWidget()
@@ -485,7 +477,6 @@ class NodePipelineDialog(QMainWindow):
                 return t
         return None
 
-    # --- ZARZĄDZANIE ZAKŁADKAMI ---
     def add_pipeline_tab(self, title: Optional[str] = None, graph_data: Optional[Dict[str, Any]] = None,
                          make_active: bool = True) -> PipelineTabInfo:
         self._tab_counter += 1
@@ -495,15 +486,12 @@ class NodePipelineDialog(QMainWindow):
         view = NodeView(scene, self)
         scene.selectionChanged.connect(self._on_selection_changed)
 
-        scope = graph_data.get("scope", 0) if graph_data else 0
-        in_place = graph_data.get("in_place", True) if graph_data else True
-
         if graph_data and "nodes" in graph_data:
             self._deserialize_to_scene(scene, graph_data)
         else:
             self._spawn_default_pipeline(scene)
 
-        tab_info = PipelineTabInfo(t_name, view, scene, scope=scope, in_place=in_place)
+        tab_info = PipelineTabInfo(t_name, view, scene)
         self.tabs.append(tab_info)
 
         idx = self.tab_widget.addTab(view, t_name)
@@ -516,17 +504,6 @@ class NodePipelineDialog(QMainWindow):
         return tab_info
 
     def _on_tab_changed(self, index: int):
-        tab = self.current_tab
-        if not tab:
-            return
-
-        self.combo_scope.blockSignals(True)
-        self.chk_inplace.blockSignals(True)
-        self.combo_scope.setCurrentIndex(tab.scope)
-        self.chk_inplace.setChecked(tab.in_place)
-        self.combo_scope.blockSignals(False)
-        self.chk_inplace.blockSignals(False)
-
         self.recalculate_graph_preview()
         self._update_live_canvas_preview()
         self.sync_state_to_session()
@@ -606,13 +583,10 @@ class NodePipelineDialog(QMainWindow):
         nodes_list, conns_list = self._serialize_scene(tab.scene)
         data = {
             "nodes": nodes_list,
-            "connections": conns_list,
-            "scope": tab.scope,
-            "in_place": tab.in_place
+            "connections": conns_list
         }
         self.add_pipeline_tab(title=f"{tab.title} (Kopia)", graph_data=data, make_active=True)
 
-    # --- WYDZIELANIE I PRZYPINANIE OKIEN ---
     def _detach_tab_by_index(self, index: int):
         if index < 0 or index >= self.tab_widget.count():
             return
@@ -643,7 +617,6 @@ class NodePipelineDialog(QMainWindow):
             self.recalculate_graph_preview()
             self.sync_state_to_session()
 
-    # --- CYKL ŻYCIA I ZAPIS UKŁADU ---
     def closeEvent(self, event):
         for tab in list(self.tabs):
             if tab.floating_window:
@@ -673,6 +646,7 @@ class NodePipelineDialog(QMainWindow):
 
     def _init_toolbar(self):
         toolbar = QToolBar("Główny pasek narzędzi", self)
+        toolbar.setObjectName("MainNodeToolBar")
         toolbar.setStyleSheet("background-color: #252530; spacing: 8px; padding: 4px;")
         self.addToolBar(Qt.TopToolBarArea, toolbar)
 
@@ -692,25 +666,8 @@ class NodePipelineDialog(QMainWindow):
 
         toolbar.addSeparator()
 
-        toolbar.addWidget(QLabel(" Cel potoku: "))
-        self.combo_scope = QComboBox()
-        self.combo_scope.addItems([
-            "Wszystkie widoczne w aktywnym oknie / gałęzi",
-            "Tylko aktywne widmo",
-            "Aktywna seria 2D / Tensor"
-        ])
-        self.combo_scope.currentIndexChanged.connect(self._on_scope_changed)
-        toolbar.addWidget(self.combo_scope)
-
-        self.chk_inplace = QCheckBox("In-place (z Undo)")
-        self.chk_inplace.setChecked(True)
-        self.chk_inplace.toggled.connect(self._on_inplace_toggled)
-        toolbar.addWidget(self.chk_inplace)
-
-        toolbar.addSeparator()
-
         self.chk_live_preview = QCheckBox("👁 Live Preview na Canvasie")
-        self.chk_live_preview.setChecked(True)
+        self.chk_live_preview.setChecked(False)
         self.chk_live_preview.setStyleSheet("color: #ffb703; font-weight: bold;")
         self.chk_live_preview.toggled.connect(self._toggle_live_preview)
         toolbar.addWidget(self.chk_live_preview)
@@ -734,17 +691,6 @@ class NodePipelineDialog(QMainWindow):
         btn_run.clicked.connect(self._execute_pipeline)
         toolbar.addWidget(btn_run)
 
-    def _on_scope_changed(self, idx: int):
-        if self.current_tab:
-            self.current_tab.scope = idx
-            self.recalculate_graph_preview()
-            self.sync_state_to_session()
-
-    def _on_inplace_toggled(self, checked: bool):
-        if self.current_tab:
-            self.current_tab.in_place = checked
-            self.sync_state_to_session()
-
     def _setup_docks(self):
         self.dock_library = QDockWidget("📚 Biblioteka Węzłów", self)
         self.dock_library.setObjectName("DockNodeLibrary")
@@ -766,27 +712,64 @@ class NodePipelineDialog(QMainWindow):
 
     def _get_node_categories(self) -> Dict[str, list]:
         return {
-            "Chemometria & Analiza Wielowymiarowa": [
-                ("📊 Odszumiacz SVD / PCA (Rank-k)", {'type': 'svd_denoise', 'name': "SVD Denoise (k=2)", 'k': 2, 'center': False}),
-                ("🔬 Dekompozycja MCR-ALS / SPEXFA", {'type': 'mcr_decompose', 'name': "MCR-ALS (k=2)", 'method': "mcr_als", 'k': 2, 'non_negative': True, 'closure': False, 'unimodal': False, 'max_iter': 500}),
-                ("📐 Skalowania Populacyjne (Mean/UV/Pareto/MSC)", {'type': 'matrix_scaling', 'name': "Skalowanie: Mean-center", 'scale_type': "mean_center"})
+            "Źródła Danych & Odniesienia": [
+                ("📥 Źródło Danych (Konfiguracja wejścia)",
+                 {'type': 'input', 'name': "Źródło: Aktywne widmo", 'source_mode': "active"}),
+                ("📌 Widma z Projektu (Multi-Select)",
+                 {'type': 'spectrum_select', 'name': "Ref: (wybierz)", 'selected_spectra': []}),
+                ("🔀 Zbieracz / Mux (Merge do macierzy 2D)", {'type': 'merge_spectra', 'name': "Mux: Zbieracz widm"})
+            ],
+            "Dekompozycja HDO & Pasma Syntetyczne": [
+                ("🧪 Solwer Dekompozycji HDO / MC",
+                 {'type': 'hdo_decomposition', 'name': "HDO Fit (N=1.0)", 'n_multiplier': 1.0}),
+                ("📈 Widmo Składowe (Wk · c)",
+                 {'type': 'hdo_spectrum_scaled', 'name': "Widmo Skalowane", 'selected_spectrum': "", 'scale': 1.0,
+                  'w_min': 0.0, 'w_max': 1.5}),
+                ("🔔 Pasmo Syntetyczne (GxL / Gauss / Lorentz)",
+                 {'type': 'synthetic_peak', 'name': "Pik GxL @ 1650", 'shape': 'gxl', 'center': 1650.0, 'amp': 0.5,
+                  'width': 30.0, 'shape_param': 0.5}),
+                ("🎲 Parametry Monte Carlo (MC Config)",
+                 {'type': 'mc_params', 'name': "MC Params (iter=3000)", 'n_iter': 3000, 'penalty_weight': 10.0,
+                  'baseline_active': False})
             ],
             "Węzły Końcowe (Terminale)": [
                 ("💾 Zapis Wyniku (In-place / proc_*)", {'type': 'output', 'name': "Zapis standardowy"}),
-                ("🗂️ Generuj w nowym oknie roboczym", {'type': 'output_window', 'name': "🗂️ Okno: Skorygowane", 'window_name': "Skorygowane", 'mode': "create_new"})
+                ("🗂️ Kopiuj do okna roboczego (Multi-Input)",
+                 {'type': 'output_window', 'name': "🗂️ Okno: Skorygowane", 'window_name': "Skorygowane",
+                  'mode': "create_new"})
+            ],
+            "Chemometria & Analiza Wielowymiarowa": [
+                ("📊 Odszumiacz SVD / PCA (Rank-k)",
+                 {'type': 'svd_denoise', 'name': "SVD Denoise (k=2)", 'k': 2, 'center': False}),
+                ("🔬 Dekompozycja MCR-ALS / SPEXFA",
+                 {'type': 'mcr_decompose', 'name': "MCR-ALS (k=2)", 'method': "mcr_als", 'k': 2, 'non_negative': True,
+                  'closure': False, 'unimodal': False, 'max_iter': 500}),
+                ("📐 Skalowania Populacyjne (Mean/UV/Pareto/MSC)",
+                 {'type': 'matrix_scaling', 'name': "Skalowanie: Mean-center", 'scale_type': "mean_center"})
             ],
             "Chemia Kwantowa (DFT)": [
-                ("⚛️ Splot pasm DFT (Gauss / Lorentz)", {'type': 'dft_broadener', 'name': "DFT Broadener", 'dft_name': "", 'scale_factor': 0.965, 'fwhm': 12.0, 'shape': "lorentzian"})
+                ("⚛️ Splot pasm DFT (Gauss / Lorentz)",
+                 {'type': 'dft_broadener', 'name': "DFT Broadener", 'dft_name': "", 'scale_factor': 0.965, 'fwhm': 12.0,
+                  'shape': "lorentzian"})
             ],
             "Fotometria & Konwersje": [
-                ("🔄 Konwerter Fotometryczny (A ↔ T ↔ %T ↔ KM)", {'type': 'photometry', 'name': "Fotometria: %T ➔ A", 'photo_mode': "tpct_to_a"})
+                ("🔄 Konwerter Fotometryczny (A ↔ T ↔ %T ↔ KM)",
+                 {'type': 'photometry', 'name': "Fotometria: %T ➔ A", 'photo_mode': "tpct_to_a"})
             ],
             "Kompensacja Atmosferyczna": [
-                ("☁️ VaporFit (Para wodna i CO₂)", {'type': 'vaporfit', 'name': "VaporFit (SG=11)", 'sg_points': 11, 'sg_poly': 3}),
-                ("📌 Widmo Odniesienia z Projektu", {'type': 'spectrum_select', 'name': "Ref: (wybierz)", 'selected_spectrum': ""})
+                ("☁️ VaporFit (Para wodna i CO₂)",
+                 {'type': 'vaporfit', 'name': "VaporFit (SG=11)", 'sg_points': 11, 'sg_poly': 3}),
+                ("📌 Wzorce z Projektu (ATM / CO₂)",
+                 {'type': 'spectrum_select', 'name': "Ref: (wybierz)", 'selected_spectra': []})
             ],
             "Matematyka Spektralna i Skalary": [
                 ("Operacja Dwuwidmowa (A ± k·B)", {'type': 'math_op', 'name': "A - 1.000·B", 'op': 'sub', 'k': 1.0}),
+                ("Wewnętrzny Standard (Normalizacja IS)",
+                 {'type': 'internal_standard', 'name': "IS @ 2060 cm⁻¹", 'target_wn': 2060.0, 'half_win': 15.0,
+                  'calc_mode': 'peak_height'}),
+                ("Całkowanie Pasma / Kinetyka",
+                 {'type': 'band_integrate', 'name': "Całka [1600–1700]", 'min_wn': 1600.0, 'max_wn': 1700.0,
+                  'bl_mode': 'two_point'}),
                 ("Mnożenie przez skalar (S · c)", {'type': 'scalar_math', 'name': "S · 2", 'op': 'mul', 'val': 2.0}),
                 ("Dzielenie przez skalar (S / c)", {'type': 'scalar_math', 'name': "S / 2", 'op': 'div', 'val': 2.0}),
                 ("Dodawanie stałej (S + c)", {'type': 'scalar_math', 'name': "S + 0.1", 'op': 'add', 'val': 0.1}),
@@ -794,18 +777,22 @@ class NodePipelineDialog(QMainWindow):
             ],
             "Korekcja Linii Bazowej": [
                 ("AsLS (Syg + Baza)", {'type': 'asls', 'name': "AsLS (λ=1e5, p=0.001)", 'lam': 1e5, 'p': 0.001}),
-                ("airPLS / airALS (Syg + Baza)", {'type': 'airpls', 'name': "airPLS (λ=1e5)", 'lam': 1e5, 'n_iter': 15}),
+                ("airPLS / airALS (Syg + Baza)",
+                 {'type': 'airpls', 'name': "airPLS (λ=1e5)", 'lam': 1e5, 'n_iter': 15}),
                 ("Wielomianowa (Syg + Baza)", {'type': 'poly_bl', 'name': "Wielomian st. 3", 'deg': 3}),
                 ("Dwa krańce (Syg + Baza)", {'type': 'linear_bl', 'name': "Linia bazowa (krańce)"})
             ],
             "Filtry i Pochodne": [
-                ("Wygładzanie SG", {'type': 'sg_smooth', 'name': "SG Wygładzanie (okno=11, st=3)", 'win': 11, 'poly': 3}),
+                ("Wygładzanie SG",
+                 {'type': 'sg_smooth', 'name': "SG Wygładzanie (okno=11, st=3)", 'win': 11, 'poly': 3}),
                 ("1. Pochodna SG", {'type': 'deriv1', 'name': "1. Pochodna SG (okno=11)", 'win': 11, 'poly': 3}),
-                ("2. Pochodna (-) SG", {'type': 'deriv2', 'name': "2. Pochodna SG (-) (okno=11)", 'win': 11, 'poly': 3}),
+                ("2. Pochodna (-) SG",
+                 {'type': 'deriv2', 'name': "2. Pochodna SG (-) (okno=11)", 'win': 11, 'poly': 3}),
                 ("FSD (Kauppinen)", {'type': 'fsd', 'name': "FSD (FWHM=18.0, K=2.0)", 'fwhm': 18.0, 'k_factor': 2.0})
             ],
             "Przycinanie i Zakres": [
-                ("Przycięcie (Crop)", {'type': 'crop', 'name': "Przycięcie [1000–1800]", 'min_w': 1000.0, 'max_w': 1800.0})
+                ("Przycięcie (Crop)",
+                 {'type': 'crop', 'name': "Przycięcie [1000–1800]", 'min_w': 1000.0, 'max_w': 1800.0})
             ],
             "Normalizacje i Skalowania": [
                 ("SNV", {'type': 'snv', 'name': "Normalizacja SNV"}),
@@ -813,7 +800,8 @@ class NodePipelineDialog(QMainWindow):
                 ("Norma L₁ (Pole)", {'type': 'l1', 'name': "Normalizacja L₁ (Pole)"}),
                 ("Norma L₂", {'type': 'l2', 'name': "Normalizacja L₂"}),
                 ("Offset (Min ➔ 0.0)", {'type': 'offset_min', 'name': "Offset (Min ➔ 0.0)"}),
-                ("Offset w punkcie ν", {'type': 'offset_point', 'name': "Offset w punkcie 2000.0 cm⁻¹", 'target_wn': 2000.0})
+                ("Offset w punkcie ν",
+                 {'type': 'offset_point', 'name': "Offset w punkcie 2000.0 cm⁻¹", 'target_wn': 2000.0})
             ]
         }
 
@@ -846,7 +834,7 @@ class NodePipelineDialog(QMainWindow):
     def duplicate_node(self, node: NodeItem, offset: QPointF = QPointF(35, 35),
                        scene: Optional[NodeScene] = None) -> Optional[NodeItem]:
         target_scene = scene or self.scene
-        if not target_scene or node.node_type in ("input", "output"):
+        if not target_scene or node.node_type == "input":
             return None
 
         clone = NodeItem(node.node_type, node.title, copy.deepcopy(node.step_data))
@@ -864,7 +852,8 @@ class NodePipelineDialog(QMainWindow):
         if not target_scene:
             return
 
-        in_node = NodeItem(node_type="input", title="📥 ŹRÓDŁO DANYCH")
+        in_node = NodeItem(node_type="input", title="📥 ŹRÓDŁO DANYCH",
+                           step_data={'type': 'input', 'name': "Źródło: Aktywne widmo", 'source_mode': 'active'})
         in_node.setPos(40, 120)
         target_scene.addItem(in_node)
 
@@ -893,7 +882,7 @@ class NodePipelineDialog(QMainWindow):
 
         for item in target_scene.selectedItems():
             if isinstance(item, NodeItem):
-                if item.node_type in ("input", "output"):
+                if item.node_type == "input":
                     continue
                 for p in list(item.in_ports.values()) + list(item.out_ports.values()):
                     for c in list(p.connections):
@@ -916,6 +905,9 @@ class NodePipelineDialog(QMainWindow):
     # --- PROCEDURY LABORATORYJNE (PRESETS) ---
     def _populate_presets_menu(self, menu: QMenu):
         sub_factory = menu.addMenu("🧪 Wbudowane procedury laboratoryjne")
+
+        act_hdo = sub_factory.addAction("🧪 Dekompozycja HDO / Monte Carlo (W₀ - k·W₁ + Pasma GxL)")
+        act_hdo.triggered.connect(self._load_preset_hdo_decomposition)
 
         act_svd = sub_factory.addAction("📊 Odszumianie SVD Rank-k + Linia Bazowa ➔ Nowe Okno")
         act_svd.triggered.connect(self._load_preset_svd_denoise)
@@ -946,10 +938,30 @@ class NodePipelineDialog(QMainWindow):
         act_load_file = menu.addAction("📂 Wczytaj szablon z pliku (*.json)...")
         act_load_file.triggered.connect(self._load_preset_from_json)
 
+    def _load_preset_hdo_decomposition(self):
+        data = {
+            "nodes": [
+                {"id": "n0", "type": "input", "title": "📥 Próbka Badana (W₀)", "pos_x": 40.0, "pos_y": 60.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
+                {"id": "n1", "type": "hdo_spectrum_scaled", "title": "Widmo Składowe (W₁ · c)", "pos_x": 40.0, "pos_y": 210.0, "step_data": {"type": "hdo_spectrum_scaled", "name": "Widmo Skalowane", "scale": 1.0, "w_min": 0.0, "w_max": 1.5}},
+                {"id": "n2", "type": "synthetic_peak", "title": "Pik Syntetyczny (GxL)", "pos_x": 40.0, "pos_y": 360.0, "step_data": {"type": "synthetic_peak", "name": "Pik GxL @ 1650", "shape": "gxl", "center": 1650.0, "amp": 0.4, "width": 35.0, "shape_param": 0.5}},
+                {"id": "n3", "type": "mc_params", "title": "Parametry MC", "pos_x": 40.0, "pos_y": 510.0, "step_data": {"type": "mc_params", "name": "MC Params (iter=2000)", "n_iter": 2000, "penalty_weight": 10.0, "baseline_active": False}},
+                {"id": "n4", "type": "hdo_decomposition", "title": "Dekompozycja HDO / MC", "pos_x": 380.0, "pos_y": 210.0, "step_data": {"type": "hdo_decomposition", "name": "HDO Fit (N=1.0)", "n_multiplier": 1.0}},
+                {"id": "n5", "type": "output_window", "title": "🗂️ Okno: Czyste Residuum", "pos_x": 720.0, "pos_y": 210.0, "step_data": {"type": "output_window", "name": "🗂️ Okno: Residuum HDO", "window_name": "Residuum HDO", "mode": "create_new"}}
+            ],
+            "connections": [
+                {"from_node": "n0", "from_port": "out", "to_node": "n4", "to_port": "in_target"},
+                {"from_node": "n1", "from_port": "out", "to_node": "n4", "to_port": "in_bases"},
+                {"from_node": "n2", "from_port": "out", "to_node": "n4", "to_port": "in_peaks"},
+                {"from_node": "n3", "from_port": "out_mc", "to_node": "n4", "to_port": "in_mc"},
+                {"from_node": "n4", "from_port": "out_res", "to_node": "n5", "to_port": "in"}
+            ]
+        }
+        self.add_pipeline_tab(title="Dekompozycja HDO", graph_data=data, make_active=True)
+
     def _load_preset_svd_denoise(self):
         data = {
             "nodes": [
-                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło"}},
+                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
                 {"id": "n1", "type": "svd_denoise", "title": "Odszumiacz SVD (k=3)", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "svd_denoise", "name": "SVD Denoise (k=3)", "k": 3, "center": False}},
                 {"id": "n2", "type": "asls", "title": "Linia Bazowa AsLS", "pos_x": 540.0, "pos_y": 140.0, "step_data": {"type": "asls", "name": "AsLS (λ=1e5, p=0.001)", "lam": 1e5, "p": 0.001}},
                 {"id": "n3", "type": "output_window", "title": "🗂️ Nowe Okno: Odszumione", "pos_x": 800.0, "pos_y": 140.0, "step_data": {"type": "output_window", "name": "🗂️ Okno: Odszumione SVD", "window_name": "Odszumione SVD", "mode": "create_new"}}
@@ -965,7 +977,7 @@ class NodePipelineDialog(QMainWindow):
     def _load_preset_mcr_pipeline(self):
         data = {
             "nodes": [
-                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło"}},
+                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Wszystkie widoczne", "source_mode": "visible"}},
                 {"id": "n1", "type": "asls", "title": "Linia Bazowa AsLS", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "asls", "name": "AsLS (λ=1e5, p=0.001)", "lam": 1e5, "p": 0.001}},
                 {"id": "n2", "type": "mcr_decompose", "title": "Dekompozycja MCR-ALS", "pos_x": 540.0, "pos_y": 140.0, "step_data": {"type": "mcr_decompose", "name": "MCR-ALS (k=2)", "method": "mcr_als", "k": 2, "non_negative": True, "closure": False, "unimodal": False, "max_iter": 500}},
                 {"id": "n3", "type": "output_window", "title": "🗂️ Nowe Okno: Czyste Widma", "pos_x": 800.0, "pos_y": 140.0, "step_data": {"type": "output_window", "name": "🗂️ Okno: MCR Składniki", "window_name": "MCR Składniki", "mode": "create_new"}}
@@ -981,7 +993,7 @@ class NodePipelineDialog(QMainWindow):
     def _load_preset_atmospheric_asls(self):
         data = {
             "nodes": [
-                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło"}},
+                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Wszystkie widoczne", "source_mode": "visible"}},
                 {"id": "n1", "type": "vaporfit", "title": "VaporFit (Para wodna i CO₂)", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "vaporfit", "name": "VaporFit (SG=11)", "sg_points": 11, "sg_poly": 3}},
                 {"id": "n2", "type": "crop", "title": "Przycięcie (Crop)", "pos_x": 520.0, "pos_y": 140.0, "step_data": {"type": "crop", "name": "Przycięcie [1000–1800]", "min_w": 1000.0, "max_w": 1800.0}},
                 {"id": "n3", "type": "asls", "title": "Linia Bazowa AsLS", "pos_x": 760.0, "pos_y": 140.0, "step_data": {"type": "asls", "name": "AsLS (λ=1e5, p=0.001)", "lam": 1e5, "p": 0.001}},
@@ -999,7 +1011,7 @@ class NodePipelineDialog(QMainWindow):
     def _load_preset_amide_i(self):
         data = {
             "nodes": [
-                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło"}},
+                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
                 {"id": "n1", "type": "crop", "title": "Przycięcie Amidu I", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "crop", "name": "Przycięcie [1580–1720]", "min_w": 1580.0, "max_w": 1720.0}},
                 {"id": "n2", "type": "linear_bl", "title": "Linia bazowa (krańce)", "pos_x": 520.0, "pos_y": 140.0, "step_data": {"type": "linear_bl", "name": "Linia krańcowa"}},
                 {"id": "n3", "type": "minmax", "title": "Normalizacja Min-Max", "pos_x": 760.0, "pos_y": 140.0, "step_data": {"type": "minmax", "name": "Min-Max [0, 1]"}},
@@ -1017,7 +1029,7 @@ class NodePipelineDialog(QMainWindow):
     def _load_preset_second_derivative(self):
         data = {
             "nodes": [
-                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło"}},
+                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
                 {"id": "n1", "type": "crop", "title": "Przycięcie Pasma", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "crop", "name": "Przycięcie [1500–1750]", "min_w": 1500.0, "max_w": 1750.0}},
                 {"id": "n2", "type": "sg_smooth", "title": "Wygładzanie SG", "pos_x": 520.0, "pos_y": 140.0, "step_data": {"type": "sg_smooth", "name": "SG (okno=13, st=3)", "win": 13, "poly": 3}},
                 {"id": "n3", "type": "deriv2", "title": "2. Pochodna (-) SG", "pos_x": 760.0, "pos_y": 140.0, "step_data": {"type": "deriv2", "name": "2. Pochodna SG (-) (okno=13)", "win": 13, "poly": 3}},
@@ -1037,7 +1049,7 @@ class NodePipelineDialog(QMainWindow):
     def _load_preset_differential_math(self):
         data = {
             "nodes": [
-                {"id": "n0", "type": "input", "title": "📈 Próbka Badana (A)", "pos_x": 40.0, "pos_y": 80.0, "step_data": {"type": "input", "name": "Źródło"}},
+                {"id": "n0", "type": "input", "title": "📈 Próbka Badana (A)", "pos_x": 40.0, "pos_y": 80.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
                 {"id": "n1", "type": "spectrum_select", "title": "Widmo Odniesienia (B)", "pos_x": 40.0, "pos_y": 240.0, "step_data": {"type": "spectrum_select", "name": "Ref: (wybierz)", "selected_spectrum": ""}},
                 {"id": "n2", "type": "math_op", "title": "Operacja Dwuwidmowa", "pos_x": 340.0, "pos_y": 160.0, "step_data": {"type": "math_op", "name": "A - 1.000·B", "op": "sub", "k": 1.0}},
                 {"id": "n3", "type": "linear_bl", "title": "Korekcja Linii Krańcowej", "pos_x": 580.0, "pos_y": 160.0, "step_data": {"type": "linear_bl", "name": "Linia krańcowa"}},
@@ -1055,7 +1067,7 @@ class NodePipelineDialog(QMainWindow):
     def _load_preset_dft_comparison(self):
         data = {
             "nodes": [
-                {"id": "n0", "type": "input", "title": "📈 Pomiary (A)", "pos_x": 40.0, "pos_y": 80.0, "step_data": {"type": "input", "name": "Źródło"}},
+                {"id": "n0", "type": "input", "title": "📈 Pomiary (A)", "pos_x": 40.0, "pos_y": 80.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
                 {"id": "n1", "type": "dft_broadener", "title": "⚛️ Splot DFT (B)", "pos_x": 40.0, "pos_y": 240.0, "step_data": {"type": "dft_broadener", "name": "DFT Broadener", "scale_factor": 0.965, "fwhm": 12.0, "shape": "lorentzian"}},
                 {"id": "n2", "type": "math_op", "title": "Różnica A - k·B", "pos_x": 340.0, "pos_y": 160.0, "step_data": {"type": "math_op", "name": "A - 1.000·B", "op": "sub", "k": 1.0}},
                 {"id": "n3", "type": "output_window", "title": "🗂️ Nowe Okno: Residua DFT", "pos_x": 620.0, "pos_y": 160.0, "step_data": {"type": "output_window", "name": "🗂️ Okno: Residua DFT", "window_name": "Residua DFT", "mode": "create_new"}}
@@ -1081,9 +1093,7 @@ class NodePipelineDialog(QMainWindow):
                 state = {
                     "title": curr.title,
                     "nodes": nodes_list,
-                    "connections": conns_list,
-                    "scope": curr.scope,
-                    "in_place": curr.in_place
+                    "connections": conns_list
                 }
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(state, f, indent=2, ensure_ascii=False)
@@ -1105,7 +1115,6 @@ class NodePipelineDialog(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Błąd odczytu", f"Nie udało się wczytać szablonu:\n{e}")
 
-    # --- SERIALIZACJA GRAFU ---
     def _serialize_scene(self, scene: NodeScene) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         nodes_list, conns_list = [], []
         all_nodes = [item for item in scene.items() if isinstance(item, NodeItem)]
@@ -1167,9 +1176,7 @@ class NodePipelineDialog(QMainWindow):
             tabs_data.append({
                 "title": tab.title,
                 "nodes": n_list,
-                "connections": c_list,
-                "scope": tab.scope,
-                "in_place": tab.in_place
+                "connections": c_list
             })
 
         active_idx = self.tab_widget.currentIndex()
@@ -1183,9 +1190,7 @@ class NodePipelineDialog(QMainWindow):
             "active_tab": active_idx,
             "tabs": tabs_data,
             "nodes": active_dict.get("nodes", []),
-            "connections": active_dict.get("connections", []),
-            "scope": active_dict.get("scope", 0),
-            "in_place": active_dict.get("in_place", True)
+            "connections": active_dict.get("connections", [])
         }
 
     def import_graph_state(self, data: Dict[str, Any]):
@@ -1222,17 +1227,30 @@ class NodePipelineDialog(QMainWindow):
         if self.isVisible():
             self.recalculate_graph_preview()
 
-    # --- OBLICZENIA I PODGLĄD NA ŻYWO ---
-    def _get_base_preview_data(self) -> Tuple[np.ndarray, np.ndarray]:
+    def _get_base_preview_data(self) -> Tuple[np.ndarray, np.ndarray, int]:
         active = session.active_spectrum
         if active is not None and len(active.wavenumbers) > 2:
-            return active.wavenumbers.copy(), active.intensities.copy()
+            return active.wavenumbers.copy(), active.intensities.copy(), 1
+
+        if session.active_series is not None:
+            active_s = session.active_series
+            mat = active_s.get_matrix_2d()
+            total_n = mat.shape[1]
+            if total_n <= 3:
+                return active_s.wavenumbers.copy(), mat.copy(), total_n
+            else:
+                return active_s.wavenumbers.copy(), mat[:, [0, total_n // 2, total_n - 1]].copy(), total_n
+
+        visible = session.get_pipeline_target_spectra()
+        if len(visible) >= 1:
+            return visible[0].wavenumbers.copy(), visible[0].intensities.copy(), 1
 
         wn = np.linspace(4000, 400, 1200)
         y = 0.8 * np.exp(-((wn - 1650) / 35) ** 2) + 0.4 * np.exp(-((wn - 1540) / 40) ** 2) + 0.05 * np.random.normal(0, 0.02, len(wn))
-        return wn, y
+        return wn, y, 1
 
     def recalculate_graph_preview(self, target_scene: Optional[NodeScene] = None):
+        """Przelicza graf DAG w lekkim trybie podglądu (bez blokowania pętli zdarzeń)."""
         scene = target_scene or self.scene
         if not scene:
             return
@@ -1242,18 +1260,32 @@ class NodePipelineDialog(QMainWindow):
         if has_cycle:
             return
 
-        base_x, base_y = self._get_base_preview_data()
-        eval_results = DAGEvaluator.evaluate_dag(ordered_nodes, base_x, base_y, session.spectra)
+        base_x, base_y, total_count = self._get_base_preview_data()
+        eval_results = DAGEvaluator.evaluate_dag(
+            ordered_nodes, base_x, base_y, session.spectra, is_execution=False
+        )
 
         for node in all_nodes:
-            main_key = (node, "out") if node.node_type not in ("output", "output_window") else (node, "in")
+            main_key = (node, "out") if node.node_type not in ("output", "output_window", "hdo_decomposition", "mc_params") else (node, "in")
+            if node.node_type == "hdo_decomposition":
+                main_key = (node, "out_fit")
+            elif node.node_type == "mc_params":
+                main_key = (node, "out_mc")
+
             res_x, res_y = eval_results.get(main_key, (None, None))
 
+            node_total = total_count
             if res_y is not None and res_y.ndim == 2:
-                res_y = res_y[:, 0]
+                n_c = res_y.shape[1]
+                if n_c > 3:
+                    res_y = res_y[:, [0, n_c // 2, n_c - 1]]
+                    node_total = n_c
+                else:
+                    node_total = n_c
 
             node.preview_x = res_x
             node.preview_y = res_y
+            node.preview_total_count = node_total
             node.update()
 
         if scene == self.scene:
@@ -1300,15 +1332,25 @@ class NodePipelineDialog(QMainWindow):
         canvas = self._get_canvas()
         if not canvas:
             return
-        line = getattr(canvas, '_node_preview_line', None)
-        if line is not None:
+
+        lines = getattr(canvas, '_node_preview_lines', [])
+        for line in lines:
             try:
                 line.remove()
             except Exception:
                 pass
+        canvas._node_preview_lines = []
+
+        old_line = getattr(canvas, '_node_preview_line', None)
+        if old_line is not None:
+            try:
+                old_line.remove()
+            except Exception:
+                pass
             canvas._node_preview_line = None
-            ax = self._get_active_axes()
-            self._trigger_canvas_draw(canvas, ax)
+
+        ax = self._get_active_axes()
+        self._trigger_canvas_draw(canvas, ax)
 
     def _update_live_canvas_preview(self):
         if not self.chk_live_preview.isChecked() or not self.scene:
@@ -1335,26 +1377,53 @@ class NodePipelineDialog(QMainWindow):
 
         x = target_node.preview_x
         y = target_node.preview_y
-        if y.ndim == 2:
-            y = y[:, 0]
 
-        line = getattr(canvas, '_node_preview_line', None)
-        label_text = f"👁 Podgląd: {target_node.title}"
+        curves = []
+        if y.ndim == 1:
+            curves = [y]
+        elif y.ndim == 2:
+            n_c = y.shape[1]
+            if n_c <= 3:
+                curves = [y[:, c] for c in range(n_c)]
+            else:
+                curves = [y[:, 0], y[:, n_c // 2], y[:, -1]]
 
-        if line is not None and line in ax.lines:
-            line.set_data(x, y)
-            line.set_label(label_text)
-            line.set_visible(True)
+        if not curves:
+            self._clear_canvas_preview()
+            return
+
+        if len(curves) == 1:
+            colors = ["#ffb703"]
+        elif len(curves) == 2:
+            colors = ["#48cae4", "#ffd166"]
         else:
-            line, = ax.plot(
-                x, y, color="#ffb703", linestyle="--", linewidth=2.0,
-                alpha=0.9, zorder=999, label=label_text
-            )
-            canvas._node_preview_line = line
+            colors = ["#48cae4", "#ffd166", "#ff4d6d"]
 
+        existing_lines = getattr(canvas, '_node_preview_lines', [])
+        old_single = getattr(canvas, '_node_preview_line', None)
+        if old_single is not None:
+            existing_lines.append(old_single)
+            canvas._node_preview_line = None
+
+        for line in existing_lines:
+            try:
+                line.remove()
+            except Exception:
+                pass
+
+        new_lines = []
+        for idx, cy in enumerate(curves):
+            col = colors[idx]
+            lbl = f"👁 Podgląd: {target_node.title}" if len(curves) == 1 else f"👁 {target_node.title} [{idx + 1}/{len(curves)}]"
+            line, = ax.plot(
+                x, cy, color=col, linestyle="--", linewidth=1.8,
+                alpha=0.9, zorder=999, label=lbl
+            )
+            new_lines.append(line)
+
+        canvas._node_preview_lines = new_lines
         self._trigger_canvas_draw(canvas, ax)
 
-    # --- WYKONANIE POTOKU (EXECUTE) ---
     def _execute_pipeline(self):
         if not self.current_tab:
             return
@@ -1379,10 +1448,37 @@ class NodePipelineDialog(QMainWindow):
         main_win = self.parent()
         canvas = getattr(main_win, 'canvas_2d', None)
 
-        scope = tab.scope
-        in_place = tab.in_place
+        # Sprawdzenie czy w grafie występuje węzeł Dekompozycji HDO / MC
+        has_hdo = any(n.node_type == "hdo_decomposition" for n in ordered_nodes)
+        progress_dialog: Optional[QProgressDialog] = None
+
+        if has_hdo:
+            progress_dialog = QProgressDialog("Trwają obliczenia Monte Carlo...", "Anuluj", 0, 100, self)
+            progress_dialog.setWindowTitle("Dekompozycja HDO / MC")
+            progress_dialog.setWindowModality(Qt.WindowModal)
+            progress_dialog.setMinimumDuration(0)
+            progress_dialog.setValue(0)
+            progress_dialog.show()
+            QApplication.processEvents()
+
+        def _hdo_progress_callback(pct: int, best_rss: float) -> bool:
+            if progress_dialog is not None:
+                progress_dialog.setValue(pct)
+                progress_dialog.setLabelText(f"Próbkowanie Monte Carlo: {pct}%\nNajlepsze RSS: {best_rss:.4e}")
+                QApplication.processEvents()
+                return bool(progress_dialog.wasCanceled())
+            return False
 
         try:
+            base_x, base_y, _ = self._get_base_preview_data()
+            res_map = DAGEvaluator.evaluate_dag(
+                ordered_nodes, base_x, base_y, session.spectra,
+                is_execution=True
+            )
+
+            if progress_dialog is not None:
+                progress_dialog.close()
+
             for term_node in terminals:
                 target_window_id = None
                 if term_node.node_type == "output_window":
@@ -1397,169 +1493,131 @@ class NodePipelineDialog(QMainWindow):
                     if not target_window_id:
                         target_window_id = session.add_window(name=win_name)
 
-                # 1. Scope 0: Wszystkie widoczne w aktywnym oknie / gałęzi
-                if scope == 0:
-                    visible = session.get_pipeline_target_spectra()
-                    if not visible:
-                        QMessageBox.warning(self, "Błąd", "Brak widocznych widm w aktywnym oknie lub gałęzi.")
-                        return
+                used_names = set()
+                if target_window_id and target_window_id in session.windows:
+                    for s in session.windows[target_window_id].spectra.values():
+                        used_names.add(s.name.lower())
 
-                    ref_wn = visible[0].wavenumbers
-                    mat = np.zeros((len(ref_wn), len(visible)), dtype=np.float64)
-                    for i, s in enumerate(visible):
-                        xw, yw = (s.wavenumbers[::-1], s.intensities[::-1]) if s.wavenumbers[0] > s.wavenumbers[-1] else (s.wavenumbers, s.intensities)
-                        mat[:, i] = np.interp(ref_wn, xw, yw)
+                def make_unique_name(base: str) -> str:
+                    cand = base
+                    cnt = 2
+                    while cand.lower() in used_names:
+                        cand = f"{base} ({cnt})"
+                        cnt += 1
+                    used_names.add(cand.lower())
+                    return cand
 
-                    res_map = DAGEvaluator.evaluate_dag(ordered_nodes, ref_wn, mat, session.spectra)
-                    new_x, new_y = res_map.get((term_node, "in"), (None, None))
+                in_p = term_node.in_ports.get("in")
+                incoming_conns = in_p.connections if in_p else []
+                if not incoming_conns:
+                    continue
+
+                new_created = []
+
+                for conn in incoming_conns:
+                    src_node = conn.out_port.node_item
+                    src_port = conn.out_port.port_id
+                    new_x, new_y = res_map.get((src_node, src_port), (None, None))
                     if new_x is None or new_y is None:
                         continue
 
-                    batch_records = []
-                    new_created = []
+                    branch_tag = f" [{src_node.title}]" if len(incoming_conns) > 1 else ""
 
-                    if new_y.ndim == 2 and new_y.shape[1] != len(visible):
+                    # Specjalna obsługa nazewnictwa i raportu współczynników HDO Fit
+                    if src_node.node_type == "hdo_decomposition":
+                        metrics = src_node.step_data.get('fit_metrics', {})
+                        r2_tag = f" (R²={metrics.get('r2', 0):.4f})" if 'r2' in metrics else ""
+                        coeffs = metrics.get('coefficients', [])
+                        base_names = metrics.get('base_names', [])
+
+                        if src_port == "out_comps" and new_y.ndim == 2:
+                            for col in range(new_y.shape[1]):
+                                b_title = base_names[col] if col < len(base_names) else f"Comp_{col + 1}"
+                                c_val = coeffs[col] if col < len(coeffs) else 1.0
+                                raw_n = f"{b_title} (c={c_val:.4f}){branch_tag}"
+                                new_created.append(SpectrumData(
+                                    wavenumbers=new_x.copy(), intensities=new_y[:, col].copy(),
+                                    name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
+                                    file_path="", file_type="processed",
+                                    metadata={"source": "HDO Component", "coeff": c_val, **metrics}
+                                ))
+                        elif src_port == "out_peaks" and new_y.ndim == 2:
+                            for col in range(new_y.shape[1]):
+                                raw_n = f"Pik_GxL_{col + 1}{branch_tag}"
+                                new_created.append(SpectrumData(
+                                    wavenumbers=new_x.copy(), intensities=new_y[:, col].copy(),
+                                    name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
+                                    file_path="", file_type="processed",
+                                    metadata={"source": "HDO Synthetic Peak", **metrics}
+                                ))
+                        elif src_port == "out_res":
+                            raw_n = f"Residuum HDO{r2_tag}{branch_tag}"
+                            new_created.append(SpectrumData(
+                                wavenumbers=new_x.copy(), intensities=new_y.copy(),
+                                name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
+                                file_path="", file_type="residual",
+                                metadata={"source": "HDO Excess Residual", **metrics}
+                            ))
+                        elif src_port == "out_fit":
+                            raw_n = f"Fit HDO{r2_tag}{branch_tag}"
+                            new_created.append(SpectrumData(
+                                wavenumbers=new_x.copy(), intensities=new_y.copy(),
+                                name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
+                                file_path="", file_type="fit",
+                                metadata={"source": "HDO Total Fit", **metrics}
+                            ))
+                        else:
+                            raw_n = f"ΔFit HDO{r2_tag}{branch_tag}"
+                            new_created.append(SpectrumData(
+                                wavenumbers=new_x.copy(), intensities=new_y.copy(),
+                                name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
+                                file_path="", file_type="residual",
+                                metadata={"source": "HDO Fit Residual", **metrics}
+                            ))
+
+                    # Standardowe węzły
+                    elif new_y.ndim == 2:
                         for col in range(new_y.shape[1]):
+                            raw_n = f"{src_node.title}_Comp_{col + 1}{branch_tag}"
                             new_created.append(SpectrumData(
                                 wavenumbers=new_x.copy(), intensities=new_y[:, col].copy(),
-                                name=f"MCR_Comp_{col + 1}", file_path="",
-                                file_type="processed", metadata={"dag_pipeline": [n.title for n in ordered_nodes]}
+                                name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
+                                file_path="", file_type="processed",
+                                metadata={"dag_pipeline": [n.title for n in ordered_nodes]}
                             ))
-                        session.undo_stack.push(AddBatchSpectraCommand(
-                            new_created, f"DAG MCR ({len(new_created)} składników)",
-                            canvas=canvas, window_id=target_window_id
-                        ))
                     else:
-                        for idx, spec in enumerate(visible):
-                            old_x, old_y = spec.wavenumbers.copy(), spec.intensities.copy()
-                            proc_y = new_y[:, idx] if new_y.ndim == 2 else new_y
-                            new_meta = copy.deepcopy(spec.metadata)
-                            new_meta["dag_pipeline"] = [n.title for n in ordered_nodes if n.node_type not in ("input", "output", "output_window")]
-
-                            if term_node.node_type == "output_window":
-                                new_created.append(SpectrumData(
-                                    wavenumbers=new_x.copy(), intensities=proc_y.copy(),
-                                    name=f"{spec.name}", file_path=spec.file_path,
-                                    file_type="processed", metadata=new_meta
-                                ))
-                            elif in_place:
-                                batch_records.append((spec, old_x, old_y, new_x.copy(), proc_y.copy(), spec.metadata, new_meta))
-                            else:
-                                new_created.append(SpectrumData(
-                                    wavenumbers=new_x.copy(), intensities=proc_y.copy(),
-                                    name=f"dag_{spec.name}", file_path=spec.file_path,
-                                    file_type="processed", metadata=new_meta
-                                ))
-
-                        if term_node.node_type == "output_window" and new_created:
-                            session.undo_stack.push(AddBatchSpectraCommand(
-                                new_created, f"DAG do okna '{term_node.step_data.get('window_name')}'",
-                                canvas=canvas, window_id=target_window_id
+                        raw_n = f"{src_node.title}{branch_tag}"
+                        if term_node.node_type == "output_window":
+                            new_created.append(SpectrumData(
+                                wavenumbers=new_x.copy(), intensities=new_y.copy(),
+                                name=make_unique_name(raw_n), file_path="",
+                                file_type="processed",
+                                metadata={"dag_pipeline": [n.title for n in ordered_nodes]}
                             ))
-                        elif in_place and batch_records:
-                            session.undo_stack.push(BatchPipelineCommand(batch_records, f"DAG Batch ({len(batch_records)} widm)", canvas=canvas))
-                        elif not in_place and new_created:
-                            target_win = session.active_window_id if session.active_context == "window" else None
-                            session.undo_stack.push(AddBatchSpectraCommand(new_created, f"DAG Batch ({len(new_created)} widm)", canvas=canvas, window_id=target_win))
+                        else:
+                            active = session.active_spectrum
+                            if active:
+                                cmd = ModifySpectrumCommand(
+                                    active, f"DAG: {active.name}", active.intensities, new_y,
+                                    active.wavenumbers, new_x, old_meta=active.metadata,
+                                    new_meta={"dag_pipeline": [n.title for n in ordered_nodes]},
+                                    canvas=canvas
+                                )
+                                session.undo_stack.push(cmd)
 
-                # 2. Scope 1: Tylko aktywne widmo
-                elif scope == 1:
-                    active = session.active_spectrum
-                    if not active:
-                        QMessageBox.warning(self, "Błąd", "Brak aktywnego widma.")
-                        return
-
-                    res_map = DAGEvaluator.evaluate_dag(ordered_nodes, active.wavenumbers, active.intensities, session.spectra)
-                    new_x, new_y = res_map.get((term_node, "in"), (None, None))
-                    if new_x is None or new_y is None:
-                        continue
-
-                    new_meta = copy.deepcopy(active.metadata)
-                    new_meta["dag_pipeline"] = [n.title for n in ordered_nodes if n.node_type not in ("input", "output", "output_window")]
-
-                    if new_y.ndim == 2:
-                        spectra_to_add = []
-                        for col in range(new_y.shape[1]):
-                            spectra_to_add.append(SpectrumData(
-                                wavenumbers=new_x.copy(), intensities=new_y[:, col].copy(),
-                                name=f"{active.name}_comp_{col + 1}", file_path=active.file_path,
-                                file_type="processed", metadata=new_meta
-                            ))
-                        cmd = AddBatchSpectraCommand(spectra_to_add, f"DAG: {active.name} składowe", canvas=canvas, window_id=target_window_id)
-                        session.undo_stack.push(cmd)
-                    elif term_node.node_type == "output_window":
-                        new_spec = SpectrumData(
-                            wavenumbers=new_x, intensities=new_y, name=f"{active.name}",
-                            file_path=active.file_path, file_type="processed", metadata=new_meta
-                        )
-                        cmd = AddBatchSpectraCommand([new_spec], f"DAG do okna '{term_node.step_data.get('window_name')}'",
-                                                     canvas=canvas, window_id=target_window_id)
-                        session.undo_stack.push(cmd)
-                    elif in_place:
-                        cmd = ModifySpectrumCommand(
-                            active, f"DAG: {active.name}", active.intensities, new_y,
-                            active.wavenumbers, new_x, old_meta=active.metadata, new_meta=new_meta, canvas=canvas
-                        )
-                        session.undo_stack.push(cmd)
-                    else:
-                        new_spec = SpectrumData(
-                            wavenumbers=new_x, intensities=new_y, name=f"dag_{active.name}",
-                            file_path=active.file_path, file_type="processed", metadata=new_meta
-                        )
-                        target_win = session.active_window_id if session.active_context == "window" else None
-                        cmd = AddBatchSpectraCommand([new_spec], f"DAG: {active.name}", canvas=canvas, window_id=target_win)
-                        session.undo_stack.push(cmd)
-
-                # 3. Scope 2: Aktywna seria 2D / Tensor 3D
-                elif scope == 2:
-                    active_s = session.active_series
-                    if not active_s:
-                        QMessageBox.warning(self, "Błąd", "Brak aktywnej serii 2D.")
-                        return
-
-                    mat = active_s.get_matrix_2d()
-                    res_map = DAGEvaluator.evaluate_dag(ordered_nodes, active_s.wavenumbers, mat, session.spectra)
-                    new_x, new_y = res_map.get((term_node, "in"), (None, None))
-                    if new_x is None or new_y is None:
-                        continue
-
-                    if new_y.ndim == 2 and new_y.shape[1] != mat.shape[1]:
-                        frames = [SpectrumData(
-                            wavenumbers=new_x.copy(), intensities=new_y[:, c].copy(),
-                            name=f"{active_s.name}_Comp_{c + 1}", file_path="",
-                            file_type="processed", metadata={"parent_series": active_s.name}
-                        ) for c in range(new_y.shape[1])]
-                        session.undo_stack.push(AddBatchSpectraCommand(
-                            frames, f"Składniki MCR do okna '{term_node.step_data.get('window_name')}'",
-                            canvas=canvas, window_id=target_window_id
-                        ))
-                    elif term_node.node_type == "output_window":
-                        frames = [SpectrumData(
-                            wavenumbers=new_x.copy(), intensities=new_y[:, c].copy(),
-                            name=f"{active_s.name}_col{c + 1}", file_path="",
-                            file_type="series_frame", metadata={"parent_series": active_s.name}
-                        ) for c in range(new_y.shape[1])]
-                        session.undo_stack.push(AddBatchSpectraCommand(
-                            frames, f"Seria do okna '{term_node.step_data.get('window_name')}'",
-                            canvas=canvas, window_id=target_window_id
-                        ))
-                    elif in_place:
-                        new_data = new_y.reshape(len(new_x), active_s.data.shape[1], active_s.data.shape[2]) if active_s.is_3d else new_y
-                        cmd = ModifySeriesCommand(active_s, f"DAG Serii: {active_s.name}",
-                                                  active_s.wavenumbers, new_x, active_s.data, new_data, canvas=canvas)
-                        session.undo_stack.push(cmd)
-                    else:
-                        out_data = new_y.reshape(len(new_x), active_s.data.shape[1], active_s.data.shape[2]) if active_s.is_3d else new_y
-                        session.add_series(SpectralSeries(
-                            name=f"dag_{active_s.name}", wavenumbers=new_x, data=out_data,
-                            axis_n_name=active_s.axis_n_name, axis_n_values=active_s.axis_n_values,
-                            axis_m_name=active_s.axis_m_name, axis_m_values=active_s.axis_m_values
-                        ), make_active=True)
+                if term_node.node_type == "output_window" and new_created:
+                    session.undo_stack.push(AddBatchSpectraCommand(
+                        new_created,
+                        f"DAG do okna '{term_node.step_data.get('window_name')}' ({len(new_created)} widm)",
+                        canvas=canvas, window_id=target_window_id
+                    ))
 
             QMessageBox.information(self, "Sukces", f"Pomyślnie wykonano potok z zakładki '{tab.title}'!")
             self.recalculate_graph_preview(target_scene=scene)
             self.sync_state_to_session()
 
         except Exception as e:
+            if progress_dialog is not None:
+                progress_dialog.close()
             logger.error(f"Błąd wykonania potoku DAG: {e}")
             QMessageBox.critical(self, "Błąd", f"Wystąpił błąd podczas obliczeń:\n{e}")

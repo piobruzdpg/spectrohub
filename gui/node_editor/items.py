@@ -1,7 +1,8 @@
 """
 gui/node_editor/items.py
 Elementy wizualne grafu DAG: PortItem, ConnectionItem oraz NodeItem.
-Węzeł 'output_window' posiada teraz port wyjściowy (funkcja Checkpoint / Tap).
+Wsparcie dla wielowidmowych sparklines, fan-in (Mux/Terminale), profili stężeń MCR/PCA,
+mini-raportów na kafelkach (HDO) oraz dekompozycji HDO / pasm syntetycznych.
 """
 
 from typing import List, Dict, Any, Optional
@@ -19,15 +20,16 @@ from gui.node_editor.dialogs import NodeParamDialog
 
 
 class PortItem(QGraphicsItem):
-    """Pojedynczy port węzła z hit-boxem i rozróżnieniem ról kolorystycznych."""
+    """Pojedynczy port węzła z hit-boxem, flagą wielowejściowości i kolorystyką ról."""
     RADIUS = 6.0
 
-    def __init__(self, is_output: bool, node_item: 'NodeItem', port_id: str, label: str = ""):
+    def __init__(self, is_output: bool, node_item: 'NodeItem', port_id: str, label: str = "", allow_multiple: bool = False):
         super().__init__(node_item)
         self.is_output = is_output
         self.node_item = node_item
         self.port_id = port_id
         self.label = label
+        self.allow_multiple = allow_multiple
         self.connections: List['ConnectionItem'] = []
         self.setAcceptHoverEvents(True)
         self.is_hovered = False
@@ -41,16 +43,26 @@ class PortItem(QGraphicsItem):
         if self.is_output:
             if "res" in self.port_id:
                 col = QColor("#e63946")
-            elif "recon" in self.port_id:
+            elif "recon" in self.port_id or "fit" in self.port_id:
                 col = QColor("#f4a261")
+            elif "conc" in self.port_id or "scores" in self.port_id or "area" in self.port_id:
+                col = QColor("#52b788")
             elif "bl" in self.port_id:
                 col = QColor("#9d4edd")
             elif "atm" in self.port_id:
                 col = QColor("#00b4d8")
+            elif "mat" in self.port_id or "comps" in self.port_id or "peaks" in self.port_id:
+                col = QColor("#06d6a0")
+            elif "mc" in self.port_id:
+                col = QColor("#ff9f1c")
             else:
                 col = QColor("#48cae4")
-        elif "atm" in self.port_id or "b" in self.port_id:
+        elif "atm" in self.port_id or "b" in self.port_id or "ref" in self.port_id or "bases" in self.port_id:
             col = QColor("#fb8500")
+        elif "peaks" in self.port_id:
+            col = QColor("#ff006e")
+        elif "mc" in self.port_id:
+            col = QColor("#ff9f1c")
         else:
             col = QColor("#ffb703")
 
@@ -158,7 +170,7 @@ class ConnectionItem(QGraphicsPathItem):
 
 
 class NodeItem(QGraphicsItem):
-    """Wizualny węzeł grafu z obsługą sparkline FTIR oraz portów chemometrycznych."""
+    """Wizualny węzeł grafu z obsługą 1-3 widm sparklines, mini-raportów i granularnych portów."""
     WIDTH = 215
     HEIGHT = 145
 
@@ -170,6 +182,7 @@ class NodeItem(QGraphicsItem):
 
         self.preview_x: Optional[np.ndarray] = None
         self.preview_y: Optional[np.ndarray] = None
+        self.preview_total_count: int = 1
 
         self.in_ports: Dict[str, PortItem] = {}
         self.out_ports: Dict[str, PortItem] = {}
@@ -193,46 +206,126 @@ class NodeItem(QGraphicsItem):
             p_b.setPos(0, 108)
             self.in_ports["in_b"] = p_b
 
+        elif self.node_type == "internal_standard":
+            p_sig = PortItem(is_output=False, node_item=self, port_id="in_signal", label="Syg")
+            p_sig.setPos(0, 68)
+            self.in_ports["in_signal"] = p_sig
+
+            p_ref = PortItem(is_output=False, node_item=self, port_id="in_ref", label="IS")
+            p_ref.setPos(0, 108)
+            self.in_ports["in_ref"] = p_ref
+
         elif self.node_type == "vaporfit":
             p_sig = PortItem(is_output=False, node_item=self, port_id="in_signal", label="Syg")
             p_sig.setPos(0, 68)
             self.in_ports["in_signal"] = p_sig
 
-            p_atm = PortItem(is_output=False, node_item=self, port_id="in_atm", label="Atm")
+            p_atm = PortItem(is_output=False, node_item=self, port_id="in_atm", label="Atm", allow_multiple=True)
             p_atm.setPos(0, 108)
             self.in_ports["in_atm"] = p_atm
 
-        elif self.node_type not in ("input", "spectrum_select", "dft_broadener"):
+        elif self.node_type == "hdo_decomposition":
+            p_tar = PortItem(is_output=False, node_item=self, port_id="in_target", label="W₀")
+            p_tar.setPos(0, 44)
+            self.in_ports["in_target"] = p_tar
+
+            p_bas = PortItem(is_output=False, node_item=self, port_id="in_bases", label="Wₖ", allow_multiple=True)
+            p_bas.setPos(0, 68)
+            self.in_ports["in_bases"] = p_bas
+
+            p_pk = PortItem(is_output=False, node_item=self, port_id="in_peaks", label="Pik", allow_multiple=True)
+            p_pk.setPos(0, 94)
+            self.in_ports["in_peaks"] = p_pk
+
+            p_mc = PortItem(is_output=False, node_item=self, port_id="in_mc", label="MC")
+            p_mc.setPos(0, 120)
+            self.in_ports["in_mc"] = p_mc
+
+        elif self.node_type in ("output_window", "merge_spectra"):
+            p_in = PortItem(is_output=False, node_item=self, port_id="in", label="In", allow_multiple=True)
+            p_in.setPos(0, 88)
+            self.in_ports["in"] = p_in
+
+        elif self.node_type not in ("input", "spectrum_select", "dft_broadener",
+                                    "hdo_spectrum_scaled", "synthetic_peak", "mc_params"):
             p_in = PortItem(is_output=False, node_item=self, port_id="in", label="In")
             p_in.setPos(0, 88)
             self.in_ports["in"] = p_in
 
         # 2. Wyjścia (Out ports)
-        # Wyłącznie czysty 'output' nie ma wyjścia; 'output_window' działa jako tap/checkpoint
         if self.node_type == "output":
             pass
 
         elif self.node_type == "svd_denoise":
             p_out = PortItem(is_output=True, node_item=self, port_id="out", label="D_k")
-            p_out.setPos(self.WIDTH, 68)
-            self.out_ports["out"] = p_out
-
-            p_res = PortItem(is_output=True, node_item=self, port_id="out_res", label="Res")
-            p_res.setPos(self.WIDTH, 108)
-            self.out_ports["out_res"] = p_res
-
-        elif self.node_type == "mcr_decompose":
-            p_out = PortItem(is_output=True, node_item=self, port_id="out", label="S^T")
             p_out.setPos(self.WIDTH, 56)
             self.out_ports["out"] = p_out
 
+            p_res = PortItem(is_output=True, node_item=self, port_id="out_res", label="Res")
+            p_res.setPos(self.WIDTH, 88)
+            self.out_ports["out_res"] = p_res
+
+            p_scr = PortItem(is_output=True, node_item=self, port_id="out_scores", label="Scr")
+            p_scr.setPos(self.WIDTH, 120)
+            self.out_ports["out_scores"] = p_scr
+
+        elif self.node_type == "mcr_decompose":
+            p_out = PortItem(is_output=True, node_item=self, port_id="out", label="S^T")
+            p_out.setPos(self.WIDTH, 44)
+            self.out_ports["out"] = p_out
+
+            p_conc = PortItem(is_output=True, node_item=self, port_id="out_conc", label="C")
+            p_conc.setPos(self.WIDTH, 68)
+            self.out_ports["out_conc"] = p_conc
+
             p_rec = PortItem(is_output=True, node_item=self, port_id="out_recon", label="Rec")
-            p_rec.setPos(self.WIDTH, 88)
+            p_rec.setPos(self.WIDTH, 94)
             self.out_ports["out_recon"] = p_rec
 
             p_res = PortItem(is_output=True, node_item=self, port_id="out_res", label="Res")
             p_res.setPos(self.WIDTH, 120)
             self.out_ports["out_res"] = p_res
+
+        elif self.node_type == "hdo_decomposition":
+            p_fit = PortItem(is_output=True, node_item=self, port_id="out_fit", label="Fit")
+            p_fit.setPos(self.WIDTH, 38)
+            self.out_ports["out_fit"] = p_fit
+
+            p_res = PortItem(is_output=True, node_item=self, port_id="out_res", label="Res")
+            p_res.setPos(self.WIDTH, 62)
+            self.out_ports["out_res"] = p_res
+
+            p_fres = PortItem(is_output=True, node_item=self, port_id="out_fit_res", label="ΔFit")
+            p_fres.setPos(self.WIDTH, 86)
+            self.out_ports["out_fit_res"] = p_fres
+
+            p_cmp = PortItem(is_output=True, node_item=self, port_id="out_comps", label="W_k")
+            p_cmp.setPos(self.WIDTH, 108)
+            self.out_ports["out_comps"] = p_cmp
+
+            p_pks = PortItem(is_output=True, node_item=self, port_id="out_peaks", label="Pks")
+            p_pks.setPos(self.WIDTH, 130)
+            self.out_ports["out_peaks"] = p_pks
+
+        elif self.node_type == "mc_params":
+            p_out = PortItem(is_output=True, node_item=self, port_id="out_mc", label="MC")
+            p_out.setPos(self.WIDTH, 88)
+            self.out_ports["out_mc"] = p_out
+
+        elif self.node_type in ("hdo_spectrum_scaled", "synthetic_peak"):
+            p_out = PortItem(is_output=True, node_item=self, port_id="out", label="Out")
+            p_out.setPos(self.WIDTH, 88)
+            self.out_ports["out"] = p_out
+
+        elif self.node_type == "band_integrate":
+            p_out = PortItem(is_output=True, node_item=self, port_id="out", label="Area")
+            p_out.setPos(self.WIDTH, 88)
+            self.out_ports["out"] = p_out
+
+        elif self.node_type == "merge_spectra":
+            p_out = PortItem(is_output=True, node_item=self, port_id="out", label="Mat")
+            p_out.setPos(self.WIDTH, 88)
+            self.out_ports["out"] = p_out
 
         elif self.node_type in ("asls", "airpls", "poly_bl", "linear_bl"):
             p_out = PortItem(is_output=True, node_item=self, port_id="out", label="Syg")
@@ -289,6 +382,27 @@ class NodeItem(QGraphicsItem):
         elif self.node_type == "mcr_decompose":
             grad.setColorAt(0, QColor("#9d0208"))
             grad.setColorAt(1, QColor("#d90429"))
+        elif self.node_type == "hdo_decomposition":
+            grad.setColorAt(0, QColor("#14213d"))
+            grad.setColorAt(1, QColor("#2a9d8f"))
+        elif self.node_type == "hdo_spectrum_scaled":
+            grad.setColorAt(0, QColor("#1d3557"))
+            grad.setColorAt(1, QColor("#457b9d"))
+        elif self.node_type == "synthetic_peak":
+            grad.setColorAt(0, QColor("#720026"))
+            grad.setColorAt(1, QColor("#e76f51"))
+        elif self.node_type == "mc_params":
+            grad.setColorAt(0, QColor("#4f000b"))
+            grad.setColorAt(1, QColor("#ff9f1c"))
+        elif self.node_type == "merge_spectra":
+            grad.setColorAt(0, QColor("#028090"))
+            grad.setColorAt(1, QColor("#00a896"))
+        elif self.node_type == "internal_standard":
+            grad.setColorAt(0, QColor("#7b2cbf"))
+            grad.setColorAt(1, QColor("#9d4edd"))
+        elif self.node_type == "band_integrate":
+            grad.setColorAt(0, QColor("#c1121f"))
+            grad.setColorAt(1, QColor("#780000"))
         elif self.node_type == "matrix_scaling":
             grad.setColorAt(0, QColor("#0077b6"))
             grad.setColorAt(1, QColor("#0096c7"))
@@ -329,33 +443,79 @@ class NodeItem(QGraphicsItem):
             desc = desc[:30] + "…"
         painter.drawText(QRectF(8, 26, self.WIDTH - 16, 16), Qt.AlignLeft | Qt.AlignVCenter, desc)
 
+        # Porty In
         if self.node_type == "math_op":
             painter.setFont(QFont("Arial", 8, QFont.Bold))
             painter.setPen(QColor("#ffb703"))
             painter.drawText(QRectF(10, 58, 20, 20), Qt.AlignLeft | Qt.AlignVCenter, "A")
             painter.setPen(QColor("#fb8500"))
             painter.drawText(QRectF(10, 98, 20, 20), Qt.AlignLeft | Qt.AlignVCenter, "B")
+        elif self.node_type == "internal_standard":
+            painter.setFont(QFont("Arial", 8, QFont.Bold))
+            painter.setPen(QColor("#ffb703"))
+            painter.drawText(QRectF(9, 58, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "Syg")
+            painter.setPen(QColor("#fb8500"))
+            painter.drawText(QRectF(9, 98, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "IS")
         elif self.node_type == "vaporfit":
             painter.setFont(QFont("Arial", 8, QFont.Bold))
             painter.setPen(QColor("#ffb703"))
             painter.drawText(QRectF(9, 58, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "Syg")
             painter.setPen(QColor("#fb8500"))
             painter.drawText(QRectF(9, 98, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "Atm")
+        elif self.node_type == "hdo_decomposition":
+            painter.setFont(QFont("Arial", 7, QFont.Bold))
+            painter.setPen(QColor("#ffb703"))
+            painter.drawText(QRectF(9, 34, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "W₀")
+            painter.setPen(QColor("#fb8500"))
+            painter.drawText(QRectF(9, 58, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "Wₖ")
+            painter.setPen(QColor("#ff006e"))
+            painter.drawText(QRectF(9, 84, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "Pik")
+            painter.setPen(QColor("#ff9f1c"))
+            painter.drawText(QRectF(9, 110, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "MC")
 
+        # Porty Out
         if self.node_type == "svd_denoise":
-            painter.setFont(QFont("Arial", 8, QFont.Bold))
+            painter.setFont(QFont("Arial", 7, QFont.Bold))
             painter.setPen(QColor("#48cae4"))
-            painter.drawText(QRectF(self.WIDTH - 36, 58, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "D_k")
+            painter.drawText(QRectF(self.WIDTH - 36, 46, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "D_k")
             painter.setPen(QColor("#e63946"))
-            painter.drawText(QRectF(self.WIDTH - 36, 98, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Res")
+            painter.drawText(QRectF(self.WIDTH - 36, 78, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Res")
+            painter.setPen(QColor("#52b788"))
+            painter.drawText(QRectF(self.WIDTH - 36, 110, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Scr")
         elif self.node_type == "mcr_decompose":
             painter.setFont(QFont("Arial", 7, QFont.Bold))
             painter.setPen(QColor("#48cae4"))
-            painter.drawText(QRectF(self.WIDTH - 36, 46, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "S^T")
+            painter.drawText(QRectF(self.WIDTH - 36, 34, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "S^T")
+            painter.setPen(QColor("#52b788"))
+            painter.drawText(QRectF(self.WIDTH - 36, 58, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "C")
             painter.setPen(QColor("#f4a261"))
-            painter.drawText(QRectF(self.WIDTH - 36, 78, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Rec")
+            painter.drawText(QRectF(self.WIDTH - 36, 84, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Rec")
             painter.setPen(QColor("#e63946"))
             painter.drawText(QRectF(self.WIDTH - 36, 110, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Res")
+        elif self.node_type == "hdo_decomposition":
+            painter.setFont(QFont("Arial", 7, QFont.Bold))
+            painter.setPen(QColor("#f4a261"))
+            painter.drawText(QRectF(self.WIDTH - 36, 28, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Fit")
+            painter.setPen(QColor("#e63946"))
+            painter.drawText(QRectF(self.WIDTH - 36, 52, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Res")
+            painter.setPen(QColor("#ffd166"))
+            painter.drawText(QRectF(self.WIDTH - 36, 76, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "ΔFit")
+            painter.setPen(QColor("#06d6a0"))
+            painter.drawText(QRectF(self.WIDTH - 36, 98, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "W_k")
+            painter.setPen(QColor("#ff006e"))
+            painter.drawText(QRectF(self.WIDTH - 36, 120, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Pks")
+        elif self.node_type == "mc_params":
+            painter.setFont(QFont("Arial", 8, QFont.Bold))
+            painter.setPen(QColor("#ff9f1c"))
+            painter.drawText(QRectF(self.WIDTH - 36, 78, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "MC")
+        elif self.node_type == "band_integrate":
+            painter.setFont(QFont("Arial", 8, QFont.Bold))
+            painter.setPen(QColor("#52b788"))
+            painter.drawText(QRectF(self.WIDTH - 40, 78, 30, 20), Qt.AlignRight | Qt.AlignVCenter, "Area")
+        elif self.node_type == "merge_spectra":
+            painter.setFont(QFont("Arial", 8, QFont.Bold))
+            painter.setPen(QColor("#06d6a0"))
+            painter.drawText(QRectF(self.WIDTH - 40, 78, 30, 20), Qt.AlignRight | Qt.AlignVCenter, "Mat")
         elif len(self.out_ports) > 1:
             painter.setFont(QFont("Arial", 8, QFont.Bold))
             painter.setPen(QColor("#48cae4"))
@@ -364,6 +524,7 @@ class NodeItem(QGraphicsItem):
             lbl_b = "BL" if "out_bl" in self.out_ports else "Atm"
             painter.drawText(QRectF(self.WIDTH - 36, 98, 26, 20), Qt.AlignRight | Qt.AlignVCenter, lbl_b)
 
+        # Sparklines
         box_left = 32 if len(self.in_ports) > 1 else 10
         box_right = self.WIDTH - (38 if len(self.out_ports) > 1 else 10)
         box_w = box_right - box_left
@@ -373,59 +534,118 @@ class NodeItem(QGraphicsItem):
         painter.setPen(QPen(QColor("#343a40"), 1))
         painter.drawRoundedRect(box_rect, 4, 4)
 
-        if self.preview_y is not None and len(self.preview_y) > 1:
-            y_data = self.preview_y.copy()
+        if self.node_type == "mc_params":
+            painter.setFont(QFont("Arial", 8))
+            painter.setPen(QColor("#ff9f1c"))
+            it = self.step_data.get('n_iter', 3000)
+            pen = self.step_data.get('penalty_weight', 10.0)
+            painter.drawText(box_rect, Qt.AlignCenter, f"MC Config\nIter: {it}\nPenalty: {pen:.1f}")
+            return
 
-            if self.preview_x is not None and len(self.preview_x) == len(y_data):
+        curves = []
+        if self.preview_y is not None:
+            y_raw = self.preview_y
+            if y_raw.ndim == 1 and len(y_raw) > 1:
+                curves = [y_raw.copy()]
+            elif y_raw.ndim == 2 and y_raw.shape[0] > 1:
+                n_c = y_raw.shape[1]
+                if n_c == 1:
+                    curves = [y_raw[:, 0].copy()]
+                elif n_c == 2:
+                    curves = [y_raw[:, 0].copy(), y_raw[:, 1].copy()]
+                elif n_c == 3:
+                    curves = [y_raw[:, 0].copy(), y_raw[:, 1].copy(), y_raw[:, 2].copy()]
+                elif n_c > 3:
+                    curves = [y_raw[:, 0].copy(), y_raw[:, n_c // 2].copy(), y_raw[:, -1].copy()]
+
+        if curves and len(curves[0]) > 1:
+            if self.preview_x is not None and len(self.preview_x) == len(curves[0]):
                 if self.preview_x[0] < self.preview_x[-1]:
-                    y_data = y_data[::-1]
+                    curves = [c[::-1] for c in curves]
 
-            y_min, y_max = float(np.min(y_data)), float(np.max(y_data))
+            all_vals = np.concatenate(curves)
+            y_min = float(np.nanmin(all_vals))
+            y_max = float(np.nanmax(all_vals))
             y_rng = y_max - y_min
-            if y_rng < 1e-12:
+            if y_rng < 1e-12 or np.isnan(y_rng):
                 y_rng = 1.0
 
-            n_pts = len(y_data)
+            n_pts = len(curves[0])
             step = max(1, n_pts // 140)
             sampled_indices = np.arange(0, n_pts, step)
+            if sampled_indices[-1] != n_pts - 1:
+                sampled_indices = np.append(sampled_indices, n_pts - 1)
 
             x_coords = box_left + 3 + (sampled_indices / (n_pts - 1)) * (box_w - 6)
-            y_norm = (y_data[sampled_indices] - y_min) / y_rng
-            y_coords = (46 + 88 - 4) - y_norm * (88 - 8)
 
-            path = QPainterPath()
-            path.moveTo(x_coords[0], y_coords[0])
-            for i in range(1, len(sampled_indices)):
-                path.lineTo(x_coords[i], y_coords[i])
+            if self.node_type == "input": node_col = QColor("#52b788")
+            elif self.node_type == "output": node_col = QColor("#ff595e")
+            elif self.node_type == "output_window": node_col = QColor("#d946ef")
+            elif self.node_type == "svd_denoise": node_col = QColor("#b5179e")
+            elif self.node_type == "mcr_decompose": node_col = QColor("#ff4d6d")
+            elif self.node_type == "hdo_decomposition": node_col = QColor("#2a9d8f")
+            elif self.node_type == "hdo_spectrum_scaled": node_col = QColor("#457b9d")
+            elif self.node_type == "synthetic_peak": node_col = QColor("#e76f51")
+            elif self.node_type == "merge_spectra": node_col = QColor("#06d6a0")
+            elif self.node_type == "internal_standard": node_col = QColor("#e0aaff")
+            elif self.node_type == "band_integrate": node_col = QColor("#ffba08")
+            elif self.node_type == "matrix_scaling": node_col = QColor("#48cae4")
+            elif self.node_type == "photometry": node_col = QColor("#a7c957")
+            elif self.node_type == "dft_broadener": node_col = QColor("#4cc9f0")
+            elif self.node_type == "math_op": node_col = QColor("#ff70a6")
+            elif self.node_type == "scalar_math": node_col = QColor("#b388ff")
+            elif self.node_type == "vaporfit": node_col = QColor("#48cae4")
+            else: node_col = QColor("#00f5d4")
 
-            if self.node_type == "input":
-                curve_col = QColor("#52b788")
-            elif self.node_type == "output":
-                curve_col = QColor("#ff595e")
-            elif self.node_type == "output_window":
-                curve_col = QColor("#d946ef")
-            elif self.node_type == "svd_denoise":
-                curve_col = QColor("#b5179e")
-            elif self.node_type == "mcr_decompose":
-                curve_col = QColor("#ff4d6d")
-            elif self.node_type == "matrix_scaling":
-                curve_col = QColor("#48cae4")
-            elif self.node_type == "photometry":
-                curve_col = QColor("#a7c957")
-            elif self.node_type == "dft_broadener":
-                curve_col = QColor("#4cc9f0")
-            elif self.node_type == "math_op":
-                curve_col = QColor("#ff70a6")
-            elif self.node_type == "scalar_math":
-                curve_col = QColor("#b388ff")
-            elif self.node_type == "vaporfit":
-                curve_col = QColor("#48cae4")
+            if len(curves) == 1:
+                palette = [node_col]
+            elif len(curves) == 2:
+                palette = [QColor("#48cae4"), QColor("#ffd166")]
             else:
-                curve_col = QColor("#00f5d4")
+                palette = [QColor("#48cae4"), QColor("#ffd166"), QColor("#ff4d6d")]
 
-            painter.setPen(QPen(curve_col, 1.3))
-            painter.setBrush(Qt.NoBrush)
-            painter.drawPath(path)
+            for idx, c_data in enumerate(curves):
+                y_norm = (c_data[sampled_indices] - y_min) / y_rng
+                y_norm = np.clip(np.nan_to_num(y_norm, nan=0.0), 0.0, 1.0)
+                y_coords = (46 + 88 - 4) - y_norm * (88 - 8)
+
+                path = QPainterPath()
+                path.moveTo(x_coords[0], y_coords[0])
+                for i in range(1, len(sampled_indices)):
+                    path.lineTo(x_coords[i], y_coords[i])
+
+                painter.setPen(QPen(palette[idx], 1.25))
+                painter.setBrush(Qt.NoBrush)
+                painter.drawPath(path)
+
+            # Mini-raport na kafelku HDO Solwera
+            if self.node_type == "hdo_decomposition":
+                fit_metrics = self.step_data.get('fit_metrics', {})
+                coeffs = fit_metrics.get('coefficients', [])
+                r2 = fit_metrics.get('r2', None)
+                if coeffs or r2 is not None:
+                    txt_parts = []
+                    if r2 is not None:
+                        txt_parts.append(f"R²={r2:.4f}")
+                    if coeffs:
+                        c_str = ", ".join([f"c{i+1}={c:.3f}" for i, c in enumerate(coeffs[:2])])
+                        if len(coeffs) > 2:
+                            c_str += "…"
+                        txt_parts.append(c_str)
+                    report_text = "\n".join(txt_parts)
+
+                    painter.setFont(QFont("Arial", 7, QFont.Bold))
+                    painter.setPen(QColor("#2a9d8f"))
+                    badge_rect = QRectF(box_left + 4, 48, box_w - 8, 26)
+                    painter.drawText(badge_rect, Qt.AlignLeft | Qt.AlignTop, report_text)
+
+            total_cnt = getattr(self, 'preview_total_count', len(curves))
+            if total_cnt > 1 and self.node_type != "hdo_decomposition":
+                badge_text = f"3/{total_cnt}" if total_cnt > 3 else f"{len(curves)} widma"
+                painter.setFont(QFont("Arial", 7, QFont.Bold))
+                painter.setPen(QColor("#788597"))
+                badge_rect = QRectF(box_left + box_w - 44, 48, 40, 12)
+                painter.drawText(badge_rect, Qt.AlignRight | Qt.AlignVCenter, badge_text)
         else:
             font_italic = QFont("Arial", 8)
             font_italic.setItalic(True)
@@ -444,13 +664,11 @@ class NodeItem(QGraphicsItem):
         return super().itemChange(change, value)
 
     def mouseDoubleClickEvent(self, event):
-        if self.node_type == "input":
-            super().mouseDoubleClickEvent(event)
-            return
-
-        if self.node_type in ("math_op", "scalar_math", "vaporfit", "spectrum_select",
+        if self.node_type in ("input", "math_op", "scalar_math", "vaporfit", "spectrum_select",
                               "photometry", "dft_broadener", "output_window",
-                              "svd_denoise", "mcr_decompose", "matrix_scaling"):
+                              "svd_denoise", "mcr_decompose", "matrix_scaling",
+                              "internal_standard", "band_integrate", "merge_spectra",
+                              "hdo_spectrum_scaled", "synthetic_peak", "mc_params", "hdo_decomposition"):
             dlg = NodeParamDialog(self)
         else:
             dlg = StepParamDialog(self.step_data)
@@ -461,28 +679,31 @@ class NodeItem(QGraphicsItem):
         super().mouseDoubleClickEvent(event)
 
     def contextMenuEvent(self, event):
-        if self.node_type in ("input", "output"):
-            return
         menu = QMenu()
         act_dup = menu.addAction("📋 Duplikuj węzeł (⌘D / Ctrl+D)")
         act_edit = menu.addAction("✏️ Edytuj parametry...")
-        act_del = menu.addAction("✕ Usuń węzeł (Del)")
+        if self.node_type != "input":
+            act_del = menu.addAction("✕ Usuń węzeł (Del)")
+        else:
+            act_del = None
 
         action = menu.exec(event.screenPos())
         if action == act_dup:
             if self.scene() and hasattr(self.scene(), 'dialog_owner'):
                 self.scene().dialog_owner.duplicate_node(self)
         elif action == act_edit:
-            if self.node_type in ("math_op", "scalar_math", "vaporfit", "spectrum_select",
+            if self.node_type in ("input", "math_op", "scalar_math", "vaporfit", "spectrum_select",
                                   "photometry", "dft_broadener", "output_window",
-                                  "svd_denoise", "mcr_decompose", "matrix_scaling"):
+                                  "svd_denoise", "mcr_decompose", "matrix_scaling",
+                                  "internal_standard", "band_integrate", "merge_spectra",
+                                  "hdo_spectrum_scaled", "synthetic_peak", "mc_params", "hdo_decomposition"):
                 dlg = NodeParamDialog(self)
             else:
                 dlg = StepParamDialog(self.step_data)
             if dlg.exec() == QDialog.Accepted and self.scene() and hasattr(self.scene(), 'dialog_owner'):
                 self.scene().dialog_owner.recalculate_graph_preview()
                 self.scene().dialog_owner.sync_state_to_session()
-        elif action == act_del:
+        elif act_del and action == act_del:
             sc = self.scene()
             for p in list(self.in_ports.values()) + list(self.out_ports.values()):
                 for c in list(p.connections):

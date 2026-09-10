@@ -18,9 +18,13 @@ def gxl_peak(wavenb: np.ndarray, amp: float, center: float, shape: float, width:
     """
     Pasmo będące iloczynem Gaussa i Lorentza (GxL).
     shape in [0.0, 1.0]: 0.0 -> czysty Gauss, 1.0 -> czysty Lorentz.
+    Zabezpieczone numerycznie przed overflow w np.exp.
     """
     diff_sq = ((wavenb - center) / max(width, 1e-4)) ** 2
-    numerator = np.exp(-((1.0 - shape) / 2.0) * diff_sq)
+    exponent = -((1.0 - shape) / 2.0) * diff_sq
+    # Zabezpieczenie przed overflow w float64 (exp poniżej -100 to numeryczne 0.0)
+    exponent_safe = np.clip(exponent, -100.0, 0.0)
+    numerator = np.exp(exponent_safe)
     denominator = 1.0 + shape * diff_sq
     return amp * (numerator / denominator)
 
@@ -109,12 +113,11 @@ class HDOFitEngine:
 
         for j in range(n_peaks):
             pos = start_peaks + j * 4
-            guesses[:, pos] = np.random.uniform(0.05 * max_amp, 0.8 * max_amp, n_samples)  # Amplituda
-            guesses[:, pos + 1] = np.random.uniform(wn_min, wn_max, n_samples)              # Położenie
-            guesses[:, pos + 2] = np.random.uniform(0.01, 0.99, n_samples)                  # Kształt GxL
-            guesses[:, pos + 3] = np.random.uniform(10.0, 80.0, n_samples)                  # Szerokość
+            guesses[:, pos] = np.random.uniform(0.05 * max_amp, 0.8 * max_amp, n_samples)
+            guesses[:, pos + 1] = np.random.uniform(wn_min, wn_max, n_samples)
+            guesses[:, pos + 2] = np.random.uniform(0.01, 0.99, n_samples)
+            guesses[:, pos + 3] = np.random.uniform(10.0, 80.0, n_samples)
 
-        # Permutacja kolumn dla równomiernego pokrycia przestrzeni próbkowania
         for col in range(total_p):
             guesses[:, col] = np.random.permutation(guesses[:, col])
 
@@ -145,7 +148,6 @@ class HDOFitEngine:
         if max_workers is None:
             max_workers = max(1, (os.cpu_count() or 2) - 1)
 
-        # Generowanie losowych zestawów startowych
         guesses = cls.generate_random_guesses(
             wavenb, target, k_components, n_peaks, n_iterations, comp_bounds, baseline_active
         )
@@ -154,25 +156,22 @@ class HDOFitEngine:
         lower = np.full(total_p, -np.inf)
         upper = np.full(total_p, np.inf)
 
-        # Więzy dla linii bazowej
         if not baseline_active:
             lower[0:3], upper[0:3] = -1e-9, 1e-9
         else:
             lower[0:3], upper[0:3] = -0.1, 0.1
 
-        # Więzy dla k widm składowych
         for i in range(k_components):
             lower[3 + i], upper[3 + i] = comp_bounds[i][0], comp_bounds[i][1]
 
-        # Więzy dla pasm syntetycznych
         start_peaks = 3 + k_components
         wn_span = np.max(wavenb) - np.min(wavenb)
         for j in range(n_peaks):
             pos = start_peaks + j * 4
-            lower[pos], upper[pos] = 0.0, 2.0 * max(np.max(target), 1e-2)  # Amplituda
-            lower[pos + 1], upper[pos + 1] = np.min(wavenb) - 20.0, np.max(wavenb) + 20.0  # Środek
-            lower[pos + 2], upper[pos + 2] = 0.0, 1.0  # Shape GxL
-            lower[pos + 3], upper[pos + 3] = 2.0, 0.6 * wn_span  # Szerokość
+            lower[pos], upper[pos] = 0.0, 2.0 * max(np.max(target), 1e-2)
+            lower[pos + 1], upper[pos + 1] = np.min(wavenb) - 20.0, np.max(wavenb) + 20.0
+            lower[pos + 2], upper[pos + 2] = 0.0, 1.0
+            lower[pos + 3], upper[pos + 3] = 2.0, 0.6 * wn_span
 
         bounds = (lower, upper)
         tasks = [
@@ -183,9 +182,7 @@ class HDOFitEngine:
         best_rss = np.inf
         best_params = guesses[0]
 
-        # Równoległe wykonanie w puli procesów (spawn context)
         ctx = multiprocessing.get_context("spawn")
-        chunk_size = max(1, n_iterations // (max_workers * 4))
 
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
             futures = [executor.submit(_mc_fit_worker, t) for t in tasks]
@@ -195,8 +192,13 @@ class HDOFitEngine:
                     best_rss = rss
                     best_params = params
 
-                if progress_callback and (idx % max(1, n_iterations // 20) == 0 or idx == n_iterations - 1):
-                    progress_callback(int((idx + 1) / n_iterations * 100), best_rss)
+                if progress_callback and (idx % max(1, n_iterations // 50) == 0 or idx == n_iterations - 1):
+                    # Callback zwraca True, jeśli użytkownik kliknął Anuluj
+                    should_cancel = progress_callback(int((idx + 1) / n_iterations * 100), best_rss)
+                    if should_cancel:
+                        for f in futures:
+                            f.cancel()
+                        break
 
         # 1. Obliczenie krzywej dopasowania (Total Fit)
         fitted_curve = evaluate_total_fit(best_params, wavenb, base_matrix, n_peaks, baseline_active)
@@ -229,7 +231,7 @@ class HDOFitEngine:
             peaks_curves.append(p_y)
             sum_peaks += p_y
 
-        # 4. Czyste residuum nadmiarowe: Residuum = Target - sum(c_i * W_i)
+        # 4. Czyste residuum nadmiarowe
         excess_residual = target - sum_components
 
         # 5. Linia bazowa
@@ -238,8 +240,7 @@ class HDOFitEngine:
         else:
             baseline_curve = np.zeros_like(wavenb)
 
-        # 6. Analiza całkowa (Simpsona) i udziały procentowe
-        area_target = abs(float(integrate.simpson(target, wavenb)))
+        # 6. Analiza całkowa (Simpsona)
         comp_areas = [abs(float(integrate.simpson(c_curve, wavenb))) for c_curve in scaled_components]
         peaks_area = abs(float(integrate.simpson(sum_peaks, wavenb))) if n_peaks > 0 else 0.0
         baseline_area = abs(float(integrate.simpson(baseline_curve, wavenb))) if baseline_active else 0.0
@@ -249,7 +250,7 @@ class HDOFitEngine:
             (a / total_area * 100.0) if total_area > 0 else 0.0 for a in comp_areas
         ]
 
-        # 7. Metryki GoF (Goodness-of-Fit)
+        # 7. Metryki GoF
         ss_res = float(np.sum((target - fitted_curve) ** 2))
         ss_tot = float(np.sum((target - np.mean(target)) ** 2))
         r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0

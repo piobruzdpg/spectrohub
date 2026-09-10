@@ -73,7 +73,6 @@ class NodeLibraryWidget(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
-        # Wyszukiwarka na żywo
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("🔍 Szukaj węzła (np. asls, svd, crop)...")
         self.search_box.setClearButtonEnabled(True)
@@ -92,7 +91,6 @@ class NodeLibraryWidget(QWidget):
         """)
         layout.addWidget(self.search_box)
 
-        # Drzewo węzłów
         self.tree = NodeLibraryTree(self)
         self.tree.itemDoubleClicked.connect(self._handle_double_click)
         layout.addWidget(self.tree)
