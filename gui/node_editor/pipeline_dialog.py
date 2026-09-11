@@ -1261,12 +1261,19 @@ class NodePipelineDialog(QMainWindow):
             return
 
         base_x, base_y, total_count = self._get_base_preview_data()
-        eval_results = DAGEvaluator.evaluate_dag(
+
+        # Odbiór wyników z ewaluatora (obsługa krotki (port_results, port_names))
+        eval_out = DAGEvaluator.evaluate_dag(
             ordered_nodes, base_x, base_y, session.spectra, is_execution=False
         )
+        if isinstance(eval_out, tuple):
+            eval_results, _ = eval_out
+        else:
+            eval_results = eval_out
 
         for node in all_nodes:
-            main_key = (node, "out") if node.node_type not in ("output", "output_window", "hdo_decomposition", "mc_params") else (node, "in")
+            main_key = (node, "out") if node.node_type not in ("output", "output_window", "hdo_decomposition",
+                                                               "mc_params") else (node, "in")
             if node.node_type == "hdo_decomposition":
                 main_key = (node, "out_fit")
             elif node.node_type == "mc_params":
@@ -1430,6 +1437,7 @@ class NodePipelineDialog(QMainWindow):
         self.execute_tab_pipeline(self.current_tab)
 
     def execute_tab_pipeline(self, tab: PipelineTabInfo):
+        """Wykonuje pełne obliczenia potoku aktywnej zakładki z formatowaniem nazw widm wyjściowych."""
         scene = tab.scene
         all_nodes = [item for item in scene.items() if isinstance(item, NodeItem)]
         ordered_nodes, has_cycle = DAGEvaluator.topological_sort(all_nodes)
@@ -1440,7 +1448,7 @@ class NodePipelineDialog(QMainWindow):
 
         terminals = [n for n in all_nodes if n.node_type in ("output", "output_window")]
         if not terminals:
-            QMessageBox.warning(self, "Błąd", "Brak węzła końcowego ('Zapis Wyniku' lub 'Generuj w nowym oknie').")
+            QMessageBox.warning(self, "Błąd", "Brak węzła końcowego ('Zapis Wyniku' lub 'Kopiuj do okna roboczego').")
             return
 
         self._clear_canvas_preview()
@@ -1448,7 +1456,7 @@ class NodePipelineDialog(QMainWindow):
         main_win = self.parent()
         canvas = getattr(main_win, 'canvas_2d', None)
 
-        # Sprawdzenie czy w grafie występuje węzeł Dekompozycji HDO / MC
+        # Sprawdzenie obecności solwera Monte Carlo HDO
         has_hdo = any(n.node_type == "hdo_decomposition" for n in ordered_nodes)
         progress_dialog: Optional[QProgressDialog] = None
 
@@ -1471,7 +1479,7 @@ class NodePipelineDialog(QMainWindow):
 
         try:
             base_x, base_y, _ = self._get_base_preview_data()
-            res_map = DAGEvaluator.evaluate_dag(
+            res_map, names_map = DAGEvaluator.evaluate_dag(
                 ordered_nodes, base_x, base_y, session.spectra,
                 is_execution=True
             )
@@ -1493,6 +1501,7 @@ class NodePipelineDialog(QMainWindow):
                     if not target_window_id:
                         target_window_id = session.add_window(name=win_name)
 
+                # Zbiór używanych nazw dla zapewnienia unikalności
                 used_names = set()
                 if target_window_id and target_window_id in session.windows:
                     for s in session.windows[target_window_id].spectra.values():
@@ -1507,6 +1516,27 @@ class NodePipelineDialog(QMainWindow):
                     used_names.add(cand.lower())
                     return cand
 
+                # Parametry reguły nazewnictwa z węzła wyjściowego (domyślnie prefiks: 'proc_', sufiks: '')
+                naming_mode = term_node.step_data.get('naming_mode', 'source_affix')
+                prefix = term_node.step_data.get('name_prefix', 'proc_')
+                suffix = term_node.step_data.get('name_suffix', '')
+                custom_base = term_node.step_data.get('custom_name', 'Widmo')
+
+                def format_spectrum_name(orig_name: str, idx: int, fallback_title: str, total_count: int) -> str:
+                    if naming_mode == "source_affix":
+                        base = orig_name if orig_name else fallback_title
+                        return f"{prefix}{base}{suffix}"
+                    elif naming_mode == "custom_base":
+                        c_base = custom_base if custom_base else "Widmo"
+                        if total_count > 1:
+                            return f"{prefix}{c_base}_{idx + 1}{suffix}"
+                        return f"{prefix}{c_base}{suffix}"
+                    else:
+                        # tryb 'node_title' (kompatybilność wsteczna)
+                        if total_count > 1:
+                            return f"{fallback_title}_Comp_{idx + 1}"
+                        return fallback_title
+
                 in_p = term_node.in_ports.get("in")
                 incoming_conns = in_p.connections if in_p else []
                 if not incoming_conns:
@@ -1518,23 +1548,25 @@ class NodePipelineDialog(QMainWindow):
                     src_node = conn.out_port.node_item
                     src_port = conn.out_port.port_id
                     new_x, new_y = res_map.get((src_node, src_port), (None, None))
+                    src_names = names_map.get((src_node, src_port), [])
                     if new_x is None or new_y is None:
                         continue
 
                     branch_tag = f" [{src_node.title}]" if len(incoming_conns) > 1 else ""
 
-                    # Specjalna obsługa nazewnictwa i raportu współczynników HDO Fit
+                    # Specjalna obsługa solwera HDO Fit (raportowanie R² i współczynników)
                     if src_node.node_type == "hdo_decomposition":
                         metrics = src_node.step_data.get('fit_metrics', {})
                         r2_tag = f" (R²={metrics.get('r2', 0):.4f})" if 'r2' in metrics else ""
                         coeffs = metrics.get('coefficients', [])
                         base_names = metrics.get('base_names', [])
+                        target_base = src_names[0] if src_names else "W0"
 
                         if src_port == "out_comps" and new_y.ndim == 2:
                             for col in range(new_y.shape[1]):
                                 b_title = base_names[col] if col < len(base_names) else f"Comp_{col + 1}"
                                 c_val = coeffs[col] if col < len(coeffs) else 1.0
-                                raw_n = f"{b_title} (c={c_val:.4f}){branch_tag}"
+                                raw_n = f"{prefix}{b_title}{suffix} (c={c_val:.4f}){branch_tag}"
                                 new_created.append(SpectrumData(
                                     wavenumbers=new_x.copy(), intensities=new_y[:, col].copy(),
                                     name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
@@ -1543,7 +1575,7 @@ class NodePipelineDialog(QMainWindow):
                                 ))
                         elif src_port == "out_peaks" and new_y.ndim == 2:
                             for col in range(new_y.shape[1]):
-                                raw_n = f"Pik_GxL_{col + 1}{branch_tag}"
+                                raw_n = f"{prefix}Pik_GxL_{col + 1}{suffix}{branch_tag}"
                                 new_created.append(SpectrumData(
                                     wavenumbers=new_x.copy(), intensities=new_y[:, col].copy(),
                                     name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
@@ -1551,7 +1583,7 @@ class NodePipelineDialog(QMainWindow):
                                     metadata={"source": "HDO Synthetic Peak", **metrics}
                                 ))
                         elif src_port == "out_res":
-                            raw_n = f"Residuum HDO{r2_tag}{branch_tag}"
+                            raw_n = f"{prefix}Residuum_{target_base}{suffix}{r2_tag}{branch_tag}"
                             new_created.append(SpectrumData(
                                 wavenumbers=new_x.copy(), intensities=new_y.copy(),
                                 name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
@@ -1559,7 +1591,7 @@ class NodePipelineDialog(QMainWindow):
                                 metadata={"source": "HDO Excess Residual", **metrics}
                             ))
                         elif src_port == "out_fit":
-                            raw_n = f"Fit HDO{r2_tag}{branch_tag}"
+                            raw_n = f"{prefix}Fit_{target_base}{suffix}{r2_tag}{branch_tag}"
                             new_created.append(SpectrumData(
                                 wavenumbers=new_x.copy(), intensities=new_y.copy(),
                                 name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
@@ -1567,7 +1599,7 @@ class NodePipelineDialog(QMainWindow):
                                 metadata={"source": "HDO Total Fit", **metrics}
                             ))
                         else:
-                            raw_n = f"ΔFit HDO{r2_tag}{branch_tag}"
+                            raw_n = f"{prefix}ΔFit_{target_base}{suffix}{r2_tag}{branch_tag}"
                             new_created.append(SpectrumData(
                                 wavenumbers=new_x.copy(), intensities=new_y.copy(),
                                 name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
@@ -1575,36 +1607,46 @@ class NodePipelineDialog(QMainWindow):
                                 metadata={"source": "HDO Fit Residual", **metrics}
                             ))
 
-                    # Standardowe węzły
+                    # Standardowe serie wielowidmowe (np. wsadowy Batch 2D, MCR, SVD)
                     elif new_y.ndim == 2:
-                        for col in range(new_y.shape[1]):
-                            raw_n = f"{src_node.title}_Comp_{col + 1}{branch_tag}"
+                        n_cols = new_y.shape[1]
+                        for col in range(n_cols):
+                            orig_n = src_names[col] if col < len(src_names) else f"Widmo_{col + 1}"
+                            formatted_n = format_spectrum_name(orig_n, col, src_node.title, n_cols)
+                            raw_n = f"{formatted_n}{branch_tag}"
                             new_created.append(SpectrumData(
                                 wavenumbers=new_x.copy(), intensities=new_y[:, col].copy(),
                                 name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
                                 file_path="", file_type="processed",
-                                metadata={"dag_pipeline": [n.title for n in ordered_nodes]}
+                                metadata={"dag_pipeline": [n.title for n in ordered_nodes], "orig_name": orig_n}
                             ))
+
+                    # Pojedyncze widmo (1D)
                     else:
-                        raw_n = f"{src_node.title}{branch_tag}"
+                        active = session.active_spectrum
+                        orig_n = src_names[0] if src_names else (active.name if active else "Widmo")
+                        formatted_n = format_spectrum_name(orig_n, 0, src_node.title, 1)
+                        raw_n = f"{formatted_n}{branch_tag}"
+
                         if term_node.node_type == "output_window":
                             new_created.append(SpectrumData(
                                 wavenumbers=new_x.copy(), intensities=new_y.copy(),
                                 name=make_unique_name(raw_n), file_path="",
                                 file_type="processed",
-                                metadata={"dag_pipeline": [n.title for n in ordered_nodes]}
+                                metadata={"dag_pipeline": [n.title for n in ordered_nodes], "orig_name": orig_n}
                             ))
                         else:
-                            active = session.active_spectrum
+                            # Terminal in-place: zapis do bieżącego aktywnego widma
                             if active:
                                 cmd = ModifySpectrumCommand(
-                                    active, f"DAG: {active.name}", active.intensities, new_y,
+                                    active, f"DAG: {raw_n}", active.intensities, new_y,
                                     active.wavenumbers, new_x, old_meta=active.metadata,
                                     new_meta={"dag_pipeline": [n.title for n in ordered_nodes]},
                                     canvas=canvas
                                 )
                                 session.undo_stack.push(cmd)
 
+                # Wrzucenie widm do wskazanego Okna Roboczego w ramach jednej komendy Undo
                 if term_node.node_type == "output_window" and new_created:
                     session.undo_stack.push(AddBatchSpectraCommand(
                         new_created,

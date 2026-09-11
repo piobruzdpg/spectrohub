@@ -10,6 +10,32 @@ from typing import Optional, Dict, Any, List
 
 
 @dataclass
+class WindowFolder:
+    """Reprezentuje folder organizacyjny w sekcji Okien Roboczych."""
+    folder_id: str
+    name: str
+    parent_folder_id: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "folder_id": self.folder_id,
+            "name": self.name,
+            "parent_folder_id": self.parent_folder_id,
+            "metadata": self.metadata
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "WindowFolder":
+        return cls(
+            folder_id=d.get("folder_id", ""),
+            name=d.get("name", "Nowy Folder"),
+            parent_folder_id=d.get("parent_folder_id", None),
+            metadata=d.get("metadata", {})
+        )
+
+
+@dataclass
 class ProjectMetadata:
     """Metadane opisowe całego projektu badawczego."""
     title: str = "Nowy Projekt SpectroHub"
@@ -84,6 +110,17 @@ class SpectrumData:
             units_y=self.units_y,
             metadata=copy.deepcopy(self.metadata)
         )
+
+
+@dataclass
+class WorkspaceWindow:
+    """Reprezentuje niezależne okno robocze/wykres w projekcie."""
+    window_id: str
+    name: str
+    spectra: Dict[str, SpectrumData] = field(default_factory=dict)
+    visibility: Dict[str, bool] = field(default_factory=dict)
+    active_spectrum_name: Optional[str] = None
+    folder_id: Optional[str] = None
 
 
 @dataclass

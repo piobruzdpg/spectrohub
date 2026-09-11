@@ -532,3 +532,33 @@ spectrohub/
 * **Mini-raport na kafelku solwera:** Bloczek `hdo_decomposition` w edytorze wyświetla w oknie podglądu wartości $R^2$ oraz współczynniki $c_1, c_2, \dots$ w czasie rzeczywistym.
 * **Metadane obiektów:** Wszystkie parametry dopasowania trafiają do słownika `metadata` widm, zapewniając ich trwałość w plikach `.shub`.
 
+
+### 11.09.2026 — Checkpoint: Hierarchia Folderów, Eksport z Drzewa i Elastyczne Nazewnictwo w Potoku DAG
+
+**1. Hierarchiczna Organizacja Okien Roboczych & Eksport z Drzewa (`project_tree.py`, `session.py`, `models.py`)**
+* **Model `WindowFolder`:** Reprezentacja wielopoziomowej struktury katalogów na okna robocze z pełnym wsparciem drzewiastym (`parent_folder_id`) i głęboką serializacją w projekcie.
+* **Zarządzanie strukturą w `ProjectSession`:** Metody `add_folder()`, `remove_folder()` (z flagą `delete_windows` decydującą o usunięciu lub przeniesieniu okien wyżej), `rename_folder()` oraz `move_window_to_folder()`.
+* **Ergonomia Drag & Drop w eksploratorze:**
+* Przeciąganie okien między folderami oraz na poziom nadrzędny.
+* Zagnieżdżanie podfolderów wewnątrz folderów.
+* Przeciąganie pojedynczych widm i zaznaczeń hurtowych bezpośrednio na foldery (z automatycznym routingiem do pierwszego okna lub utworzeniem nowego).
+* **Eksport i Zapis z Menu Kontekstowego (`ExportManager`):**
+* Szybki zapis pojedynczego widma lub całej grupy w ostatnio wybranym formacie.
+* Eksport wsadowy do katalogu na dysku z pełnym odwzorowaniem hierarchii folderów i podfolderów (`_get_window_relative_path`, `_get_folder_relative_path`).
+* Pakowanie zaznaczonych widm, okien lub folderów wprost do spakowanego archiwum ZIP z zachowaniem ścieżek relatywnych.
+
+**2. Elastyczny Silnik Nazewnictwa w DAG (`dialogs.py`, `evaluator.py`, `pipeline_dialog.py`, `items.py`)**
+* **Przepływ metadanych nazw (`port_names` w `DAGEvaluator`):**
+* Węzeł startowy (`input`) pobiera i rejestruje oryginalne nazwy próbek zarówno w trybie pojedynczym, jak i przy wsadowym przetwarzaniu macierzowym (Batch 2D).
+* Wszystkie węzły pośrednie i filtry (Crop, AsLS, airPLS, SG, fotometria, skalowania) bezstratnie propagują nazwy pierwotne wzdłuż połączeń grafu.
+* **Trzy tryby nazewnictwa w terminalach (`output` oraz `output_window`):**
+1. *Prefiks / Sufiks do nazwy pierwotnej* (`source_affix`): domyślna konwencja z ustawionym prefiksem `proc_` oraz opcjonalnym sufiksem (np. `corr_próbka_01_asls`).
+2. *Własna nazwa bazowa z indeksem* (`custom_base`): generowanie sekwencji typu `pfx_Baza_1_sfx`.
+3. *Nazwa węzła / operacji* (`node_title`): zachowanie kompatybilności wstecznej.
+* **Dynamiczny podgląd na żywo:** Dialog parametrów węzła (`NodeParamDialog`) w czasie rzeczywistym wyświetla podgląd wygenerowanej nazwy dla przykładowego widma.
+* **Integracja z edycją węzła `output`:** Dwuklik i menu PPM na klocku zapisu standardowego otwiera pełne okno konfiguracji nazewnictwa.
+* **Stabilizacja odświeżania podglądu:** Naprawiono obsługę dwuelementowej krotki `(port_results, port_names)` w `recalculate_graph_preview()`, eliminując błąd `AttributeError` podczas edycji potoku.
+
+
+
+

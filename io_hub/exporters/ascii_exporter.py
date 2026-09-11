@@ -1,7 +1,7 @@
 """
 io_hub/exporters/ascii_exporter.py
 Natywny eksporter widm do czystych formatów numerycznych (CSV, DPT, TXT).
-Zgodny z programami spektroskopowymi (OMNIC, OPUS, GRAMS) – domyślnie czyste dane bez nagłówków.
+Zgodny z programami spektroskopowymi (OMNIC, OPUS, GRAMS, Origin).
 """
 
 import numpy as np
@@ -20,23 +20,38 @@ class ASCIIExporter:
     def export_spectrum(file_path: str,
                         wavenumbers: np.ndarray,
                         intensities: np.ndarray,
-                        style: str = "EU",
+                        style: str = "CSV_EU",
                         include_header: bool = False) -> None:
         """
         Zapisuje czyste kolumny numeryczne X i Y.
         style:
-          - 'EU': kropka dziesiętna, separator: ',' (dla .csv) lub '\t' (dla .dpt/.txt)
-          - 'PL': przecinek dziesiętny, separator: ';'
-          - 'DPT': tabulator, kropka dziesiętna (standard Bruker DPT)
+          - 'CSV_EU' / 'EU': kropka dziesiętna, separator: ','
+          - 'CSV_PL' / 'PL': przecinek dziesiętny, separator: ';'
+          - 'DPT_EU' / 'DPT': kropka dziesiętna, separator: '\t' (standard Bruker OPUS DPT)
+          - 'DPT_PL': przecinek dziesiętny, separator: '\t'
         """
         if len(wavenumbers) != len(intensities):
             raise ValueError("Niezgodność wymiarów wektorów X i Y.")
 
         ext = file_path.lower()
-        if ext.endswith('.dpt') or style.upper() == "DPT":
+        style_u = style.upper()
+
+        if style_u == "DPT_PL":
+            sep = "\t"
+            dec = ","
+        elif style_u in ["DPT_EU", "DPT"]:
             sep = "\t"
             dec = "."
-        elif style.upper() == "PL":
+        elif style_u in ["CSV_PL", "PL"]:
+            sep = ";"
+            dec = ","
+        elif style_u in ["CSV_EU", "EU"]:
+            sep = ","
+            dec = "."
+        elif ext.endswith('.dpt'):
+            sep = "\t"
+            dec = "," if "PL" in style_u else "."
+        elif "PL" in style_u:
             sep = ";"
             dec = ","
         else:
@@ -59,18 +74,19 @@ class ASCIIExporter:
         logger.info(f"Zapisano czyste dane numeryczne ({style}): '{file_path}' ({len(wavenumbers)} pkt.)")
 
     @classmethod
-    def export_spectrum_data(cls, spectrum: SpectrumData, file_path: str, style: str = "EU", include_header: bool = False) -> None:
+    def export_spectrum_data(cls, spectrum: SpectrumData, file_path: str, style: str = "CSV_EU", include_header: bool = False) -> None:
         cls.export_spectrum(file_path, spectrum.wavenumbers, spectrum.intensities, style=style, include_header=include_header)
 
     @staticmethod
-    def export_matrix_csv(file_path: str, spectra: List[SpectrumData], style: str = "EU", include_header: bool = True) -> None:
+    def export_matrix_csv(file_path: str, spectra: List[SpectrumData], style: str = "CSV_EU", include_header: bool = True) -> None:
         """Eksportuje serię widm do macierzy (opcjonalny nagłówek z nazwami widm)."""
         if not spectra:
             return
 
         ref_wn = spectra[0].wavenumbers
-        sep = ";" if style.upper() == "PL" else ","
-        dec = "," if style.upper() == "PL" else "."
+        is_pl = "PL" in style.upper()
+        sep = ";" if is_pl else ","
+        dec = "," if is_pl else "."
 
         with open(file_path, 'w', encoding='utf-8') as f:
             if include_header:

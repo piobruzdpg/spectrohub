@@ -1,7 +1,7 @@
 """
 core/session.py
 Centralny menedżer stanu danych (Single Source of Truth) dla SpectroHub.
-Wprowadza ścisłą separację gałęzi Magazynu Danych (pomiary eksperymentalne vs wzorce atmosfery).
+Wprowadza ścisłą separację gałęzi Magazynu Danych oraz hierarchię folderów w Oknach Roboczych.
 """
 
 from typing import Dict, List, Optional, Any
@@ -12,7 +12,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QUndoStack
 import logging
 
-from core.models import SpectrumData, SpectralSeries, ProjectMetadata
+from core.models import SpectrumData, SpectralSeries, ProjectMetadata, WindowFolder, WorkspaceWindow
 
 logger = logging.getLogger("SpectroHub")
 
@@ -21,16 +21,6 @@ def is_atmospheric_name(name: str) -> bool:
     """Rozpoznaje wzorce atmosfery wyłącznie na podstawie fraz atm oraz co2."""
     nl = name.lower()
     return "atm" in nl or "co2" in nl
-
-
-@dataclass
-class WorkspaceWindow:
-    """Reprezentuje niezależne okno wykresu/robocze w projekcie."""
-    window_id: str
-    name: str
-    spectra: Dict[str, SpectrumData] = field(default_factory=dict)
-    visibility: Dict[str, bool] = field(default_factory=dict)
-    active_spectrum_name: Optional[str] = None
 
 
 class ProjectSession(QObject):
@@ -69,6 +59,12 @@ class ProjectSession(QObject):
     context_changed = Signal(str)            # 'storage' | 'window'
     storage_branch_changed = Signal(str)     # 'experimental' | 'atm' | 'dft' | 'series'
 
+    # Sygnały Folderów Okien Roboczych
+    folder_added = Signal(str, str, object)       # folder_id, name, parent_folder_id
+    folder_removed = Signal(str)                  # folder_id
+    folder_renamed = Signal(str, str)             # folder_id, new_name
+    window_folder_changed = Signal(str, object)   # window_id, new_folder_id
+
     # Sygnał Metadanych Projektu
     metadata_changed = Signal(object)
 
@@ -92,6 +88,10 @@ class ProjectSession(QObject):
         self._series: Dict[str, SpectralSeries] = {}
         self._series_visibility: Dict[str, bool] = {}
         self._active_series_name: Optional[str] = None
+
+        # Foldery okien roboczych
+        self._folders: Dict[str, WindowFolder] = {}
+        self._folder_counter = 0
 
         # Okna robocze
         self._windows: Dict[str, WorkspaceWindow] = {}
@@ -117,6 +117,62 @@ class ProjectSession(QObject):
         self.metadata.modified_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.metadata_changed.emit(self.metadata)
 
+    # --- ZARZĄDZANIE FOLDERAMI OKIEN ROBOCZYCH ---
+    @property
+    def folders(self) -> Dict[str, WindowFolder]:
+        return self._folders
+
+    def get_folder(self, folder_id: str) -> Optional[WindowFolder]:
+        return self._folders.get(folder_id)
+
+    def add_folder(self, name: Optional[str] = None, parent_folder_id: Optional[str] = None,
+                   folder_id: Optional[str] = None) -> str:
+        self._folder_counter += 1
+        fid = folder_id or f"folder_{self._folder_counter}"
+        fname = name or f"Folder {self._folder_counter}"
+
+        folder = WindowFolder(folder_id=fid, name=fname, parent_folder_id=parent_folder_id)
+        self._folders[fid] = folder
+        logger.info(f"Utworzono folder okien: '{fname}' (ID: {fid})")
+        self.folder_added.emit(fid, fname, parent_folder_id)
+        return fid
+
+    def remove_folder(self, folder_id: str, delete_windows: bool = False):
+        if folder_id not in self._folders:
+            return
+
+        target_parent = self._folders[folder_id].parent_folder_id
+
+        # 1. Okna w tym folderze
+        affected_windows = [w_id for w_id, win in self._windows.items() if win.folder_id == folder_id]
+        for w_id in affected_windows:
+            if delete_windows:
+                self.remove_window(w_id)
+            else:
+                self.move_window_to_folder(w_id, target_parent)
+
+        # 2. Podfoldery (przepięcie wyżej)
+        child_folders = [fid for fid, f in self._folders.items() if f.parent_folder_id == folder_id]
+        for c_fid in child_folders:
+            self._folders[c_fid].parent_folder_id = target_parent
+
+        del self._folders[folder_id]
+        logger.info(f"Usunięto folder okien: ID {folder_id} (delete_windows={delete_windows})")
+        self.folder_removed.emit(folder_id)
+
+    def rename_folder(self, folder_id: str, new_name: str):
+        if folder_id in self._folders and new_name.strip():
+            clean_name = new_name.strip()
+            self._folders[folder_id].name = clean_name
+            self.folder_renamed.emit(folder_id, clean_name)
+
+    def move_window_to_folder(self, window_id: str, folder_id: Optional[str]):
+        if window_id in self._windows:
+            if folder_id is not None and folder_id not in self._folders:
+                folder_id = None
+            self._windows[window_id].folder_id = folder_id
+            self.window_folder_changed.emit(window_id, folder_id)
+
     # --- ZARZĄDZANIE OKNAMI ROBOCZYMI ---
     @property
     def windows(self) -> Dict[str, WorkspaceWindow]:
@@ -132,14 +188,15 @@ class ProjectSession(QObject):
     def active_window_id(self) -> Optional[str]:
         return self._active_window_id
 
-    def add_window(self, name: Optional[str] = None, window_id: Optional[str] = None) -> str:
+    def add_window(self, name: Optional[str] = None, window_id: Optional[str] = None,
+                   folder_id: Optional[str] = None) -> str:
         self._window_counter += 1
         win_id = window_id or f"win_{self._window_counter}"
         win_name = name or f"Okno {self._window_counter}"
 
-        win = WorkspaceWindow(window_id=win_id, name=win_name)
+        win = WorkspaceWindow(window_id=win_id, name=win_name, folder_id=folder_id)
         self._windows[win_id] = win
-        logger.info(f"Utworzono okno robocze: '{win_name}' (ID: {win_id})")
+        logger.info(f"Utworzono okno robocze: '{win_name}' (ID: {win_id}, Folder: {folder_id})")
         self.window_added.emit(win_id, win_name)
 
         if self._active_window_id is None:
@@ -232,7 +289,6 @@ class ProjectSession(QObject):
         return self._active_storage_branch
 
     def set_storage_branch(self, branch: str):
-        """Ustawia aktywną gałąź magazynu danych ('experimental' | 'atm' | 'dft' | 'series')."""
         if branch in ("experimental", "atm", "dft", "series") and branch != self._active_storage_branch:
             self._active_storage_branch = branch
             logger.debug(f"Zmiana aktywnej gałęzi magazynu na: {branch}")
@@ -241,10 +297,6 @@ class ProjectSession(QObject):
 
     # --- SELEKCJA WIDM DLA WYKRESU I POTOKU ---
     def get_display_spectra(self, include_atm: bool = False) -> List[SpectrumData]:
-        """
-        Zwraca widma widoczne na wykresie głównym.
-        Izoluje gałęzie: będąc w pomiarach eksperymentalnych NIE wyświetla wzorców atmosfery!
-        """
         if self._active_context == "window" and self.active_window:
             win = self.active_window
             return [s for name, s in win.spectra.items() if win.visibility.get(name, True)]
@@ -252,14 +304,9 @@ class ProjectSession(QObject):
         if self._active_storage_branch == "atm":
             return [s for name, s in self._atm_spectra.items() if self._atm_visibility.get(name, True)]
 
-        # Domyślnie w magazynie (Pomiary Eksperymentalne / DFT)
         return [s for name, s in self._spectra.items() if self._visibility.get(name, True)]
 
     def get_pipeline_target_spectra(self) -> List[SpectrumData]:
-        """
-        Zwraca widma będące celem przetwarzania wsadowego potoku (DAG / Pipeline Manager).
-        Ściśle izoluje aktywne okno lub aktywną gałąź magazynu.
-        """
         if self._active_context == "window" and self.active_window:
             win = self.active_window
             return [s for name, s in win.spectra.items() if win.visibility.get(name, True)]
@@ -267,7 +314,6 @@ class ProjectSession(QObject):
         if self._active_storage_branch == "atm":
             return [s for name, s in self._atm_spectra.items() if self._atm_visibility.get(name, True)]
 
-        # Pomiary eksperymentalne
         return [s for name, s in self._spectra.items() if self._visibility.get(name, True)]
 
     # --- ZARZĄDZANIE WIDMAMI MAGAZYNU I WZORCAMI ATMOSFERY ---
@@ -522,6 +568,9 @@ class ProjectSession(QObject):
         self._series.clear()
         self._series_visibility.clear()
         self._active_series_name = None
+
+        self._folders.clear()
+        self._folder_counter = 0
 
         self._windows.clear()
         self._active_window_id = None

@@ -2,7 +2,7 @@
 io_hub/project_io.py
 Silnik zapisu i odczytu stanu projektu SpectroHub w kontenerowym formacie .shub (ZIP Bundle).
 Paczka zawiera:
-- project.json: manifest hierarchii, okien roboczych, potoku DAG i metadanych
+- project.json: manifest hierarchii, folderów, okien roboczych, potoku DAG i metadanych
 - arrays.npz: zoptymalizowany binarny zrzut tablic NumPy (float64) bez utraty precyzji
 """
 
@@ -15,11 +15,11 @@ from typing import Dict, Any, Optional, Tuple
 import numpy as np
 
 from core.session import ProjectSession
-from core.models import SpectrumData, SpectralSeries, GaussianData, ProjectMetadata
+from core.models import SpectrumData, SpectralSeries, GaussianData, ProjectMetadata, WindowFolder
 
 logger = logging.getLogger("SpectroHub")
 
-PROJECT_FORMAT_VERSION = "1.0.0"
+PROJECT_FORMAT_VERSION = "1.1.0"
 
 
 class ProjectBundleIO:
@@ -45,6 +45,7 @@ class ProjectBundleIO:
                     "atm": [],
                     "series": []
                 },
+                "folders": [f.to_dict() for f in session.folders.values()],
                 "windows": []
             }
 
@@ -69,17 +70,11 @@ class ProjectBundleIO:
                 }
 
                 if isinstance(spec, GaussianData):
-                    k_stk_f = f"exp_stk_f_{idx}"
-                    k_stk_i = f"exp_stk_i_{idx}"
-                    k_coords = f"exp_coords_{idx}"
-                    k_atom = f"exp_atomnos_{idx}"
-                    k_lx = f"exp_lx_{idx}"
-
-                    arrays_dict[k_stk_f] = spec.stick_freqs
-                    arrays_dict[k_stk_i] = spec.stick_intens
-                    arrays_dict[k_coords] = spec.coords
-                    arrays_dict[k_atom] = spec.atomnos
-                    arrays_dict[k_lx] = spec.Lx
+                    arrays_dict[f"exp_stk_f_{idx}"] = spec.stick_freqs
+                    arrays_dict[f"exp_stk_i_{idx}"] = spec.stick_intens
+                    arrays_dict[f"exp_coords_{idx}"] = spec.coords
+                    arrays_dict[f"exp_atomnos_{idx}"] = spec.atomnos
+                    arrays_dict[f"exp_lx_{idx}"] = spec.Lx
 
                     item_dict["dft_data"] = {
                         "hessian_source": spec.hessian_source,
@@ -110,10 +105,8 @@ class ProjectBundleIO:
 
             # 3. Serializacja serii 2D i tensorów 3D
             for idx, (name, s_obj) in enumerate(session.series.items()):
-                k_wn = f"series_wn_{idx}"
-                k_data = f"series_data_{idx}"
-                arrays_dict[k_wn] = s_obj.wavenumbers
-                arrays_dict[k_data] = s_obj.data
+                arrays_dict[f"series_wn_{idx}"] = s_obj.wavenumbers
+                arrays_dict[f"series_data_{idx}"] = s_obj.data
 
                 ser_dict = {
                     "id": idx,
@@ -125,13 +118,11 @@ class ProjectBundleIO:
                 }
 
                 if s_obj.axis_n_values is not None:
-                    k_n = f"series_n_vals_{idx}"
-                    arrays_dict[k_n] = s_obj.axis_n_values
+                    arrays_dict[f"series_n_vals_{idx}"] = s_obj.axis_n_values
                     ser_dict["has_axis_n"] = True
 
                 if s_obj.axis_m_values is not None:
-                    k_m = f"series_m_vals_{idx}"
-                    arrays_dict[k_m] = s_obj.axis_m_values
+                    arrays_dict[f"series_m_vals_{idx}"] = s_obj.axis_m_values
                     ser_dict["has_axis_m"] = True
 
                 manifest["storage"]["series"].append(ser_dict)
@@ -141,6 +132,7 @@ class ProjectBundleIO:
                 win_dict = {
                     "window_id": win.window_id,
                     "name": win.name,
+                    "folder_id": win.folder_id,
                     "active_spectrum_name": win.active_spectrum_name,
                     "spectra": []
                 }
@@ -165,11 +157,9 @@ class ProjectBundleIO:
 
             # 5. Bezpośredni zapis do archiwum ZIP
             with zipfile.ZipFile(file_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zip_f:
-                # Zapis manifestu JSON
                 manifest_bytes = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
                 zip_f.writestr("project.json", manifest_bytes)
 
-                # Zapis skompresowanych macierzy NumPy
                 buf_npz = io.BytesIO()
                 np.savez_compressed(buf_npz, **arrays_dict)
                 buf_npz.seek(0)
@@ -288,14 +278,23 @@ class ProjectBundleIO:
                 session.add_series(s_obj, make_active=False)
                 session.set_series_visibility(itm["name"], itm.get("is_visible", True))
 
-            # 6. Odtworzenie Okien Roboczych
+            # 6. Odtworzenie folderów okien roboczych
+            for f_data in manifest_data.get("folders", []):
+                f_obj = WindowFolder.from_dict(f_data)
+                session._folders[f_obj.folder_id] = f_obj
+                session.folder_added.emit(f_obj.folder_id, f_obj.name, f_obj.parent_folder_id)
+
+            # 7. Odtworzenie Okien Roboczych
             if manifest_data.get("windows"):
-                # Usuwamy domyślnie tworzone okno 1 po czyszczeniu
                 for w_id in list(session.windows.keys()):
                     session.remove_window(w_id)
 
                 for w_info in manifest_data["windows"]:
-                    w_id = session.add_window(name=w_info["name"], window_id=w_info["window_id"])
+                    w_id = session.add_window(
+                        name=w_info["name"],
+                        window_id=w_info["window_id"],
+                        folder_id=w_info.get("folder_id")
+                    )
                     for s_info in w_info["spectra"]:
                         s_idx = s_info["id"]
                         xw = npz_data[f"win_{w_id}_x_{s_idx}"]
@@ -316,7 +315,7 @@ class ProjectBundleIO:
                     if w_info.get("active_spectrum_name"):
                         session.set_window_active_spectrum(w_id, w_info["active_spectrum_name"])
 
-            # 7. Przywrócenie aktywnego kontekstu i aktywnego widma
+            # 8. Przywrócenie aktywnego kontekstu i aktywnego widma
             act_ctx = manifest_data.get("active_context", "storage")
             session.set_context(act_ctx)
 

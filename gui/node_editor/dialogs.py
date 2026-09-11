@@ -5,7 +5,8 @@ Dialogi konfiguracyjne węzłów DAG:
 - Odniesienia i Mux: Multi-Select, Mux / Zbieracz
 - Chemometria: SVD/PCA, MCR-ALS / SPEXFA, Skalowania
 - Dekompozycja HDO: Widmo Skalowane, Pasmo GxL/Gauss/Lorentz, Parametry MC, Solwer HDO
-- Fotometria, DFT, VaporFit, Arytmetyka i Terminale
+- Fotometria, DFT, VaporFit, Arytmetyka
+- Terminale (output, output_window): elastyczny wybór okna i formatu nazw (prefiks/sufiks/własna nazwa)
 """
 
 import numpy as np
@@ -27,7 +28,7 @@ class NodeParamDialog(QDialog):
         self.node = node_item
         self.step = node_item.step_data
         self.setWindowTitle(f"Parametry węzła: {node_item.title}")
-        self.resize(470, 420)
+        self.resize(480, 430)
 
         layout = QVBoxLayout(self)
         self.form = QFormLayout()
@@ -247,23 +248,75 @@ class NodeParamDialog(QDialog):
             self.form.addRow(lbl_info)
 
         # =====================================================================
-        # 8. TERMINAL: GENERUJ W NOWYM OKNIE ROBOCZYM
+        # 8. TERMINALE: KOPIUJ DO OKNA ROBOCZEGO ORAZ ZAPIS WYNIKU
         # =====================================================================
-        elif stype == 'output_window':
-            self.ent_win_name = QLineEdit(self.step.get('window_name', 'Skorygowane'))
-            self.form.addRow("Nazwa docelowego okna:", self.ent_win_name)
+        elif stype in ('output_window', 'output'):
+            if stype == 'output_window':
+                self.ent_win_name = QLineEdit(self.step.get('window_name', 'Skorygowane'))
+                self.form.addRow("Nazwa docelowego okna:", self.ent_win_name)
 
-            self.combo_mode = QComboBox()
-            self.combo_mode.addItem("Utwórz nowe okno robocze", "create_new")
-            self.combo_mode.addItem("Dodaj do istniejącego (o tej nazwie)", "append_existing")
-            idx = self.combo_mode.findData(self.step.get('mode', 'create_new'))
-            if idx >= 0:
-                self.combo_mode.setCurrentIndex(idx)
-            self.form.addRow("Tryb przypisania:", self.combo_mode)
+                self.combo_mode = QComboBox()
+                self.combo_mode.addItem("Utwórz nowe okno robocze", "create_new")
+                self.combo_mode.addItem("Dodaj do istniejącego (o tej nazwie)", "append_existing")
+                idx = self.combo_mode.findData(self.step.get('mode', 'create_new'))
+                if idx >= 0:
+                    self.combo_mode.setCurrentIndex(idx)
+                self.form.addRow("Tryb okna:", self.combo_mode)
 
-            lbl_info = QLabel("💡 Port wejściowy 'In' akceptuje kable z wielu gałęzi jednocześnie.")
-            lbl_info.setStyleSheet("color: #a8dadc; font-size: 11px;")
-            self.form.addRow("", lbl_info)
+            # Schemat nazewnictwa widm wyjściowych
+            self.combo_naming_mode = QComboBox()
+            self.combo_naming_mode.addItem("Prefiks / Sufiks do nazwy pierwotnej", "source_affix")
+            self.combo_naming_mode.addItem("Własna nazwa bazowa", "custom_base")
+            self.combo_naming_mode.addItem("Nazwa operacji / węzła", "node_title")
+
+            cur_n_mode = self.step.get('naming_mode', 'source_affix')
+            idx_n = self.combo_naming_mode.findData(cur_n_mode)
+            if idx_n >= 0:
+                self.combo_naming_mode.setCurrentIndex(idx_n)
+            self.form.addRow("Format nazewnictwa widm:", self.combo_naming_mode)
+
+            # Domyślnie prefiks = 'proc_', sufiks = pusty
+            self.ent_prefix = QLineEdit(self.step.get('name_prefix', 'proc_'))
+            self.ent_prefix.setPlaceholderText("np. proc_, corr_")
+            self.form.addRow("Prefiks:", self.ent_prefix)
+
+            self.ent_suffix = QLineEdit(self.step.get('name_suffix', ''))
+            self.ent_suffix.setPlaceholderText("np. _asls, _sub (opcjonalnie)")
+            self.form.addRow("Sufiks:", self.ent_suffix)
+
+            self.ent_custom_base = QLineEdit(self.step.get('custom_name', 'Widmo'))
+            self.form.addRow("Własna nazwa bazowa:", self.ent_custom_base)
+
+            # Podgląd na żywo formatu nazwy
+            self.lbl_name_preview = QLabel()
+            self.lbl_name_preview.setStyleSheet("color: #48cae4; font-weight: bold; font-size: 11px;")
+            self.form.addRow("Podgląd formatu:", self.lbl_name_preview)
+
+            def _update_naming_visibility():
+                mode = self.combo_naming_mode.currentData()
+                is_affix = (mode == "source_affix")
+                is_custom = (mode == "custom_base")
+
+                self.ent_prefix.setEnabled(is_affix or is_custom)
+                self.ent_suffix.setEnabled(is_affix or is_custom)
+                self.ent_custom_base.setEnabled(is_custom)
+
+                pfx = self.ent_prefix.text()
+                sfx = self.ent_suffix.text()
+                c_base = self.ent_custom_base.text().strip() or "Widmo"
+
+                if mode == "source_affix":
+                    self.lbl_name_preview.setText(f"próbka_01 ➔ {pfx}próbka_01{sfx}")
+                elif mode == "custom_base":
+                    self.lbl_name_preview.setText(f"próbka_01 ➔ {pfx}{c_base}_1{sfx}")
+                else:
+                    self.lbl_name_preview.setText("próbka_01 ➔ [Nazwa węzła]")
+
+            self.combo_naming_mode.currentIndexChanged.connect(_update_naming_visibility)
+            self.ent_prefix.textChanged.connect(_update_naming_visibility)
+            self.ent_suffix.textChanged.connect(_update_naming_visibility)
+            self.ent_custom_base.textChanged.connect(_update_naming_visibility)
+            _update_naming_visibility()
 
         # =====================================================================
         # 9. PRZELICZENIA FOTOMETRYCZNE
@@ -662,11 +715,19 @@ class NodeParamDialog(QDialog):
             self.step['n_multiplier'] = n_mult
             self.step['name'] = f"HDO Fit (N={n_mult:.2f})"
 
-        elif stype == 'output_window':
-            wname = self.ent_win_name.text().strip() or "Skorygowane"
-            self.step['window_name'] = wname
-            self.step['mode'] = self.combo_mode.currentData()
-            self.step['name'] = f"🗂️ Okno: {wname}"
+        elif stype in ('output_window', 'output'):
+            self.step['naming_mode'] = self.combo_naming_mode.currentData()
+            self.step['name_prefix'] = self.ent_prefix.text()
+            self.step['name_suffix'] = self.ent_suffix.text()
+            self.step['custom_name'] = self.ent_custom_base.text().strip()
+
+            if stype == 'output_window':
+                wname = self.ent_win_name.text().strip() or "Skorygowane"
+                self.step['window_name'] = wname
+                self.step['mode'] = self.combo_mode.currentData()
+                self.step['name'] = f"🗂️ Okno: {wname}"
+            else:
+                self.step['name'] = "💾 Zapis Wyniku"
 
         elif stype == 'photometry':
             mode = self.combo_photo.currentData()

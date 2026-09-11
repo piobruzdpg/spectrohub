@@ -197,6 +197,8 @@ def convolve_dft_sticks(freqs: np.ndarray, intens: np.ndarray, target_x: np.ndar
 class DAGEvaluator:
     """Silnik ewaluacji potoku z routingiem wieloportowym, chemometrią macierzową i dekompozycją HDO."""
 
+
+
     @staticmethod
     def topological_sort(nodes: list) -> Tuple[Optional[list], bool]:
         adj = {n: [] for n in nodes}
@@ -229,8 +231,16 @@ class DAGEvaluator:
     @staticmethod
     def evaluate_dag(ordered_nodes: list, default_x: np.ndarray, default_y: np.ndarray,
                      session_spectra: Dict[str, SpectrumData],
-                     is_execution: bool = False) -> Dict[Tuple[Any, str], Tuple[Optional[np.ndarray], Optional[np.ndarray]]]:
+                     is_execution: bool = False) -> Tuple[
+        Dict[Tuple[Any, str], Tuple[Optional[np.ndarray], Optional[np.ndarray]]], Dict[Tuple[Any, str], List[str]]]:
+        """
+        Ewaluuje acykliczny graf DAG w zadanym porządku topologicznym.
+        Zwraca:
+            - port_results: {(node, port_id): (X_array, Y_array)}
+            - port_names:   {(node, port_id): [nazwa_1, nazwa_2, ...]} (nazwy pierwotne widm w strumieniu)
+        """
         port_results: Dict[Tuple[Any, str], Tuple[Optional[np.ndarray], Optional[np.ndarray]]] = {}
+        port_names: Dict[Tuple[Any, str], List[str]] = {}
 
         def get_source_data(in_port) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
             if in_port and in_port.connections:
@@ -240,10 +250,20 @@ class DAGEvaluator:
                     return port_results.get(key, (None, None))
             return None, None
 
+        def get_source_names(in_port) -> List[str]:
+            if in_port and in_port.connections:
+                conn = in_port.connections[0]
+                if conn.out_port and conn.out_port.node_item:
+                    key = (conn.out_port.node_item, conn.out_port.port_id)
+                    return port_names.get(key, [])
+            return []
+
         for node in ordered_nodes:
             ntype = node.node_type
 
-            # 1. ŹRÓDŁO DANYCH (KONFIGUROWALNY WĘZEŁ WEJŚCIOWY)
+            # =================================================================
+            # 1. ŹRÓDŁO DANYCH (WĘZEŁ WEJŚCIOWY)
+            # =================================================================
             if ntype == "input":
                 source_mode = node.step_data.get('source_mode', 'active')
 
@@ -252,37 +272,53 @@ class DAGEvaluator:
                     spec = session.get_spectrum(spec_name)
                     if spec:
                         port_results[(node, "out")] = (spec.wavenumbers.copy(), spec.intensities.copy())
+                        port_names[(node, "out")] = [spec.name]
                     else:
                         port_results[(node, "out")] = (default_x.copy(), default_y.copy())
+                        port_names[(node, "out")] = ["Widmo"]
 
                 elif source_mode == 'visible':
                     visible = session.get_pipeline_target_spectra()
                     if len(visible) >= 2:
                         ref_wn = visible[0].wavenumbers
                         cols = []
+                        names = []
                         for s in visible:
-                            xw, yw = (s.wavenumbers[::-1], s.intensities[::-1]) if s.wavenumbers[0] > s.wavenumbers[-1] else (s.wavenumbers, s.intensities)
+                            xw, yw = (s.wavenumbers[::-1], s.intensities[::-1]) if s.wavenumbers[0] > s.wavenumbers[
+                                -1] else (s.wavenumbers, s.intensities)
                             cols.append(np.interp(ref_wn, xw, yw))
+                            names.append(s.name)
                         port_results[(node, "out")] = (ref_wn.copy(), np.column_stack(cols))
+                        port_names[(node, "out")] = names
                     elif len(visible) == 1:
                         port_results[(node, "out")] = (visible[0].wavenumbers.copy(), visible[0].intensities.copy())
+                        port_names[(node, "out")] = [visible[0].name]
                     else:
                         port_results[(node, "out")] = (default_x.copy(), default_y.copy())
+                        port_names[(node, "out")] = ["Widmo"]
 
                 elif source_mode == 'series':
                     if session.active_series:
-                        port_results[(node, "out")] = (session.active_series.wavenumbers.copy(), session.active_series.get_matrix_2d().copy())
+                        mat = session.active_series.get_matrix_2d()
+                        port_results[(node, "out")] = (session.active_series.wavenumbers.copy(), mat.copy())
+                        port_names[(node, "out")] = [f"{session.active_series.name}_f{i + 1}" for i in
+                                                     range(mat.shape[1])]
                     else:
                         port_results[(node, "out")] = (default_x.copy(), default_y.copy())
+                        port_names[(node, "out")] = ["Seria"]
 
                 else:
                     active = session.active_spectrum
                     if active and len(active.wavenumbers) > 2:
                         port_results[(node, "out")] = (active.wavenumbers.copy(), active.intensities.copy())
+                        port_names[(node, "out")] = [active.name]
                     else:
                         port_results[(node, "out")] = (default_x.copy(), default_y.copy())
+                        port_names[(node, "out")] = ["Aktywne"]
 
+            # =================================================================
             # 2. WIDMA REFERENCYJNE Z PROJEKTU (OGÓLNE I ATM)
+            # =================================================================
             elif ntype == "spectrum_select":
                 selected = node.step_data.get('selected_spectra', [])
                 if not selected and node.step_data.get('selected_spectrum'):
@@ -293,17 +329,23 @@ class DAGEvaluator:
                 if valid_specs:
                     ref_x = valid_specs[0].wavenumbers.copy()
                     cols = []
+                    names = []
                     for s in valid_specs:
                         sx, sy = s.wavenumbers, s.intensities
                         sx_s, sy_s = (sx[::-1], sy[::-1]) if sx[0] > sx[-1] else (sx, sy)
                         cols.append(np.interp(ref_x, sx_s, sy_s))
+                        names.append(s.name)
 
                     y_out = np.column_stack(cols) if len(cols) > 1 else cols[0]
                     port_results[(node, "out")] = (ref_x, y_out)
+                    port_names[(node, "out")] = names
                 else:
                     port_results[(node, "out")] = (default_x.copy(), np.zeros_like(default_x))
+                    port_names[(node, "out")] = ["Ref"]
 
+            # =================================================================
             # 3. HDO: WIDMO SKŁADOWE ZE SKALAREM (c · W_i)
+            # =================================================================
             elif ntype == "hdo_spectrum_scaled":
                 sel_name = node.step_data.get('selected_spectrum', '')
                 scale = float(node.step_data.get('scale', 1.0))
@@ -315,10 +357,14 @@ class DAGEvaluator:
                     sx_s, sy_s = (sx[::-1], sy[::-1]) if sx[0] > sx[-1] else (sx, sy)
                     y_interp = np.interp(default_x, sx_s, sy_s)
                     port_results[(node, "out")] = (default_x.copy(), y_interp)
+                    port_names[(node, "out")] = [sel_name]
                 else:
                     port_results[(node, "out")] = (default_x.copy(), np.zeros_like(default_x))
+                    port_names[(node, "out")] = ["Widmo Skalowane"]
 
+            # =================================================================
             # 4. HDO: PASMO SYNTETYCZNE
+            # =================================================================
             elif ntype == "synthetic_peak":
                 sh = node.step_data.get('shape', 'gxl')
                 c = float(node.step_data.get('center', 1650.0))
@@ -327,14 +373,23 @@ class DAGEvaluator:
                 f = float(node.step_data.get('shape_param', 0.5))
                 y_peak = _generate_synthetic_peak(default_x, shape=sh, center=c, amp=a, width=w, shape_param=f)
                 port_results[(node, "out")] = (default_x.copy(), y_peak)
+                port_names[(node, "out")] = [node.step_data.get('name', f"Pik {sh.upper()}")]
 
+            # =================================================================
             # 5. HDO: PARAMETRY MONTE CARLO
+            # =================================================================
             elif ntype == "mc_params":
                 port_results[(node, "out_mc")] = (np.array([1.0]), np.array([1.0]))
+                port_names[(node, "out_mc")] = ["MC"]
 
+            # =================================================================
             # 6. HDO: SOLWER DEKOMPOZYCJI HDO FIT
+            # =================================================================
             elif ntype == "hdo_decomposition":
                 data_tar = get_source_data(node.in_ports.get("in_target"))
+                tar_names = get_source_names(node.in_ports.get("in_target"))
+                target_name = tar_names[0] if tar_names else "W0"
+
                 target_x, target_y = data_tar if data_tar[0] is not None else (default_x.copy(), default_y.copy())
                 target_y_1d = target_y[:, 0] if target_y.ndim == 2 else target_y
 
@@ -390,7 +445,7 @@ class DAGEvaluator:
                 if len(bases_list) > 0 or n_peaks > 0:
                     try:
                         if is_execution:
-                            # 1. PEŁNE WYKONANIE: Wieloprocesowy Monte Carlo
+                            # 1. PEŁNE WYKONANIE: Monte Carlo
                             results = HDOFitEngine.run_monte_carlo(
                                 wavenb=target_x,
                                 target=w0_target,
@@ -404,10 +459,11 @@ class DAGEvaluator:
                             )
                             fit_y = results['fitted_curve']
                             excess_res = results['excess_residual']
-                            comps_y = np.column_stack(results['scaled_components']) if results['scaled_components'] else np.zeros_like(target_x)
-                            peaks_y = np.column_stack(results['peaks_curves']) if results['peaks_curves'] else np.zeros_like(target_x)
+                            comps_y = np.column_stack(results['scaled_components']) if results[
+                                'scaled_components'] else np.zeros_like(target_x)
+                            peaks_y = np.column_stack(results['peaks_curves']) if results[
+                                'peaks_curves'] else np.zeros_like(target_x)
 
-                            # Zapis metryk do kroku noda (dla raportu i nazewnictwa)
                             node.step_data['fit_metrics'] = {
                                 'coefficients': results['coefficients'],
                                 'base_names': base_names,
@@ -416,7 +472,7 @@ class DAGEvaluator:
                                 'chi2_red': results['chi2_red']
                             }
                         else:
-                            # 2. BŁYSKAWICZNY PODGLĄD NA ŻYWO (Preview): OLS w ułamku ms
+                            # 2. PODGLĄD NA ŻYWO (Preview): OLS
                             k_comps = len(bases_list)
                             base_mat = np.vstack(bases_list) if k_comps > 0 else np.empty((0, len(target_x)))
                             total_p = 3 + k_comps + 4 * n_peaks
@@ -442,8 +498,7 @@ class DAGEvaluator:
                             fit_y = evaluate_total_fit(res_fast.x, target_x, base_mat, n_peaks, baseline_active)
 
                             sum_comps = np.zeros_like(target_x)
-                            scaled_c = []
-                            extracted_c = []
+                            scaled_c, extracted_c = [], []
                             for i in range(k_comps):
                                 c_val = float(res_fast.x[3 + i])
                                 extracted_c.append(c_val)
@@ -455,7 +510,9 @@ class DAGEvaluator:
                             p_curves = []
                             for j in range(n_peaks):
                                 pos = 3 + k_comps + j * 4
-                                p_curves.append(gxl_peak(target_x, res_fast.x[pos], res_fast.x[pos + 1], res_fast.x[pos + 2], res_fast.x[pos + 3]))
+                                p_curves.append(
+                                    gxl_peak(target_x, res_fast.x[pos], res_fast.x[pos + 1], res_fast.x[pos + 2],
+                                             res_fast.x[pos + 3]))
 
                             comps_y = np.column_stack(scaled_c) if scaled_c else np.zeros_like(target_x)
                             peaks_y = np.column_stack(p_curves) if p_curves else np.zeros_like(target_x)
@@ -492,39 +549,59 @@ class DAGEvaluator:
                     port_results[(node, "out_comps")] = (target_x.copy(), np.zeros_like(target_x))
                     port_results[(node, "out_peaks")] = (target_x.copy(), np.zeros_like(target_x))
 
+                port_names[(node, "out_fit")] = [target_name]
+                port_names[(node, "out_res")] = [target_name]
+                port_names[(node, "out_fit_res")] = [target_name]
+                port_names[(node, "out_comps")] = base_names if base_names else [f"Comp_{i + 1}" for i in
+                                                                                 range(len(bases_list))]
+                port_names[(node, "out_peaks")] = [f"Pik_{i + 1}" for i in range(n_peaks)]
+
+            # =================================================================
             # 7. ZBIERACZ / MUX (MERGE SPECTRA W MACIERZ 2D)
+            # =================================================================
             elif ntype == "merge_spectra":
                 in_p = node.in_ports.get("in")
                 sources = []
+                collected_names = []
                 if in_p and in_p.connections:
                     for conn in in_p.connections:
                         if conn.out_port and conn.out_port.node_item:
                             src_k = (conn.out_port.node_item, conn.out_port.port_id)
                             ds = port_results.get(src_k, (None, None))
+                            ns = port_names.get(src_k, [])
                             if ds[0] is not None and ds[1] is not None:
-                                sources.append(ds)
+                                sources.append((ds, ns))
 
                 if sources:
-                    ref_x = sources[0][0]
+                    ref_x = sources[0][0][0]
                     cols = []
-                    for sx, sy in sources:
+                    for (sx, sy), names in sources:
                         sx_s = sx[::-1] if sx[0] > sx[-1] else sx
                         if sy.ndim == 2:
                             for c in range(sy.shape[1]):
                                 col_data = sy[::-1, c] if sx[0] > sx[-1] else sy[:, c]
                                 cols.append(np.interp(ref_x, sx_s, col_data))
+                                collected_names.append(
+                                    names[c] if c < len(names) else f"Widmo_{len(collected_names) + 1}")
                         else:
                             col_data = sy[::-1] if sx[0] > sx[-1] else sy
                             cols.append(np.interp(ref_x, sx_s, col_data))
+                            collected_names.append(names[0] if names else f"Widmo_{len(collected_names) + 1}")
 
                     combined_y = np.column_stack(cols)
                     port_results[(node, "out")] = (ref_x.copy(), combined_y)
+                    port_names[(node, "out")] = collected_names
                 else:
                     port_results[(node, "out")] = (default_x.copy(), default_y.copy())
+                    port_names[(node, "out")] = ["Mux"]
 
+            # =================================================================
             # 8. CHEMOMETRIA: ODSZUMIANIE SVD / PCA RANK-K
+            # =================================================================
             elif ntype == "svd_denoise":
                 data_in = get_source_data(node.in_ports.get("in"))
+                in_names = get_source_names(node.in_ports.get("in"))
+
                 if data_in[0] is not None:
                     curr_x, curr_y = data_in
                     k = int(node.step_data.get('k', 2))
@@ -539,6 +616,9 @@ class DAGEvaluator:
                         port_results[(node, "out")] = (curr_x.copy(), res['dr'])
                         port_results[(node, "out_res")] = (curr_x.copy(), res['residuals'])
                         port_results[(node, "out_scores")] = (x_samples, scores)
+                        port_names[(node, "out")] = in_names
+                        port_names[(node, "out_res")] = in_names
+                        port_names[(node, "out_scores")] = [f"Score_PC{i + 1}" for i in range(scores.shape[1])]
                     else:
                         ref_mat = None
                         if session.active_series:
@@ -546,7 +626,13 @@ class DAGEvaluator:
                         else:
                             vis = session.get_pipeline_target_spectra()
                             if len(vis) >= 2:
-                                ref_mat = np.column_stack([np.interp(curr_x, s.wavenumbers[::-1] if s.wavenumbers[0] > s.wavenumbers[-1] else s.wavenumbers, s.intensities[::-1] if s.wavenumbers[0] > s.wavenumbers[-1] else s.intensities) for s in vis])
+                                ref_mat = np.column_stack([np.interp(curr_x, s.wavenumbers[::-1] if s.wavenumbers[0] >
+                                                                                                    s.wavenumbers[
+                                                                                                        -1] else s.wavenumbers,
+                                                                     s.intensities[::-1] if s.wavenumbers[0] >
+                                                                                            s.wavenumbers[
+                                                                                                -1] else s.intensities)
+                                                           for s in vis])
 
                         if ref_mat is not None and ref_mat.shape[1] >= 2:
                             k_eff = min(k, ref_mat.shape[0], ref_mat.shape[1])
@@ -561,18 +647,31 @@ class DAGEvaluator:
                             port_results[(node, "out")] = (curr_x.copy(), y_recon)
                             port_results[(node, "out_res")] = (curr_x.copy(), curr_y - y_recon)
                             port_results[(node, "out_scores")] = (np.array([1.0]), np.array([1.0]))
+                            port_names[(node, "out")] = in_names
+                            port_names[(node, "out_res")] = in_names
+                            port_names[(node, "out_scores")] = ["Score_PC1"]
                         else:
                             port_results[(node, "out")] = (curr_x.copy(), curr_y.copy())
                             port_results[(node, "out_res")] = (curr_x.copy(), np.zeros_like(curr_y))
                             port_results[(node, "out_scores")] = (np.array([1.0]), np.array([1.0]))
+                            port_names[(node, "out")] = in_names
+                            port_names[(node, "out_res")] = in_names
+                            port_names[(node, "out_scores")] = ["Score_PC1"]
                 else:
                     port_results[(node, "out")] = (None, None)
                     port_results[(node, "out_res")] = (None, None)
                     port_results[(node, "out_scores")] = (None, None)
+                    port_names[(node, "out")] = []
+                    port_names[(node, "out_res")] = []
+                    port_names[(node, "out_scores")] = []
 
+            # =================================================================
             # 9. CHEMOMETRIA: DEKOMPOZYCJA MCR-ALS / SPEXFA
+            # =================================================================
             elif ntype == "mcr_decompose":
                 data_in = get_source_data(node.in_ports.get("in"))
+                in_names = get_source_names(node.in_ports.get("in"))
+
                 if data_in[0] is not None:
                     curr_x, curr_y = data_in
                     k = int(node.step_data.get('k', 2))
@@ -585,7 +684,13 @@ class DAGEvaluator:
                     else:
                         vis = session.get_pipeline_target_spectra()
                         if len(vis) >= 2:
-                            target_mat = np.column_stack([np.interp(curr_x, s.wavenumbers[::-1] if s.wavenumbers[0] > s.wavenumbers[-1] else s.wavenumbers, s.intensities[::-1] if s.wavenumbers[0] > s.wavenumbers[-1] else s.intensities) for s in vis])
+                            target_mat = np.column_stack([np.interp(curr_x, s.wavenumbers[::-1] if s.wavenumbers[0] >
+                                                                                                   s.wavenumbers[
+                                                                                                       -1] else s.wavenumbers,
+                                                                    s.intensities[::-1] if s.wavenumbers[0] >
+                                                                                           s.wavenumbers[
+                                                                                               -1] else s.intensities)
+                                                          for s in vis])
                         else:
                             target_mat = None
 
@@ -612,28 +717,50 @@ class DAGEvaluator:
 
                             port_results[(node, "out")] = (curr_x.copy(), pure_spec if curr_y.ndim == 2 else spark_y)
                             port_results[(node, "out_conc")] = (x_samples, pure_conc)
-                            port_results[(node, "out_recon")] = (curr_x.copy(), dr if curr_y.ndim == 2 else (dr[:, 0] if dr.ndim == 2 else dr))
-                            port_results[(node, "out_res")] = (curr_x.copy(), residuals if curr_y.ndim == 2 else (residuals[:, 0] if residuals.ndim == 2 else residuals))
+                            port_results[(node, "out_recon")] = (curr_x.copy(), dr if curr_y.ndim == 2 else (
+                                dr[:, 0] if dr.ndim == 2 else dr))
+                            port_results[(node, "out_res")] = (curr_x.copy(), residuals if curr_y.ndim == 2 else (
+                                residuals[:, 0] if residuals.ndim == 2 else residuals))
+
+                            port_names[(node, "out")] = [f"MCR_Składnik_{i + 1}" for i in range(k_eff)]
+                            port_names[(node, "out_conc")] = [f"Stężenie_C{i + 1}" for i in range(k_eff)]
+                            port_names[(node, "out_recon")] = in_names
+                            port_names[(node, "out_res")] = in_names
                         except Exception as e:
                             logger.warning(f"Błąd kalkulacji MCR: {e}")
                             port_results[(node, "out")] = (curr_x.copy(), curr_y.copy())
                             port_results[(node, "out_conc")] = (np.array([1.0]), np.array([1.0]))
                             port_results[(node, "out_recon")] = (curr_x.copy(), curr_y.copy())
                             port_results[(node, "out_res")] = (curr_x.copy(), np.zeros_like(curr_y))
+                            port_names[(node, "out")] = in_names
+                            port_names[(node, "out_conc")] = ["C1"]
+                            port_names[(node, "out_recon")] = in_names
+                            port_names[(node, "out_res")] = in_names
                     else:
                         port_results[(node, "out")] = (curr_x.copy(), curr_y.copy())
                         port_results[(node, "out_conc")] = (np.array([1.0]), np.array([1.0]))
                         port_results[(node, "out_recon")] = (curr_x.copy(), curr_y.copy())
                         port_results[(node, "out_res")] = (curr_x.copy(), np.zeros_like(curr_y))
+                        port_names[(node, "out")] = in_names
+                        port_names[(node, "out_conc")] = ["C1"]
+                        port_names[(node, "out_recon")] = in_names
+                        port_names[(node, "out_res")] = in_names
                 else:
                     port_results[(node, "out")] = (None, None)
                     port_results[(node, "out_conc")] = (None, None)
                     port_results[(node, "out_recon")] = (None, None)
                     port_results[(node, "out_res")] = (None, None)
+                    port_names[(node, "out")] = []
+                    port_names[(node, "out_conc")] = []
+                    port_names[(node, "out_recon")] = []
+                    port_names[(node, "out_res")] = []
 
+            # =================================================================
             # 10. CHEMOMETRIA: SKALOWANIA
+            # =================================================================
             elif ntype == "matrix_scaling":
                 data_in = get_source_data(node.in_ports.get("in"))
+                in_names = get_source_names(node.in_ports.get("in"))
                 if data_in[0] is not None:
                     curr_x, curr_y = data_in
                     st = node.step_data.get('scale_type', 'mean_center')
@@ -652,10 +779,14 @@ class DAGEvaluator:
                         port_results[(node, "out")] = (curr_x.copy(), scaled_y)
                     else:
                         port_results[(node, "out")] = (curr_x.copy(), curr_y.copy())
+                    port_names[(node, "out")] = in_names
                 else:
                     port_results[(node, "out")] = (None, None)
+                    port_names[(node, "out")] = []
 
+            # =================================================================
             # 11. SPLOT PASM DFT
+            # =================================================================
             elif ntype == "dft_broadener":
                 dft_name = node.step_data.get('dft_name', '')
                 scale = float(node.step_data.get('scale_factor', 0.965))
@@ -672,20 +803,29 @@ class DAGEvaluator:
                     port_results[(node, "out")] = (grid_x.copy(), y_conv)
                 else:
                     port_results[(node, "out")] = (grid_x.copy(), np.zeros_like(grid_x))
+                port_names[(node, "out")] = [dft_name if dft_name else "DFT"]
 
+            # =================================================================
             # 12. FOTOMETRIA
+            # =================================================================
             elif ntype == "photometry":
                 data_in = get_source_data(node.in_ports.get("in"))
+                in_names = get_source_names(node.in_ports.get("in"))
                 if data_in[0] is not None:
                     mode = node.step_data.get('photo_mode', 'tpct_to_a')
                     res_y = apply_photometry_conversion(data_in[1], mode)
                     port_results[(node, "out")] = (data_in[0].copy(), res_y)
+                    port_names[(node, "out")] = in_names
                 else:
                     port_results[(node, "out")] = (None, None)
+                    port_names[(node, "out")] = []
 
+            # =================================================================
             # 13. LINIE BAZOWE
+            # =================================================================
             elif ntype in ("asls", "airpls", "poly_bl", "linear_bl"):
                 data_in = get_source_data(node.in_ports.get("in"))
+                in_names = get_source_names(node.in_ports.get("in"))
                 if data_in[0] is not None:
                     curr_x, curr_y = data_in
                     bl = np.zeros_like(curr_y)
@@ -693,18 +833,23 @@ class DAGEvaluator:
                     if curr_y.ndim == 2:
                         for c in range(curr_y.shape[1]):
                             if ntype == "asls":
-                                bl[:, c] = prep.baseline_asls(curr_y[:, c], lam=node.step_data.get('lam', 1e5), p=node.step_data.get('p', 0.001))
+                                bl[:, c] = prep.baseline_asls(curr_y[:, c], lam=node.step_data.get('lam', 1e5),
+                                                              p=node.step_data.get('p', 0.001))
                             elif ntype == "airpls":
-                                bl[:, c] = prep.baseline_airpls(curr_y[:, c], lam=node.step_data.get('lam', 1e5), n_iter=node.step_data.get('n_iter', 15))
+                                bl[:, c] = prep.baseline_airpls(curr_y[:, c], lam=node.step_data.get('lam', 1e5),
+                                                                n_iter=node.step_data.get('n_iter', 15))
                             elif ntype == "poly_bl":
-                                bl[:, c] = prep.baseline_polynomial(curr_y[:, c], curr_x, deg=node.step_data.get('deg', 3))
+                                bl[:, c] = prep.baseline_polynomial(curr_y[:, c], curr_x,
+                                                                    deg=node.step_data.get('deg', 3))
                             elif ntype == "linear_bl" and len(curr_x) >= 2:
                                 bl[:, c] = prep.baseline_linear(curr_x, curr_y[:, c], curr_x[0], curr_x[-1])
                     else:
                         if ntype == "asls":
-                            bl = prep.baseline_asls(curr_y, lam=node.step_data.get('lam', 1e5), p=node.step_data.get('p', 0.001))
+                            bl = prep.baseline_asls(curr_y, lam=node.step_data.get('lam', 1e5),
+                                                    p=node.step_data.get('p', 0.001))
                         elif ntype == "airpls":
-                            bl = prep.baseline_airpls(curr_y, lam=node.step_data.get('lam', 1e5), n_iter=node.step_data.get('n_iter', 15))
+                            bl = prep.baseline_airpls(curr_y, lam=node.step_data.get('lam', 1e5),
+                                                      n_iter=node.step_data.get('n_iter', 15))
                         elif ntype == "poly_bl":
                             bl = prep.baseline_polynomial(curr_y, curr_x, deg=node.step_data.get('deg', 3))
                         elif ntype == "linear_bl" and len(curr_x) >= 2:
@@ -713,13 +858,20 @@ class DAGEvaluator:
                     corr_y = curr_y - bl
                     port_results[(node, "out")] = (curr_x.copy(), corr_y)
                     port_results[(node, "out_bl")] = (curr_x.copy(), bl)
+                    port_names[(node, "out")] = in_names
+                    port_names[(node, "out_bl")] = in_names
                 else:
                     port_results[(node, "out")] = (None, None)
                     port_results[(node, "out_bl")] = (None, None)
+                    port_names[(node, "out")] = []
+                    port_names[(node, "out_bl")] = []
 
+            # =================================================================
             # 14. VAPORFIT
+            # =================================================================
             elif ntype == "vaporfit":
                 data_sig = get_source_data(node.in_ports.get("in_signal"))
+                in_names = get_source_names(node.in_ports.get("in_signal"))
                 p_atm = node.in_ports.get("in_atm")
 
                 atm_sources = [c.out_port for c in p_atm.connections if
@@ -784,10 +936,16 @@ class DAGEvaluator:
                     port_results[(node, "out")] = (None, None)
                     port_results[(node, "out_atm")] = (None, None)
 
+                port_names[(node, "out")] = in_names
+                port_names[(node, "out_atm")] = in_names
+
+            # =================================================================
             # 15. WEWNĘTRZNY STANDARD (IS)
+            # =================================================================
             elif ntype == "internal_standard":
                 data_sig = get_source_data(node.in_ports.get("in_signal"))
                 data_ref = get_source_data(node.in_ports.get("in_ref"))
+                in_names = get_source_names(node.in_ports.get("in_signal"))
 
                 if data_sig[0] is not None and data_ref[0] is not None:
                     xs, ys = data_sig
@@ -820,10 +978,15 @@ class DAGEvaluator:
                     port_results[(node, "out")] = (data_sig[0].copy(), data_sig[1].copy())
                 else:
                     port_results[(node, "out")] = (None, None)
+                port_names[(node, "out")] = in_names
 
+            # =================================================================
             # 16. CAŁKOWANIE PASMA (INTEGRAL / KINETYKA)
+            # =================================================================
             elif ntype == "band_integrate":
                 data_in = get_source_data(node.in_ports.get("in"))
+                in_names = get_source_names(node.in_ports.get("in"))
+
                 if data_in[0] is not None:
                     curr_x, curr_y = data_in
                     min_w = float(node.step_data.get('min_wn', 1600.0))
@@ -847,6 +1010,7 @@ class DAGEvaluator:
                             areas.append(float(np.abs(_trapezoid(sy, sub_x))))
                         x_samples = np.arange(1, n_c + 1, dtype=np.float64)
                         port_results[(node, "out")] = (x_samples, np.array(areas, dtype=np.float64))
+                        port_names[(node, "out")] = in_names
                     else:
                         sy = curr_y[mask].copy()
                         if bl_mode == 'two_point' and len(sy) >= 2:
@@ -855,13 +1019,18 @@ class DAGEvaluator:
                             sy -= np.min(sy)
                         val = float(np.abs(_trapezoid(sy, sub_x)))
                         port_results[(node, "out")] = (np.array([min_w, max_w]), np.array([val, val]))
+                        port_names[(node, "out")] = in_names
                 else:
                     port_results[(node, "out")] = (None, None)
+                    port_names[(node, "out")] = []
 
+            # =================================================================
             # 17. OPERACJA DWUWIDMOWA (Z BROADCASTINGIEM 1D / 2D)
+            # =================================================================
             elif ntype == "math_op":
                 data_a = get_source_data(node.in_ports.get("in_a"))
                 data_b = get_source_data(node.in_ports.get("in_b"))
+                names_a = get_source_names(node.in_ports.get("in_a"))
 
                 if data_a[0] is not None and data_b[0] is not None:
                     xa, ya = data_a
@@ -882,10 +1051,14 @@ class DAGEvaluator:
                     k = float(node.step_data.get('k', 1.0))
 
                     def _calc_op(val_a, val_b):
-                        if op == 'sub': return val_a - k * val_b
-                        elif op == 'add': return val_a + k * val_b
-                        elif op == 'mul': return val_a * val_b
-                        elif op == 'div': return np.where(np.abs(val_b) > 1e-12, val_a / val_b, 0.0)
+                        if op == 'sub':
+                            return val_a - k * val_b
+                        elif op == 'add':
+                            return val_a + k * val_b
+                        elif op == 'mul':
+                            return val_a * val_b
+                        elif op == 'div':
+                            return np.where(np.abs(val_b) > 1e-12, val_a / val_b, 0.0)
                         return val_a - k * val_b
 
                     if ya.ndim == 2 and yb_interp.ndim == 1:
@@ -906,34 +1079,50 @@ class DAGEvaluator:
                         y_res = _calc_op(ya, yb_interp)
 
                     port_results[(node, "out")] = (xa.copy(), y_res)
+                    port_names[(node, "out")] = names_a
                 elif data_a[0] is not None:
                     port_results[(node, "out")] = (data_a[0].copy(), data_a[1].copy())
+                    port_names[(node, "out")] = names_a
                 else:
                     port_results[(node, "out")] = (None, None)
+                    port_names[(node, "out")] = []
 
+            # =================================================================
             # 18. TERMINAL STANDARDOWY (OUTPUT)
+            # =================================================================
             elif ntype == "output":
                 data_in = get_source_data(node.in_ports.get("in"))
+                in_names = get_source_names(node.in_ports.get("in"))
                 port_results[(node, "in")] = data_in
+                port_names[(node, "in")] = in_names
 
+            # =================================================================
             # 19. TERMINAL OKNA ROBOCZEGO (OUTPUT_WINDOW) — FAN-IN
+            # =================================================================
             elif ntype == "output_window":
                 in_p = node.in_ports.get("in")
                 all_sources = []
+                all_incoming_names = []
                 if in_p and in_p.connections:
                     for conn in in_p.connections:
                         if conn.out_port and conn.out_port.node_item:
                             src_k = (conn.out_port.node_item, conn.out_port.port_id)
                             ds = port_results.get(src_k, (None, None))
+                            ns = port_names.get(src_k, [])
                             if ds[0] is not None and ds[1] is not None:
                                 all_sources.append(ds)
+                                all_incoming_names.extend(ns)
 
                 if not all_sources:
                     port_results[(node, "in")] = (None, None)
                     port_results[(node, "out")] = (None, None)
+                    port_names[(node, "in")] = []
+                    port_names[(node, "out")] = []
                 elif len(all_sources) == 1:
                     port_results[(node, "in")] = all_sources[0]
                     port_results[(node, "out")] = all_sources[0]
+                    port_names[(node, "in")] = all_incoming_names
+                    port_names[(node, "out")] = all_incoming_names
                 else:
                     ref_x = all_sources[0][0]
                     cols = []
@@ -949,15 +1138,22 @@ class DAGEvaluator:
                     combined_y = np.column_stack(cols)
                     port_results[(node, "in")] = (ref_x.copy(), combined_y)
                     port_results[(node, "out")] = (ref_x.copy(), combined_y)
+                    port_names[(node, "in")] = all_incoming_names
+                    port_names[(node, "out")] = all_incoming_names
 
-            # 20. POZOSTAŁE FILTRY
+            # =================================================================
+            # 20. POZOSTAŁE FILTRY SEKWENCYJNE (Crop, AsLS, SG, SNV itd.)
+            # =================================================================
             else:
                 data_in = get_source_data(node.in_ports.get("in"))
+                in_names = get_source_names(node.in_ports.get("in"))
                 if data_in[0] is not None:
                     curr_x, curr_y = data_in
                     nx, ny = apply_single_step(curr_x, curr_y, node.step_data)
                     port_results[(node, "out")] = (nx, ny)
+                    port_names[(node, "out")] = in_names
                 else:
                     port_results[(node, "out")] = (None, None)
+                    port_names[(node, "out")] = []
 
-        return port_results
+        return port_results, port_names

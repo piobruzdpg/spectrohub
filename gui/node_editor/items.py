@@ -664,8 +664,9 @@ class NodeItem(QGraphicsItem):
         return super().itemChange(change, value)
 
     def mouseDoubleClickEvent(self, event):
-        if self.node_type in ("input", "math_op", "scalar_math", "vaporfit", "spectrum_select",
-                              "photometry", "dft_broadener", "output_window",
+        if self.node_type in ("input", "output", "output_window", "math_op", "scalar_math", "vaporfit",
+                              "spectrum_select",
+                              "photometry", "dft_broadener",
                               "svd_denoise", "mcr_decompose", "matrix_scaling",
                               "internal_standard", "band_integrate", "merge_spectra",
                               "hdo_spectrum_scaled", "synthetic_peak", "mc_params", "hdo_decomposition"):
@@ -691,15 +692,16 @@ class NodeItem(QGraphicsItem):
         if action == act_dup:
             if self.scene() and hasattr(self.scene(), 'dialog_owner'):
                 self.scene().dialog_owner.duplicate_node(self)
-        elif action == act_edit:
-            if self.node_type in ("input", "math_op", "scalar_math", "vaporfit", "spectrum_select",
-                                  "photometry", "dft_broadener", "output_window",
-                                  "svd_denoise", "mcr_decompose", "matrix_scaling",
-                                  "internal_standard", "band_integrate", "merge_spectra",
-                                  "hdo_spectrum_scaled", "synthetic_peak", "mc_params", "hdo_decomposition"):
-                dlg = NodeParamDialog(self)
-            else:
-                dlg = StepParamDialog(self.step_data)
+            elif action == act_edit:
+                if self.node_type in ("input", "output", "output_window", "math_op", "scalar_math", "vaporfit",
+                                      "spectrum_select",
+                                      "photometry", "dft_broadener",
+                                      "svd_denoise", "mcr_decompose", "matrix_scaling",
+                                      "internal_standard", "band_integrate", "merge_spectra",
+                                      "hdo_spectrum_scaled", "synthetic_peak", "mc_params", "hdo_decomposition"):
+                    dlg = NodeParamDialog(self)
+                else:
+                    dlg = StepParamDialog(self.step_data)
             if dlg.exec() == QDialog.Accepted and self.scene() and hasattr(self.scene(), 'dialog_owner'):
                 self.scene().dialog_owner.recalculate_graph_preview()
                 self.scene().dialog_owner.sync_state_to_session()
