@@ -1,6 +1,6 @@
 """
 core/models.py
-Kluczowe struktury danych spektroskopowych oraz metadane projektu dla SpectroHub.
+Kluczowe struktury danych spektroskopowych, tabele profili liczbowych oraz metadane projektu dla SpectroHub.
 """
 
 from dataclasses import dataclass, field
@@ -42,7 +42,7 @@ class ProjectMetadata:
     author: str = ""
     created_at: str = field(default_factory=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
     modified_at: str = field(default_factory=lambda: datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-    variant: str = "Standardowy"  # np. 'Surowy', 'Korekcja ATM', 'Po dekonwolucji', 'Publikacja'
+    variant: str = "Standardowy"
     description: str = ""
     notes: str = ""
 
@@ -68,6 +68,70 @@ class ProjectMetadata:
             description=d.get("description", ""),
             notes=d.get("notes", "")
         )
+
+
+@dataclass
+class DataTable:
+    """
+    Reprezentuje tabelę danych liczbowych (profile kinetyczne A(t), stężenia MCR C(t),
+    ładunki Scores PCA/SVD, parametry dekonwolucji itp.).
+    """
+    table_id: str
+    name: str
+    x_values: np.ndarray                 # Wektor osi X (czas, temperatura, nr próbki)
+    y_columns: Dict[str, np.ndarray]    # Słownik kolumn danych {etykieta: wektor_Y}
+    x_label: str = "Czas / Indeks"
+    y_label: str = "Wartość / Stężenie"
+    folder_id: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.x_values = np.asarray(self.x_values, dtype=np.float64)
+        for k, v in list(self.y_columns.items()):
+            self.y_columns[k] = np.asarray(v, dtype=np.float64)
+
+    @property
+    def n_rows(self) -> int:
+        return len(self.x_values)
+
+    @property
+    def n_cols(self) -> int:
+        return len(self.y_columns)
+
+    def clone(self, new_name: Optional[str] = None) -> 'DataTable':
+        """Tworzy niezależną kopię tabeli w pamięci RAM."""
+        import copy
+        return DataTable(
+            table_id=self.table_id,
+            name=new_name if new_name else self.name,
+            x_values=self.x_values.copy(),
+            y_columns={k: v.copy() for k, v in self.y_columns.items()},
+            x_label=self.x_label,
+            y_label=self.y_label,
+            folder_id=self.folder_id,
+            metadata=copy.deepcopy(self.metadata)
+        )
+
+    def to_tsv(self, decimal_comma: bool = True) -> str:
+        """Generuje ciąg znaków TSV gotowy do wklejenia w OriginLab lub MS Excel."""
+        header = [self.x_label] + list(self.y_columns.keys())
+        lines = ["\t".join(header)]
+        col_names = list(self.y_columns.keys())
+
+        for i in range(self.n_rows):
+            x_str = f"{self.x_values[i]:.6g}"
+            if decimal_comma:
+                x_str = x_str.replace('.', ',')
+            row = [x_str]
+            for c in col_names:
+                val = self.y_columns[c][i] if i < len(self.y_columns[c]) else np.nan
+                v_str = f"{val:.6g}"
+                if decimal_comma:
+                    v_str = v_str.replace('.', ',')
+                row.append(v_str)
+            lines.append("\t".join(row))
+
+        return "\n".join(lines)
 
 
 @dataclass
@@ -199,7 +263,7 @@ class GaussianData(SpectrumData):
     stick_freqs: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     stick_intens: np.ndarray = field(default_factory=lambda: np.array([], dtype=np.float64))
     ped_results: List[Dict[str, Any]] = field(default_factory=list)
-    hessian_source: str = "LOG"  # 'FCHK', 'LOG', 'ORCA_OUT'
+    hessian_source: str = "LOG"
     scale_factor: float = 1.0
     atomnos: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
     coords: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float64))

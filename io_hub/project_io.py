@@ -2,7 +2,7 @@
 io_hub/project_io.py
 Silnik zapisu i odczytu stanu projektu SpectroHub w kontenerowym formacie .shub (ZIP Bundle).
 Paczka zawiera:
-- project.json: manifest hierarchii, folderów, okien roboczych, potoku DAG i metadanych
+- project.json: manifest hierarchii, folderów, okien roboczych, tabel danych, potoku DAG i metadanych
 - arrays.npz: zoptymalizowany binarny zrzut tablic NumPy (float64) bez utraty precyzji
 """
 
@@ -15,11 +15,11 @@ from typing import Dict, Any, Optional, Tuple
 import numpy as np
 
 from core.session import ProjectSession
-from core.models import SpectrumData, SpectralSeries, GaussianData, ProjectMetadata, WindowFolder
+from core.models import SpectrumData, SpectralSeries, GaussianData, ProjectMetadata, WindowFolder, DataTable
 
 logger = logging.getLogger("SpectroHub")
 
-PROJECT_FORMAT_VERSION = "1.1.0"
+PROJECT_FORMAT_VERSION = "1.2.0"
 
 
 class ProjectBundleIO:
@@ -37,6 +37,7 @@ class ProjectBundleIO:
                 "metadata": session.metadata.to_dict(),
                 "active_context": session.active_context,
                 "active_window_id": session.active_window_id,
+                "active_table_id": session._active_table_id,
                 "active_spectrum_name": session.active_spectrum.name if session.active_spectrum else None,
                 "dag_state": dag_state or {},
                 "linear_pipeline": linear_pipeline or [],
@@ -46,7 +47,8 @@ class ProjectBundleIO:
                     "series": []
                 },
                 "folders": [f.to_dict() for f in session.folders.values()],
-                "windows": []
+                "windows": [],
+                "tables": []
             }
 
             # 1. Serializacja widm eksperymentalnych Magazynu
@@ -155,7 +157,27 @@ class ProjectBundleIO:
                     })
                 manifest["windows"].append(win_dict)
 
-            # 5. Bezpośredni zapis do archiwum ZIP
+            # 5. Serializacja Tabel Danych (DataTable)
+            for t_idx, (tbl_id, tbl) in enumerate(session.tables.items()):
+                arrays_dict[f"tbl_{t_idx}_x"] = tbl.x_values
+                col_keys = []
+                for c_idx, (c_name, c_data) in enumerate(tbl.y_columns.items()):
+                    k_c = f"tbl_{t_idx}_col_{c_idx}"
+                    arrays_dict[k_c] = c_data
+                    col_keys.append({"name": c_name, "key": k_c})
+
+                manifest["tables"].append({
+                    "table_id": tbl.table_id,
+                    "name": tbl.name,
+                    "folder_id": tbl.folder_id,
+                    "x_label": tbl.x_label,
+                    "y_label": tbl.y_label,
+                    "x_key": f"tbl_{t_idx}_x",
+                    "columns": col_keys,
+                    "metadata": tbl.metadata
+                })
+
+            # 6. Bezpośredni zapis do archiwum ZIP
             with zipfile.ZipFile(file_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zip_f:
                 manifest_bytes = json.dumps(manifest, indent=2, ensure_ascii=False).encode("utf-8")
                 zip_f.writestr("project.json", manifest_bytes)
@@ -278,7 +300,7 @@ class ProjectBundleIO:
                 session.add_series(s_obj, make_active=False)
                 session.set_series_visibility(itm["name"], itm.get("is_visible", True))
 
-            # 6. Odtworzenie folderów okien roboczych
+            # 6. Odtworzenie folderów okien roboczych i tabel
             for f_data in manifest_data.get("folders", []):
                 f_obj = WindowFolder.from_dict(f_data)
                 session._folders[f_obj.folder_id] = f_obj
@@ -315,11 +337,32 @@ class ProjectBundleIO:
                     if w_info.get("active_spectrum_name"):
                         session.set_window_active_spectrum(w_id, w_info["active_spectrum_name"])
 
-            # 8. Przywrócenie aktywnego kontekstu i aktywnego widma
+            # 8. Odtworzenie Tabel Danych (DataTable)
+            for t_data in manifest_data.get("tables", []):
+                x_vals = npz_data[t_data["x_key"]]
+                cols_dict = {}
+                for c_info in t_data["columns"]:
+                    cols_dict[c_info["name"]] = npz_data[c_info["key"]]
+
+                tbl = DataTable(
+                    table_id=t_data["table_id"],
+                    name=t_data["name"],
+                    x_values=x_vals,
+                    y_columns=cols_dict,
+                    x_label=t_data.get("x_label", "Czas / Indeks"),
+                    y_label=t_data.get("y_label", "Wartość / Stężenie"),
+                    folder_id=t_data.get("folder_id"),
+                    metadata=t_data.get("metadata", {})
+                )
+                session.add_table(tbl, make_active=False)
+
+            # 9. Przywrócenie aktywnego kontekstu
             act_ctx = manifest_data.get("active_context", "storage")
             session.set_context(act_ctx)
 
-            if act_ctx == "window" and manifest_data.get("active_window_id"):
+            if act_ctx == "table" and manifest_data.get("active_table_id"):
+                session.set_active_table(manifest_data["active_table_id"])
+            elif act_ctx == "window" and manifest_data.get("active_window_id"):
                 session.set_active_window(manifest_data["active_window_id"])
             elif manifest_data.get("active_spectrum_name"):
                 session.set_active_spectrum(manifest_data["active_spectrum_name"])

@@ -21,7 +21,7 @@ import matplotlib.ticker as ticker
 import matplotlib.cm as cm
 
 from core.session import session
-from core.models import SpectrumData, SpectralSeries
+from core.models import SpectrumData, SpectralSeries, DataTable
 from core.i18n import tr
 
 logger = logging.getLogger("SpectroHub")
@@ -91,6 +91,9 @@ class SpectroCanvas(QWidget):
         session.window_spectrum_removed.connect(self.redraw_all)
         session.window_visibility_changed.connect(self.redraw_all)
         session.context_changed.connect(self.redraw_all)
+
+        # Sygnały Tabel Danych
+        session.active_table_changed.connect(self._on_active_table_changed)
 
     def _apply_styling(self):
         for ax in (self.ax_main, self.ax_sub):
@@ -794,4 +797,65 @@ class SpectroCanvas(QWidget):
 
         self.initial_xlim = (np.max(wn), np.min(wn))
         self.initial_ylim = self.ax_main.get_ylim()
+        self.canvas.draw_idle()
+
+    def _on_active_table_changed(self, table):
+        if session.active_context == "table" and table is not None:
+            self.draw_table(table)
+
+    def draw_table(self, table: Optional[DataTable] = None):
+        """Renderuje profil liczbowy DataTable jako elegancki wykres punktowo-liniowy X-Y."""
+        if table is None:
+            table = session.active_table
+        if not table or table.n_rows == 0:
+            return
+
+        self._deconv_cache = None
+        self.kinetic_traces.clear()
+        self.last_kinetic_export_data = None
+        self.ax_main.cla()
+        self.ax_sub.cla()
+        self.ax_sub_top.cla()
+        self.ax_sub_top.set_visible(False)
+        self._apply_styling()
+
+        x = table.x_values
+        palette = ['#00e5ff', '#ee6c4d', '#2a9d8f', '#f4a261', '#e0aaff', '#ffd166', '#ff4d6d']
+
+        for idx, (col_name, y_vals) in enumerate(table.y_columns.items()):
+            col = palette[idx % len(palette)]
+            self.ax_main.plot(x, y_vals, 'o-', color=col, lw=1.6, markersize=4.5,
+                              alpha=0.9, label=col_name)
+
+        self.ax_main.set_xlabel(table.x_label, color="#dcdcdc", fontsize=10)
+        self.ax_main.set_ylabel(table.y_label, color="#dcdcdc", fontsize=10)
+        self.ax_main.grid(True, linestyle='--', alpha=0.3, color='#888888')
+
+        # Normalna, nieodwrócona oś X (wartości rosną w prawo)
+        min_x, max_x = float(np.min(x)), float(np.max(x))
+        dx = (max_x - min_x) * 0.04 if max_x > min_x else 0.5
+        self.ax_main.set_xlim(min_x - dx, max_x + dx)
+
+        all_y = [v for v in table.y_columns.values() if len(v) > 0]
+        if all_y:
+            concat_y = np.concatenate(all_y)
+            min_y, max_y = float(np.nanmin(concat_y)), float(np.nanmax(concat_y))
+            dy = max((max_y - min_y) * 0.08, 0.01)
+            self.ax_main.set_ylim(min_y - dy, max_y + dy)
+
+        self.ax_main.legend(loc='upper right', facecolor='#2b2b36', edgecolor='#4a4a5a',
+                            labelcolor='#ffffff', fontsize=8)
+
+        self.initial_xlim = self.ax_main.get_xlim()
+        self.initial_ylim = self.ax_main.get_ylim()
+
+        # Dolny panel informacyjny (bez emoji dla silnika fontów Matplotliba)
+        clean_name = table.name.replace("📊", "").strip()
+        self.ax_sub.set_ylabel("Status", color="#dcdcdc", fontsize=9)
+        self.ax_sub.text(
+            0.5, 0.5,
+            f"Tabela Danych: {clean_name}  |  {table.n_rows} punktów × {table.n_cols} serii",
+            color="#a8dadc", ha='center', va='center',
+            transform=self.ax_sub.transAxes, fontsize=10
+        )
         self.canvas.draw_idle()

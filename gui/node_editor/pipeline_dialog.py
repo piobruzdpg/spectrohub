@@ -23,7 +23,7 @@ from PySide6.QtCore import Qt, QPointF, QRectF, QTimer, QSettings, Signal
 from PySide6.QtGui import QPainter, QBrush, QColor, QPen
 
 from core.session import session
-from core.models import SpectrumData, SpectralSeries
+from core.models import SpectrumData, SpectralSeries, DataTable
 from gui.workspaces.ws_preprocessing import (
     ModifySpectrumCommand, BatchPipelineCommand,
     ModifySeriesCommand, AddBatchSpectraCommand
@@ -736,7 +736,10 @@ class NodePipelineDialog(QMainWindow):
                 ("💾 Zapis Wyniku (In-place / proc_*)", {'type': 'output', 'name': "Zapis standardowy"}),
                 ("🗂️ Kopiuj do okna roboczego (Multi-Input)",
                  {'type': 'output_window', 'name': "🗂️ Okno: Skorygowane", 'window_name': "Skorygowane",
-                  'mode': "create_new"})
+                  'mode': "create_new"}),
+                ("📊 Zapisz jako Tabelę / Profil",
+                 {'type': 'output_table', 'name': "📊 Tabela: Profil", 'table_name': "Profil",
+                  'x_label': "Czas / Indeks", 'y_label': "Wartość / Stężenie", 'folder_id': None})
             ],
             "Chemometria & Analiza Wielowymiarowa": [
                 ("📊 Odszumiacz SVD / PCA (Rank-k)",
@@ -1446,9 +1449,10 @@ class NodePipelineDialog(QMainWindow):
             QMessageBox.warning(self, "Błąd", "Wykryto zapętlenie w grafie (cykl). Potok musi być acykliczny.")
             return
 
-        terminals = [n for n in all_nodes if n.node_type in ("output", "output_window")]
+        terminals = [n for n in all_nodes if n.node_type in ("output", "output_window", "output_table")]
         if not terminals:
-            QMessageBox.warning(self, "Błąd", "Brak węzła końcowego ('Zapis Wyniku' lub 'Kopiuj do okna roboczego').")
+            QMessageBox.warning(self, "Błąd",
+                                "Brak węzła końcowego ('Zapis Wyniku', 'Kopiuj do okna roboczego' lub 'Zapisz jako Tabelę').")
             return
 
         self._clear_canvas_preview()
@@ -1488,6 +1492,59 @@ class NodePipelineDialog(QMainWindow):
                 progress_dialog.close()
 
             for term_node in terminals:
+                in_p = term_node.in_ports.get("in")
+                incoming_conns = in_p.connections if in_p else []
+                if not incoming_conns:
+                    continue
+
+                # =============================================================
+                # BRANCH A: TERMINAL TABELI DANYCH / PROFILI (DataTable)
+                # =============================================================
+                if term_node.node_type == "output_table":
+                    tbl_name = term_node.step_data.get("table_name", "Profil")
+                    target_folder_id = term_node.step_data.get("folder_id")
+                    x_lbl = term_node.step_data.get("x_label", "Czas / Indeks")
+                    y_lbl = term_node.step_data.get("y_label", "Wartość / Stężenie")
+
+                    collected_x = None
+                    y_cols = {}
+
+                    for conn in incoming_conns:
+                        src_node = conn.out_port.node_item
+                        src_port = conn.out_port.port_id
+                        new_x, new_y = res_map.get((src_node, src_port), (None, None))
+                        src_names = names_map.get((src_node, src_port), [])
+                        if new_x is None or new_y is None:
+                            continue
+
+                        if collected_x is None:
+                            collected_x = new_x.copy()
+
+                        if new_y.ndim == 2:
+                            for col in range(new_y.shape[1]):
+                                col_n = src_names[col] if col < len(src_names) else f"{src_node.title}_{col + 1}"
+                                y_cols[col_n] = new_y[:, col].copy()
+                        else:
+                            col_n = src_names[0] if src_names else src_node.title
+                            y_cols[col_n] = new_y.copy()
+
+                    if collected_x is not None and y_cols:
+                        new_table = DataTable(
+                            table_id="",
+                            name=tbl_name,
+                            x_values=collected_x,
+                            y_columns=y_cols,
+                            x_label=x_lbl,
+                            y_label=y_lbl,
+                            folder_id=target_folder_id,
+                            metadata={"dag_source": [n.title for n in ordered_nodes]}
+                        )
+                        session.add_table(new_table, make_active=True)
+                    continue
+
+                # =============================================================
+                # BRANCH B: TERMINALE WIDM (output_window oraz output)
+                # =============================================================
                 target_window_id = None
                 if term_node.node_type == "output_window":
                     win_name = term_node.step_data.get("window_name", "Skorygowane")
@@ -1501,7 +1558,6 @@ class NodePipelineDialog(QMainWindow):
                     if not target_window_id:
                         target_window_id = session.add_window(name=win_name)
 
-                # Zbiór używanych nazw dla zapewnienia unikalności
                 used_names = set()
                 if target_window_id and target_window_id in session.windows:
                     for s in session.windows[target_window_id].spectra.values():
@@ -1516,7 +1572,6 @@ class NodePipelineDialog(QMainWindow):
                     used_names.add(cand.lower())
                     return cand
 
-                # Parametry reguły nazewnictwa z węzła wyjściowego (domyślnie prefiks: 'proc_', sufiks: '')
                 naming_mode = term_node.step_data.get('naming_mode', 'source_affix')
                 prefix = term_node.step_data.get('name_prefix', 'proc_')
                 suffix = term_node.step_data.get('name_suffix', '')
@@ -1532,15 +1587,9 @@ class NodePipelineDialog(QMainWindow):
                             return f"{prefix}{c_base}_{idx + 1}{suffix}"
                         return f"{prefix}{c_base}{suffix}"
                     else:
-                        # tryb 'node_title' (kompatybilność wsteczna)
                         if total_count > 1:
                             return f"{fallback_title}_Comp_{idx + 1}"
                         return fallback_title
-
-                in_p = term_node.in_ports.get("in")
-                incoming_conns = in_p.connections if in_p else []
-                if not incoming_conns:
-                    continue
 
                 new_created = []
 
@@ -1554,7 +1603,7 @@ class NodePipelineDialog(QMainWindow):
 
                     branch_tag = f" [{src_node.title}]" if len(incoming_conns) > 1 else ""
 
-                    # Specjalna obsługa solwera HDO Fit (raportowanie R² i współczynników)
+                    # Specjalna obsługa solwera HDO Fit
                     if src_node.node_type == "hdo_decomposition":
                         metrics = src_node.step_data.get('fit_metrics', {})
                         r2_tag = f" (R²={metrics.get('r2', 0):.4f})" if 'r2' in metrics else ""
@@ -1607,7 +1656,7 @@ class NodePipelineDialog(QMainWindow):
                                 metadata={"source": "HDO Fit Residual", **metrics}
                             ))
 
-                    # Standardowe serie wielowidmowe (np. wsadowy Batch 2D, MCR, SVD)
+                    # Standardowe serie wielowidmowe
                     elif new_y.ndim == 2:
                         n_cols = new_y.shape[1]
                         for col in range(n_cols):
@@ -1636,7 +1685,6 @@ class NodePipelineDialog(QMainWindow):
                                 metadata={"dag_pipeline": [n.title for n in ordered_nodes], "orig_name": orig_n}
                             ))
                         else:
-                            # Terminal in-place: zapis do bieżącego aktywnego widma
                             if active:
                                 cmd = ModifySpectrumCommand(
                                     active, f"DAG: {raw_n}", active.intensities, new_y,
@@ -1646,7 +1694,6 @@ class NodePipelineDialog(QMainWindow):
                                 )
                                 session.undo_stack.push(cmd)
 
-                # Wrzucenie widm do wskazanego Okna Roboczego w ramach jednej komendy Undo
                 if term_node.node_type == "output_window" and new_created:
                     session.undo_stack.push(AddBatchSpectraCommand(
                         new_created,

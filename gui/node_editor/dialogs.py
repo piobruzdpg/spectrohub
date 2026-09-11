@@ -555,10 +555,36 @@ class NodeParamDialog(QDialog):
             lbl.setStyleSheet("color: #a8dadc; font-size: 12px; padding: 10px;")
             self.form.addRow(lbl)
 
+        # =====================================================================
+        # TERMINAL TABELI DANYCH (OUTPUT_TABLE)
+        # =====================================================================
+        elif stype == 'output_table':
+            self.ent_tbl_name = QLineEdit(self.step.get('table_name', 'Profil'))
+            self.form.addRow("Nazwa tabeli:", self.ent_tbl_name)
+
+            self.combo_folder = QComboBox()
+            self.combo_folder.addItem("📁 (Poziom główny / bez folderu)", None)
+            for fid, f in session.folders.items():
+                self.combo_folder.addItem(f"📁 {f.name}", fid)
+
+            cur_fid = self.step.get('folder_id')
+            idx_f = self.combo_folder.findData(cur_fid)
+            if idx_f >= 0:
+                self.combo_folder.setCurrentIndex(idx_f)
+            self.form.addRow("Docelowy folder:", self.combo_folder)
+
+            self.ent_x_lbl = QLineEdit(self.step.get('x_label', 'Czas / Indeks'))
+            self.form.addRow("Etykieta osi X:", self.ent_x_lbl)
+
+            self.ent_y_lbl = QLineEdit(self.step.get('y_label', 'Wartość / Stężenie'))
+            self.form.addRow("Etykieta osi Y:", self.ent_y_lbl)
+
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self._save_and_accept)
         btns.rejected.connect(self.reject)
         layout.addWidget(btns)
+
+
 
     def _select_all_atm_specs(self):
         for i in range(self.list_specs.count()):
@@ -816,5 +842,13 @@ class NodeParamDialog(QDialog):
 
         elif stype == 'merge_spectra':
             self.step['name'] = "Mux: Zbieracz widm"
+
+        elif stype == 'output_table':
+            tname = self.ent_tbl_name.text().strip() or "Profil"
+            self.step['table_name'] = tname
+            self.step['folder_id'] = self.combo_folder.currentData()
+            self.step['x_label'] = self.ent_x_lbl.text().strip()
+            self.step['y_label'] = self.ent_y_lbl.text().strip()
+            self.step['name'] = f"📊 Tabela: {tname}"
 
         self.accept()

@@ -9,11 +9,11 @@ from typing import List, Tuple, Optional
 from PySide6.QtCore import Qt, QThreadPool, QRunnable, Slot
 from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QMenu, QAbstractItemView,
-    QInputDialog, QFileDialog, QMessageBox
+    QInputDialog, QFileDialog, QMessageBox, QApplication
 )
 
 from core.session import session
-from core.models import GaussianData, SpectrumData, WorkspaceWindow
+from core.models import GaussianData, SpectrumData, WorkspaceWindow, DataTable
 from io_hub.dispatcher import SpectrumImportDispatcher
 from io_hub.export_manager import ExportManager
 from core.i18n import tr
@@ -101,6 +101,10 @@ class ProjectTreeWidget(QTreeWidget):
         for win_id, win in session.windows.items():
             self._create_window_item(win_id, win.name, win.folder_id)
 
+        # Inicjalizacja tabel danych z sesji
+        for t_id, tbl in session.tables.items():
+            self._create_table_item(t_id, tbl.name, tbl.folder_id)
+
     def _connect_signals(self):
         self.itemChanged.connect(self._on_item_changed)
         self.currentItemChanged.connect(self._on_selection_changed)
@@ -130,6 +134,12 @@ class ProjectTreeWidget(QTreeWidget):
         session.window_removed.connect(self._on_window_removed)
         session.window_spectrum_added.connect(self._on_window_spectrum_added)
         session.window_spectrum_removed.connect(self._on_window_spectrum_removed)
+
+        # Sygnały tabel danych
+        session.table_added.connect(self._on_table_added)
+        session.table_removed.connect(self._on_table_removed)
+        session.table_renamed.connect(self._on_table_renamed)
+        session.table_folder_changed.connect(self._on_table_folder_changed)
 
     def _on_session_cleared(self):
         self._is_internal_update = True
@@ -349,6 +359,17 @@ class ProjectTreeWidget(QTreeWidget):
                 if f:
                     f.parent_folder_id = None
                     self._on_window_folder_changed_refresh()
+                event.acceptProposedAction()
+                return
+
+        # Przeciąganie TABELI DANYCH (data_table)
+        if first_type == "data_table":
+            if target_type == "window_folder":
+                session.move_table_to_folder(first_id, target_id)
+                event.acceptProposedAction()
+                return
+            elif target_type == "section_header" and target_item == self.root_workspaces:
+                session.move_table_to_folder(first_id, None)
                 event.acceptProposedAction()
                 return
 
@@ -617,6 +638,9 @@ class ProjectTreeWidget(QTreeWidget):
             win_id = current.data(0, Qt.UserRole + 2)
             session.set_window_active_spectrum(win_id, name)
 
+        elif item_type == "data_table":
+            session.set_active_table(name)
+
     def _sync_item_visibility_to_session(self, item: QTreeWidgetItem):
         name = item.data(0, Qt.UserRole)
         item_type = item.data(0, Qt.UserRole + 1)
@@ -805,6 +829,25 @@ class ProjectTreeWidget(QTreeWidget):
                 logger.error(f"Błąd eksportu ZIP: {e}")
                 QMessageBox.critical(self, tr("app.error", "Błąd"), f"Błąd zapisu archiwum ZIP:\n{e}")
 
+    def _export_table_to_csv(self, tbl: DataTable):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Zapisz tabelę jako CSV", f"{ExportManager.sanitize_filename(tbl.name)}.csv", "Plik CSV (*.csv)"
+        )
+        if path:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(tbl.to_tsv(decimal_comma=True).replace("\t", ";"))
+                QMessageBox.information(self, "Zapisano", f"Pomyślnie zapisano tabelę do pliku:\n{path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Błąd", f"Błąd zapisu tabeli:\n{e}")
+
+    def _prompt_rename_table(self, tbl_id: str):
+        tbl = session.get_table(tbl_id)
+        if tbl:
+            name, ok = QInputDialog.getText(self, "Zmień nazwę", "Nowa nazwa tabeli:", text=tbl.name)
+            if ok and name.strip():
+                session.rename_table(tbl_id, name.strip())
+
     def _populate_export_menu(self, menu: QMenu, item: QTreeWidgetItem, selected_items: List[QTreeWidgetItem]):
         """Wstrzykuje inteligentne opcje zapisu i eksportu do menu kontekstowego."""
         targets, suggested_name = self._collect_export_targets(item, selected_items)
@@ -902,6 +945,38 @@ class ProjectTreeWidget(QTreeWidget):
             act_del_all.triggered.connect(lambda: session.remove_folder(folder_id, delete_windows=True))
 
             self._populate_export_menu(menu, item, selected_items)
+            menu.exec(self.viewport().mapToGlobal(pos))
+            return
+
+        # MENU KONTEKSTOWE TABELI DANYCH
+        if item.data(0, Qt.UserRole + 1) == "data_table":
+            tbl_id = item.data(0, Qt.UserRole)
+            tbl = session.get_table(tbl_id)
+            if tbl:
+                act_copy_tsv = menu.addAction("📋 Kopiuj dane (TSV pod Origin / Excel)")
+                act_copy_tsv.triggered.connect(
+                    lambda: QApplication.clipboard().setText(tbl.to_tsv(decimal_comma=True)))
+
+                act_save_csv = menu.addAction("💾 Zapisz jako CSV...")
+                act_save_csv.triggered.connect(lambda: self._export_table_to_csv(tbl))
+
+                menu.addSeparator()
+                sub_move = menu.addMenu("📁 Przenieś do folderu...")
+                act_root = sub_move.addAction("Poziom główny (bez folderu)")
+                act_root.triggered.connect(lambda: session.move_table_to_folder(tbl_id, None))
+                sub_move.addSeparator()
+                for fid, f in session.folders.items():
+                    act_f = sub_move.addAction(f"📁 {f.name}")
+                    act_f.triggered.connect(
+                        lambda checked=False, target_fid=fid: session.move_table_to_folder(tbl_id, target_fid))
+
+                menu.addSeparator()
+                act_rename = menu.addAction("✏️ Zmień nazwę tabeli...")
+                act_rename.triggered.connect(lambda: self._prompt_rename_table(tbl_id))
+
+                act_del = menu.addAction("🗑 Usuń tabelę")
+                act_del.triggered.connect(lambda: session.remove_table(tbl_id))
+
             menu.exec(self.viewport().mapToGlobal(pos))
             return
 
@@ -1064,3 +1139,65 @@ class ProjectTreeWidget(QTreeWidget):
                 win_item = self._find_window_item(win_id)
                 if win_item:
                     win_item.setText(0, f"🗂️ {name.strip()}")
+
+    def _find_table_item(self, table_id: str, parent: Optional[QTreeWidgetItem] = None) -> Optional[QTreeWidgetItem]:
+        if parent is None:
+            parent = self.root_workspaces
+
+        for i in range(parent.childCount()):
+            child = parent.child(i)
+            if child.data(0, Qt.UserRole + 1) == "data_table" and child.data(0, Qt.UserRole) == table_id:
+                return child
+            if child.data(0, Qt.UserRole + 1) == "window_folder":
+                sub = self._find_table_item(table_id, parent=child)
+                if sub:
+                    return sub
+        return None
+
+    def _create_table_item(self, table_id: str, name: str, folder_id: Optional[str] = None) -> QTreeWidgetItem:
+        parent_item = self.root_workspaces
+        if folder_id:
+            found_folder = self._find_folder_item(folder_id)
+            if found_folder:
+                parent_item = found_folder
+
+        tbl_item = QTreeWidgetItem(parent_item, [f"📊 {name}"])
+        tbl_item.setFlags(
+            Qt.ItemFlag.ItemIsEnabled
+            | Qt.ItemFlag.ItemIsSelectable
+            | Qt.ItemFlag.ItemIsDragEnabled
+        )
+        tbl_item.setData(0, Qt.UserRole, table_id)
+        tbl_item.setData(0, Qt.UserRole + 1, "data_table")
+        return tbl_item
+
+    def _on_table_added(self, table):
+        if not self._find_table_item(table.table_id):
+            self._create_table_item(table.table_id, table.name, table.folder_id)
+
+    def _on_table_removed(self, table_id: str):
+        tbl_node = self._find_table_item(table_id)
+        if tbl_node:
+            p = tbl_node.parent() or self.root_workspaces
+            p.removeChild(tbl_node)
+
+    def _on_table_renamed(self, table_id: str, new_name: str):
+        tbl_node = self._find_table_item(table_id)
+        if tbl_node:
+            tbl_node.setText(0, f"📊 {new_name}")
+
+    def _on_table_folder_changed(self, table_id: str, folder_id: Optional[str]):
+        tbl_node = self._find_table_item(table_id)
+        if not tbl_node:
+            return
+
+        old_parent = tbl_node.parent() or self.root_workspaces
+        old_parent.removeChild(tbl_node)
+
+        new_parent = self.root_workspaces
+        if folder_id:
+            target_f = self._find_folder_item(folder_id)
+            if target_f:
+                new_parent = target_f
+
+        new_parent.addChild(tbl_node)

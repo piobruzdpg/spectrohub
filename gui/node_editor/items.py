@@ -252,6 +252,11 @@ class NodeItem(QGraphicsItem):
             p_in.setPos(0, 88)
             self.in_ports["in"] = p_in
 
+        elif self.node_type in ("output_window", "output_table", "merge_spectra"):
+            p_in = PortItem(is_output=False, node_item=self, port_id="in", label="In", allow_multiple=True)
+            p_in.setPos(0, 88)
+            self.in_ports["in"] = p_in
+
         # 2. Wyjścia (Out ports)
         if self.node_type == "output":
             pass
@@ -424,6 +429,9 @@ class NodeItem(QGraphicsItem):
         elif self.node_type == "spectrum_select":
             grad.setColorAt(0, QColor("#0f4c5c"))
             grad.setColorAt(1, QColor("#e36414"))
+        elif self.node_type == "output_table":
+            grad.setColorAt(0, QColor("#0077b6"))
+            grad.setColorAt(1, QColor("#0096c7"))
         else:
             grad.setColorAt(0, QColor("#1e3d59"))
             grad.setColorAt(1, QColor("#17b978"))
@@ -665,7 +673,7 @@ class NodeItem(QGraphicsItem):
 
     def mouseDoubleClickEvent(self, event):
         if self.node_type in ("input", "output", "output_window", "math_op", "scalar_math", "vaporfit",
-                              "spectrum_select",
+                              "spectrum_select", "output_table",
                               "photometry", "dft_broadener",
                               "svd_denoise", "mcr_decompose", "matrix_scaling",
                               "internal_standard", "band_integrate", "merge_spectra",
@@ -694,7 +702,7 @@ class NodeItem(QGraphicsItem):
                 self.scene().dialog_owner.duplicate_node(self)
             elif action == act_edit:
                 if self.node_type in ("input", "output", "output_window", "math_op", "scalar_math", "vaporfit",
-                                      "spectrum_select",
+                                      "spectrum_select", "output_table",
                                       "photometry", "dft_broadener",
                                       "svd_denoise", "mcr_decompose", "matrix_scaling",
                                       "internal_standard", "band_integrate", "merge_spectra",

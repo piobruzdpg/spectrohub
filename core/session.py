@@ -1,7 +1,7 @@
 """
 core/session.py
 Centralny menedżer stanu danych (Single Source of Truth) dla SpectroHub.
-Wprowadza ścisłą separację gałęzi Magazynu Danych oraz hierarchię folderów w Oknach Roboczych.
+Obsługuje widma, serie 2D, foldery, okna robocze oraz tabele danych (DataTable).
 """
 
 from typing import Dict, List, Optional, Any
@@ -12,7 +12,7 @@ from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QUndoStack
 import logging
 
-from core.models import SpectrumData, SpectralSeries, ProjectMetadata, WindowFolder, WorkspaceWindow
+from core.models import SpectrumData, SpectralSeries, ProjectMetadata, WindowFolder, WorkspaceWindow, DataTable
 
 logger = logging.getLogger("SpectroHub")
 
@@ -56,7 +56,7 @@ class ProjectSession(QObject):
     window_spectrum_added = Signal(str, object)
     window_spectrum_removed = Signal(str, str)
     window_visibility_changed = Signal(str, str, bool)
-    context_changed = Signal(str)            # 'storage' | 'window'
+    context_changed = Signal(str)            # 'storage' | 'window' | 'table'
     storage_branch_changed = Signal(str)     # 'experimental' | 'atm' | 'dft' | 'series'
 
     # Sygnały Folderów Okien Roboczych
@@ -64,6 +64,13 @@ class ProjectSession(QObject):
     folder_removed = Signal(str)                  # folder_id
     folder_renamed = Signal(str, str)             # folder_id, new_name
     window_folder_changed = Signal(str, object)   # window_id, new_folder_id
+
+    # Sygnały Tabel Danych (DataTable)
+    table_added = Signal(object)                  # DataTable
+    table_removed = Signal(str)                   # table_id
+    table_renamed = Signal(str, str)              # table_id, new_name
+    table_folder_changed = Signal(str, object)    # table_id, new_folder_id
+    active_table_changed = Signal(object)         # DataTable
 
     # Sygnał Metadanych Projektu
     metadata_changed = Signal(object)
@@ -89,7 +96,7 @@ class ProjectSession(QObject):
         self._series_visibility: Dict[str, bool] = {}
         self._active_series_name: Optional[str] = None
 
-        # Foldery okien roboczych
+        # Foldery okien roboczych i tabel
         self._folders: Dict[str, WindowFolder] = {}
         self._folder_counter = 0
 
@@ -97,6 +104,11 @@ class ProjectSession(QObject):
         self._windows: Dict[str, WorkspaceWindow] = {}
         self._active_window_id: Optional[str] = None
         self._window_counter = 0
+
+        # Tabele danych liczbowych (DataTable)
+        self._tables: Dict[str, DataTable] = {}
+        self._active_table_id: Optional[str] = None
+        self._table_counter = 0
 
         # Kontekst globalny i gałąź magazynu
         self._active_context: str = "storage"
@@ -117,7 +129,7 @@ class ProjectSession(QObject):
         self.metadata.modified_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.metadata_changed.emit(self.metadata)
 
-    # --- ZARZĄDZANIE FOLDERAMI OKIEN ROBOCZYCH ---
+    # --- ZARZĄDZANIE FOLDERAMI ---
     @property
     def folders(self) -> Dict[str, WindowFolder]:
         return self._folders
@@ -133,7 +145,7 @@ class ProjectSession(QObject):
 
         folder = WindowFolder(folder_id=fid, name=fname, parent_folder_id=parent_folder_id)
         self._folders[fid] = folder
-        logger.info(f"Utworzono folder okien: '{fname}' (ID: {fid})")
+        logger.info(f"Utworzono folder: '{fname}' (ID: {fid})")
         self.folder_added.emit(fid, fname, parent_folder_id)
         return fid
 
@@ -151,13 +163,21 @@ class ProjectSession(QObject):
             else:
                 self.move_window_to_folder(w_id, target_parent)
 
-        # 2. Podfoldery (przepięcie wyżej)
+        # 2. Tabele w tym folderze
+        affected_tables = [t_id for t_id, tbl in self._tables.items() if tbl.folder_id == folder_id]
+        for t_id in affected_tables:
+            if delete_windows:
+                self.remove_table(t_id)
+            else:
+                self.move_table_to_folder(t_id, target_parent)
+
+        # 3. Podfoldery (przepięcie wyżej)
         child_folders = [fid for fid, f in self._folders.items() if f.parent_folder_id == folder_id]
         for c_fid in child_folders:
             self._folders[c_fid].parent_folder_id = target_parent
 
         del self._folders[folder_id]
-        logger.info(f"Usunięto folder okien: ID {folder_id} (delete_windows={delete_windows})")
+        logger.info(f"Usunięto folder: ID {folder_id} (delete_windows={delete_windows})")
         self.folder_removed.emit(folder_id)
 
     def rename_folder(self, folder_id: str, new_name: str):
@@ -172,6 +192,66 @@ class ProjectSession(QObject):
                 folder_id = None
             self._windows[window_id].folder_id = folder_id
             self.window_folder_changed.emit(window_id, folder_id)
+
+    # --- ZARZĄDZANIE TABELAMI DANYCH (DATATABLE) ---
+    @property
+    def tables(self) -> Dict[str, DataTable]:
+        return self._tables
+
+    @property
+    def active_table(self) -> Optional[DataTable]:
+        if self._active_table_id and self._active_table_id in self._tables:
+            return self._tables[self._active_table_id]
+        return None
+
+    def get_table(self, table_id: str) -> Optional[DataTable]:
+        return self._tables.get(table_id)
+
+    def add_table(self, table: DataTable, make_active: bool = True) -> str:
+        if not table.table_id:
+            self._table_counter += 1
+            table.table_id = f"tbl_{self._table_counter}"
+
+        self._tables[table.table_id] = table
+        logger.info(f"Dodano tabelę danych: '{table.name}' (ID: {table.table_id}, Folder: {table.folder_id})")
+        self.table_added.emit(table)
+
+        if make_active:
+            self.set_active_table(table.table_id)
+        return table.table_id
+
+    def remove_table(self, table_id: str):
+        if table_id in self._tables:
+            del self._tables[table_id]
+            logger.info(f"Usunięto tabelę danych: ID {table_id}")
+            self.table_removed.emit(table_id)
+
+            if self._active_table_id == table_id:
+                self._active_table_id = next(iter(self._tables.keys()), None)
+                self.active_table_changed.emit(self.active_table)
+
+    def rename_table(self, table_id: str, new_name: str):
+        if table_id in self._tables and new_name.strip():
+            clean_name = new_name.strip()
+            self._tables[table_id].name = clean_name
+            self.table_renamed.emit(table_id, clean_name)
+
+    def move_table_to_folder(self, table_id: str, folder_id: Optional[str]):
+        if table_id in self._tables:
+            if folder_id is not None and folder_id not in self._folders:
+                folder_id = None
+            self._tables[table_id].folder_id = folder_id
+            self.table_folder_changed.emit(table_id, folder_id)
+
+    def set_active_table(self, table_id: Optional[str]):
+        if table_id is not None and table_id not in self._tables:
+            return
+
+        self._active_table_id = table_id
+        self._active_context = "table"
+        logger.debug(f"Aktywna tabela: {table_id}")
+        self.context_changed.emit("table")
+        self.active_table_changed.emit(self.active_table)
 
     # --- ZARZĄDZANIE OKNAMI ROBOCZYMI ---
     @property
@@ -278,7 +358,7 @@ class ProjectSession(QObject):
         return self._active_context
 
     def set_context(self, context: str):
-        if context in ("storage", "window") and context != self._active_context:
+        if context in ("storage", "window", "table") and context != self._active_context:
             self._active_context = context
             logger.debug(f"Zmiana kontekstu sesji na: {context}")
             self.context_changed.emit(context)
@@ -336,6 +416,9 @@ class ProjectSession(QObject):
 
     @property
     def active_spectrum(self) -> Optional[SpectrumData]:
+        if self._active_context == "table":
+            return None
+
         if self._active_context == "window" and self.active_window:
             win = self.active_window
             if win.active_spectrum_name and win.active_spectrum_name in win.spectra:
@@ -575,6 +658,10 @@ class ProjectSession(QObject):
         self._windows.clear()
         self._active_window_id = None
         self._window_counter = 0
+
+        self._tables.clear()
+        self._active_table_id = None
+        self._table_counter = 0
 
         self.undo_stack.clear()
         logger.info("Wyczyszczono sesję projektu.")
