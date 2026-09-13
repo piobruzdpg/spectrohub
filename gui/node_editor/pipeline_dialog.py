@@ -378,40 +378,40 @@ class NodePipelineDialog(QMainWindow):
         self.tab_widget.tabBarDoubleClicked.connect(self._on_tab_double_clicked)
 
         self.tab_widget.setStyleSheet("""
-                    QTabWidget::pane {
-                        border-top: 1px solid #2d2d3a;
-                        background-color: #18181e;
-                    }
-                    QTabWidget::tab-bar {
-                        left: 0px;
-                    }
-                    QTabBar {
-                        qproperty-expanding: false;
-                        background-color: #18181e;
-                    }
-                    QTabBar::tab {
-                        background-color: #22222f;
-                        color: #b0b0c0;
-                        padding: 7px 16px;
-                        margin-right: 2px;
-                        border-top-left-radius: 4px;
-                        border-top-right-radius: 4px;
-                        border: 1px solid #2d2d3a;
-                        border-bottom: none;
-                        font-size: 12px;
-                    }
-                    QTabBar::tab:selected {
-                        background-color: #18181e;
-                        color: #48cae4;
-                        border: 1px solid #3d3d4e;
-                        border-bottom: 1px solid #18181e;
-                        font-weight: bold;
-                    }
-                    QTabBar::tab:hover:!selected {
-                        background-color: #2b2b3d;
-                        color: #ffffff;
-                    }
-                """)
+            QTabWidget::pane {
+                border-top: 1px solid #2d2d3a;
+                background-color: #18181e;
+            }
+            QTabWidget::tab-bar {
+                left: 0px;
+            }
+            QTabBar {
+                qproperty-expanding: false;
+                background-color: #18181e;
+            }
+            QTabBar::tab {
+                background-color: #22222f;
+                color: #b0b0c0;
+                padding: 7px 16px;
+                margin-right: 2px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                border: 1px solid #2d2d3a;
+                border-bottom: none;
+                font-size: 12px;
+            }
+            QTabBar::tab:selected {
+                background-color: #18181e;
+                color: #48cae4;
+                border: 1px solid #3d3d4e;
+                border-bottom: 1px solid #18181e;
+                font-weight: bold;
+            }
+            QTabBar::tab:hover:!selected {
+                background-color: #2b2b3d;
+                color: #ffffff;
+            }
+        """)
 
         self._tab_bar_style = LeftAlignedTabStyle(self.tab_bar.style())
         self.tab_bar.setStyle(self._tab_bar_style)
@@ -422,20 +422,20 @@ class NodePipelineDialog(QMainWindow):
         corner_layout.setContentsMargins(0, 0, 6, 0)
         btn_new_tab = QPushButton("➕ Nowy potok")
         btn_new_tab.setStyleSheet("""
-                    QPushButton {
-                        background-color: #2a2a38;
-                        color: #48cae4;
-                        border: 1px solid #3d3d4e;
-                        border-radius: 3px;
-                        padding: 4px 10px;
-                        font-weight: bold;
-                        font-size: 11px;
-                    }
-                    QPushButton:hover {
-                        background-color: #3d5a80;
-                        color: #ffffff;
-                    }
-                """)
+            QPushButton {
+                background-color: #2a2a38;
+                color: #48cae4;
+                border: 1px solid #3d3d4e;
+                border-radius: 3px;
+                padding: 4px 10px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background-color: #3d5a80;
+                color: #ffffff;
+            }
+        """)
         btn_new_tab.clicked.connect(lambda: self.add_pipeline_tab())
         corner_layout.addWidget(btn_new_tab)
         self.tab_widget.setCornerWidget(corner_widget, Qt.TopRightCorner)
@@ -738,8 +738,8 @@ class NodePipelineDialog(QMainWindow):
                  {'type': 'output_window', 'name': "🗂️ Okno: Skorygowane", 'window_name': "Skorygowane",
                   'mode': "create_new"}),
                 ("📊 Zapisz jako Tabelę / Profil",
-                 {'type': 'output_table', 'name': "📊 Tabela: Profil", 'table_name': "Profil",
-                  'x_label': "Czas / Indeks", 'y_label': "Wartość / Stężenie", 'folder_id': None})
+                 {'type': 'output_table', 'name': "📊 Tabela: Parametry HDO", 'table_name': "Parametry HDO",
+                  'x_label': "Indeks / Parametr", 'y_label': "Wartość", 'folder_id': None})
             ],
             "Chemometria & Analiza Wielowymiarowa": [
                 ("📊 Odszumiacz SVD / PCA (Rank-k)",
@@ -947,16 +947,18 @@ class NodePipelineDialog(QMainWindow):
                 {"id": "n0", "type": "input", "title": "📥 Próbka Badana (W₀)", "pos_x": 40.0, "pos_y": 60.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
                 {"id": "n1", "type": "hdo_spectrum_scaled", "title": "Widmo Składowe (W₁ · c)", "pos_x": 40.0, "pos_y": 210.0, "step_data": {"type": "hdo_spectrum_scaled", "name": "Widmo Skalowane", "scale": 1.0, "w_min": 0.0, "w_max": 1.5}},
                 {"id": "n2", "type": "synthetic_peak", "title": "Pik Syntetyczny (GxL)", "pos_x": 40.0, "pos_y": 360.0, "step_data": {"type": "synthetic_peak", "name": "Pik GxL @ 1650", "shape": "gxl", "center": 1650.0, "amp": 0.4, "width": 35.0, "shape_param": 0.5}},
-                {"id": "n3", "type": "mc_params", "title": "Parametry MC", "pos_x": 40.0, "pos_y": 510.0, "step_data": {"type": "mc_params", "name": "MC Params (iter=2000)", "n_iter": 2000, "penalty_weight": 10.0, "baseline_active": False}},
+                {"id": "n3", "type": "mc_params", "title": "Parametry MC", "pos_x": 40.0, "pos_y": 510.0, "step_data": {"type": "mc_params", "name": "MC Params (iter=3000)", "n_iter": 3000, "penalty_weight": 10.0, "baseline_active": False}},
                 {"id": "n4", "type": "hdo_decomposition", "title": "Dekompozycja HDO / MC", "pos_x": 380.0, "pos_y": 210.0, "step_data": {"type": "hdo_decomposition", "name": "HDO Fit (N=1.0)", "n_multiplier": 1.0}},
-                {"id": "n5", "type": "output_window", "title": "🗂️ Okno: Czyste Residuum", "pos_x": 720.0, "pos_y": 210.0, "step_data": {"type": "output_window", "name": "🗂️ Okno: Residuum HDO", "window_name": "Residuum HDO", "mode": "create_new"}}
+                {"id": "n5", "type": "output_window", "title": "🗂️ Okno: Czyste Residuum", "pos_x": 720.0, "pos_y": 140.0, "step_data": {"type": "output_window", "name": "🗂️ Okno: Residuum HDO", "window_name": "Residuum HDO", "mode": "create_new"}},
+                {"id": "n6", "type": "output_table", "title": "📊 Zapisz Parametry HDO", "pos_x": 720.0, "pos_y": 320.0, "step_data": {"type": "output_table", "name": "📊 Tabela: Parametry HDO", "table_name": "Parametry HDO", "x_label": "Parametr", "y_label": "Wartość", "folder_id": None}}
             ],
             "connections": [
                 {"from_node": "n0", "from_port": "out", "to_node": "n4", "to_port": "in_target"},
                 {"from_node": "n1", "from_port": "out", "to_node": "n4", "to_port": "in_bases"},
                 {"from_node": "n2", "from_port": "out", "to_node": "n4", "to_port": "in_peaks"},
                 {"from_node": "n3", "from_port": "out_mc", "to_node": "n4", "to_port": "in_mc"},
-                {"from_node": "n4", "from_port": "out_res", "to_node": "n5", "to_port": "in"}
+                {"from_node": "n4", "from_port": "out_res", "to_node": "n5", "to_port": "in"},
+                {"from_node": "n4", "from_port": "out_params", "to_node": "n6", "to_port": "in"}
             ]
         }
         self.add_pipeline_tab(title="Dekompozycja HDO", graph_data=data, make_active=True)
@@ -1265,7 +1267,6 @@ class NodePipelineDialog(QMainWindow):
 
         base_x, base_y, total_count = self._get_base_preview_data()
 
-        # Odbiór wyników z ewaluatora (obsługa krotki (port_results, port_names))
         eval_out = DAGEvaluator.evaluate_dag(
             ordered_nodes, base_x, base_y, session.spectra, is_execution=False
         )
@@ -1275,8 +1276,8 @@ class NodePipelineDialog(QMainWindow):
             eval_results = eval_out
 
         for node in all_nodes:
-            main_key = (node, "out") if node.node_type not in ("output", "output_window", "hdo_decomposition",
-                                                               "mc_params") else (node, "in")
+            main_key = (node, "out") if node.node_type not in ("output", "output_window", "output_table",
+                                                               "hdo_decomposition", "mc_params") else (node, "in")
             if node.node_type == "hdo_decomposition":
                 main_key = (node, "out_fit")
             elif node.node_type == "mc_params":
@@ -1402,12 +1403,18 @@ class NodePipelineDialog(QMainWindow):
             self._clear_canvas_preview()
             return
 
-        if len(curves) == 1:
+        if target_node.node_type == "hdo_decomposition" and len(curves) == 2:
+            colors = ["#48cae4", "#f4a261"]
+            labels = [f"👁 {target_node.title} (Źródło)", f"👁 {target_node.title} (Fit)"]
+        elif len(curves) == 1:
             colors = ["#ffb703"]
+            labels = [f"👁 Podgląd: {target_node.title}"]
         elif len(curves) == 2:
             colors = ["#48cae4", "#ffd166"]
+            labels = [f"👁 {target_node.title} [1/2]", f"👁 {target_node.title} [2/2]"]
         else:
             colors = ["#48cae4", "#ffd166", "#ff4d6d"]
+            labels = [f"👁 {target_node.title} [{i + 1}/{len(curves)}]" for i in range(len(curves))]
 
         existing_lines = getattr(canvas, '_node_preview_lines', [])
         old_single = getattr(canvas, '_node_preview_line', None)
@@ -1424,7 +1431,7 @@ class NodePipelineDialog(QMainWindow):
         new_lines = []
         for idx, cy in enumerate(curves):
             col = colors[idx]
-            lbl = f"👁 Podgląd: {target_node.title}" if len(curves) == 1 else f"👁 {target_node.title} [{idx + 1}/{len(curves)}]"
+            lbl = labels[idx]
             line, = ax.plot(
                 x, cy, color=col, linestyle="--", linewidth=1.8,
                 alpha=0.9, zorder=999, label=lbl
@@ -1460,7 +1467,6 @@ class NodePipelineDialog(QMainWindow):
         main_win = self.parent()
         canvas = getattr(main_win, 'canvas_2d', None)
 
-        # Sprawdzenie obecności solwera Monte Carlo HDO
         has_hdo = any(n.node_type == "hdo_decomposition" for n in ordered_nodes)
         progress_dialog: Optional[QProgressDialog] = None
 
@@ -1473,10 +1479,14 @@ class NodePipelineDialog(QMainWindow):
             progress_dialog.show()
             QApplication.processEvents()
 
-        def _hdo_progress_callback(pct: int, best_rss: float) -> bool:
+        def _hdo_progress_callback(curr_step: int, total_steps: int, best_rss: float) -> bool:
             if progress_dialog is not None:
+                pct = int((curr_step / max(total_steps, 1)) * 100)
                 progress_dialog.setValue(pct)
-                progress_dialog.setLabelText(f"Próbkowanie Monte Carlo: {pct}%\nNajlepsze RSS: {best_rss:.4e}")
+                progress_dialog.setLabelText(
+                    f"Krok Monte Carlo: {curr_step} / {total_steps} ({pct}%)\n"
+                    f"Najlepsze dopasowanie RSS: {best_rss:.4e}"
+                )
                 QApplication.processEvents()
                 return bool(progress_dialog.wasCanceled())
             return False
@@ -1485,7 +1495,8 @@ class NodePipelineDialog(QMainWindow):
             base_x, base_y, _ = self._get_base_preview_data()
             res_map, names_map = DAGEvaluator.evaluate_dag(
                 ordered_nodes, base_x, base_y, session.spectra,
-                is_execution=True
+                is_execution=True,
+                progress_callback=_hdo_progress_callback if has_hdo else None
             )
 
             if progress_dialog is not None:
@@ -1501,13 +1512,14 @@ class NodePipelineDialog(QMainWindow):
                 # BRANCH A: TERMINAL TABELI DANYCH / PROFILI (DataTable)
                 # =============================================================
                 if term_node.node_type == "output_table":
-                    tbl_name = term_node.step_data.get("table_name", "Profil")
+                    tbl_name = term_node.step_data.get("table_name", "Parametry HDO")
                     target_folder_id = term_node.step_data.get("folder_id")
-                    x_lbl = term_node.step_data.get("x_label", "Czas / Indeks")
-                    y_lbl = term_node.step_data.get("y_label", "Wartość / Stężenie")
+                    x_lbl = term_node.step_data.get("x_label", "Indeks / Parametr")
+                    y_lbl = term_node.step_data.get("y_label", "Wartość")
 
                     collected_x = None
                     y_cols = {}
+                    meta_dict = {"dag_source": [n.title for n in ordered_nodes]}
 
                     for conn in incoming_conns:
                         src_node = conn.out_port.node_item
@@ -1520,7 +1532,12 @@ class NodePipelineDialog(QMainWindow):
                         if collected_x is None:
                             collected_x = new_x.copy()
 
-                        if new_y.ndim == 2:
+                        if src_node.node_type == "hdo_decomposition" and src_port == "out_params":
+                            param_labels = src_node.step_data.get('param_labels', [])
+                            col_title = f"Wartość_{src_node.title}" if len(incoming_conns) > 1 else "Wartość"
+                            y_cols[col_title] = new_y.flatten().copy()
+                            meta_dict["row_labels"] = param_labels
+                        elif new_y.ndim == 2:
                             for col in range(new_y.shape[1]):
                                 col_n = src_names[col] if col < len(src_names) else f"{src_node.title}_{col + 1}"
                                 y_cols[col_n] = new_y[:, col].copy()
@@ -1537,7 +1554,7 @@ class NodePipelineDialog(QMainWindow):
                             x_label=x_lbl,
                             y_label=y_lbl,
                             folder_id=target_folder_id,
-                            metadata={"dag_source": [n.title for n in ordered_nodes]}
+                            metadata=meta_dict
                         )
                         session.add_table(new_table, make_active=True)
                     continue
@@ -1603,15 +1620,30 @@ class NodePipelineDialog(QMainWindow):
 
                     branch_tag = f" [{src_node.title}]" if len(incoming_conns) > 1 else ""
 
-                    # Specjalna obsługa solwera HDO Fit
                     if src_node.node_type == "hdo_decomposition":
                         metrics = src_node.step_data.get('fit_metrics', {})
                         r2_tag = f" (R²={metrics.get('r2', 0):.4f})" if 'r2' in metrics else ""
                         coeffs = metrics.get('coefficients', [])
                         base_names = metrics.get('base_names', [])
+                        n_mult = metrics.get('n_multiplier', 1.0)
                         target_base = src_names[0] if src_names else "W0"
 
-                        if src_port == "out_comps" and new_y.ndim == 2:
+                        if src_port == "out_fit" and new_y.ndim == 2:
+                            raw_n_src = f"{prefix}{target_base} · {n_mult:.2f}{suffix}{branch_tag}"
+                            new_created.append(SpectrumData(
+                                wavenumbers=new_x.copy(), intensities=new_y[:, 0].copy(),
+                                name=make_unique_name(raw_n_src) if term_node.node_type == "output_window" else raw_n_src,
+                                file_path="", file_type="processed",
+                                metadata={"source": "HDO Scaled Source", **metrics}
+                            ))
+                            raw_n_fit = f"{prefix}Fit_{target_base}{suffix}{r2_tag}{branch_tag}"
+                            new_created.append(SpectrumData(
+                                wavenumbers=new_x.copy(), intensities=new_y[:, 1].copy(),
+                                name=make_unique_name(raw_n_fit) if term_node.node_type == "output_window" else raw_n_fit,
+                                file_path="", file_type="fit",
+                                metadata={"source": "HDO Total Fit", **metrics}
+                            ))
+                        elif src_port == "out_comps" and new_y.ndim == 2:
                             for col in range(new_y.shape[1]):
                                 b_title = base_names[col] if col < len(base_names) else f"Comp_{col + 1}"
                                 c_val = coeffs[col] if col < len(coeffs) else 1.0
@@ -1639,14 +1671,6 @@ class NodePipelineDialog(QMainWindow):
                                 file_path="", file_type="residual",
                                 metadata={"source": "HDO Excess Residual", **metrics}
                             ))
-                        elif src_port == "out_fit":
-                            raw_n = f"{prefix}Fit_{target_base}{suffix}{r2_tag}{branch_tag}"
-                            new_created.append(SpectrumData(
-                                wavenumbers=new_x.copy(), intensities=new_y.copy(),
-                                name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
-                                file_path="", file_type="fit",
-                                metadata={"source": "HDO Total Fit", **metrics}
-                            ))
                         else:
                             raw_n = f"{prefix}ΔFit_{target_base}{suffix}{r2_tag}{branch_tag}"
                             new_created.append(SpectrumData(
@@ -1656,7 +1680,6 @@ class NodePipelineDialog(QMainWindow):
                                 metadata={"source": "HDO Fit Residual", **metrics}
                             ))
 
-                    # Standardowe serie wielowidmowe
                     elif new_y.ndim == 2:
                         n_cols = new_y.shape[1]
                         for col in range(n_cols):
@@ -1670,7 +1693,6 @@ class NodePipelineDialog(QMainWindow):
                                 metadata={"dag_pipeline": [n.title for n in ordered_nodes], "orig_name": orig_n}
                             ))
 
-                    # Pojedyncze widmo (1D)
                     else:
                         active = session.active_spectrum
                         orig_n = src_names[0] if src_names else (active.name if active else "Widmo")

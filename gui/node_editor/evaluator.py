@@ -1,17 +1,18 @@
 """
 gui/node_editor/evaluator.py
 Zunifikowany silnik obliczeniowy grafu DAG:
-- Routing wieloportowy: wyjścia profili stężeń MCR (C), ładunków PCA (Scores), residuów i całek.
+- Routing wieloportowy: wyjścia profili stężeń MCR (C), ładunków PCA (Scores), residuów, całek i tabel parametrów.
 - Dekompozycja HDO & Pasma Syntetyczne (Błyskawiczny OLS w podglądzie + Pełny Monte Carlo przy wykonaniu).
-- Broadcasting operacji dwuwidmowych (1D z 2D, 2D z 2D).
-- Wielowejściowy terminal okna roboczego (fan-in) oraz Mux (Merge Spectra).
-- Wewnętrzny standard (IS) oraz integrator pasma (Kinetyka).
+- Wyprowadzanie pary Źródło (N*W0) + Fit na wyjściu out_fit oraz tabeli parametrów na out_params.
+- Rejestracja pełnych parametrów Monte Carlo w tabeli parametrów.
+- Zgodność wymiarów X i Y dla Canvasu i obiektów DataTable.
 """
 
-from typing import List, Dict, Any, Tuple, Optional
+from typing import List, Dict, Any, Tuple, Optional, Callable
 import numpy as np
 import logging
 from scipy.optimize import least_squares
+from scipy import integrate
 
 from core.session import session
 from core.models import SpectrumData
@@ -66,7 +67,15 @@ def apply_single_step(x: np.ndarray, y: np.ndarray, step: Dict[str, Any]) -> Tup
 
     try:
         if stype == 'crop':
-            curr_x, curr_y = prep.crop_range(curr_x, curr_y, step.get('min_w', 1000.0), step.get('max_w', 1800.0))
+            min_w = float(step.get('min_w', 1000.0))
+            max_w = float(step.get('max_w', 1800.0))
+            low, high = min(min_w, max_w), max(min_w, max_w)
+            mask = (curr_x >= low) & (curr_x <= high)
+            if np.any(mask):
+                curr_x = curr_x[mask]
+                curr_y = curr_y[mask, :] if curr_y.ndim == 2 else curr_y[mask]
+            else:
+                logger.warning(f"Krok crop: zakres [{low}, {high}] poza zakresem widma. Pomijam.")
         elif curr_y.ndim == 2:
             if stype == 'asls':
                 for c in range(curr_y.shape[1]):
@@ -197,8 +206,6 @@ def convolve_dft_sticks(freqs: np.ndarray, intens: np.ndarray, target_x: np.ndar
 class DAGEvaluator:
     """Silnik ewaluacji potoku z routingiem wieloportowym, chemometrią macierzową i dekompozycją HDO."""
 
-
-
     @staticmethod
     def topological_sort(nodes: list) -> Tuple[Optional[list], bool]:
         adj = {n: [] for n in nodes}
@@ -231,13 +238,14 @@ class DAGEvaluator:
     @staticmethod
     def evaluate_dag(ordered_nodes: list, default_x: np.ndarray, default_y: np.ndarray,
                      session_spectra: Dict[str, SpectrumData],
-                     is_execution: bool = False) -> Tuple[
+                     is_execution: bool = False,
+                     progress_callback: Optional[Callable[[int, int, float], bool]] = None) -> Tuple[
         Dict[Tuple[Any, str], Tuple[Optional[np.ndarray], Optional[np.ndarray]]], Dict[Tuple[Any, str], List[str]]]:
         """
         Ewaluuje acykliczny graf DAG w zadanym porządku topologicznym.
         Zwraca:
             - port_results: {(node, port_id): (X_array, Y_array)}
-            - port_names:   {(node, port_id): [nazwa_1, nazwa_2, ...]} (nazwy pierwotne widm w strumieniu)
+            - port_names:   {(node, port_id): [nazwa_1, nazwa_2, ...]}
         """
         port_results: Dict[Tuple[Any, str], Tuple[Optional[np.ndarray], Optional[np.ndarray]]] = {}
         port_names: Dict[Tuple[Any, str], List[str]] = {}
@@ -284,8 +292,7 @@ class DAGEvaluator:
                         cols = []
                         names = []
                         for s in visible:
-                            xw, yw = (s.wavenumbers[::-1], s.intensities[::-1]) if s.wavenumbers[0] > s.wavenumbers[
-                                -1] else (s.wavenumbers, s.intensities)
+                            xw, yw = (s.wavenumbers[::-1], s.intensities[::-1]) if s.wavenumbers[0] > s.wavenumbers[-1] else (s.wavenumbers, s.intensities)
                             cols.append(np.interp(ref_wn, xw, yw))
                             names.append(s.name)
                         port_results[(node, "out")] = (ref_wn.copy(), np.column_stack(cols))
@@ -301,8 +308,7 @@ class DAGEvaluator:
                     if session.active_series:
                         mat = session.active_series.get_matrix_2d()
                         port_results[(node, "out")] = (session.active_series.wavenumbers.copy(), mat.copy())
-                        port_names[(node, "out")] = [f"{session.active_series.name}_f{i + 1}" for i in
-                                                     range(mat.shape[1])]
+                        port_names[(node, "out")] = [f"{session.active_series.name}_f{i + 1}" for i in range(mat.shape[1])]
                     else:
                         port_results[(node, "out")] = (default_x.copy(), default_y.copy())
                         port_names[(node, "out")] = ["Seria"]
@@ -427,25 +433,31 @@ class DAGEvaluator:
                             synth_peak_nodes.append(conn.out_port.node_item)
                 n_peaks = len(synth_peak_nodes)
 
-                # Parametry MC z portu in_mc
+                # Parametry MC: sprawdzenie węzła MC na grafie (lub podłączonego portem in_mc)
                 mc_node = None
                 p_mc = node.in_ports.get("in_mc")
                 if p_mc and p_mc.connections and p_mc.connections[0].out_port:
                     mc_node = p_mc.connections[0].out_port.node_item
+                else:
+                    # Szukanie dowolnego węzła mc_params na grafie jako fallback
+                    for other_node in ordered_nodes:
+                        if other_node.node_type == "mc_params":
+                            mc_node = other_node
+                            break
 
                 if mc_node:
-                    n_iterations = int(mc_node.step_data.get('n_iter', 2000))
+                    n_iterations = int(mc_node.step_data.get('n_iter', 3000))
                     penalty_weight = float(mc_node.step_data.get('penalty_weight', 10.0))
                     baseline_active = bool(mc_node.step_data.get('baseline_active', False))
                 else:
-                    n_iterations = int(node.step_data.get('n_iter', 2000))
+                    n_iterations = int(node.step_data.get('n_iter', 3000))
                     penalty_weight = float(node.step_data.get('penalty_weight', 10.0))
                     baseline_active = bool(node.step_data.get('baseline_active', False))
 
                 if len(bases_list) > 0 or n_peaks > 0:
                     try:
                         if is_execution:
-                            # 1. PEŁNE WYKONANIE: Monte Carlo
+                            # 1. PEŁNE WYKONANIE: Monte Carlo z callbackiem
                             results = HDOFitEngine.run_monte_carlo(
                                 wavenb=target_x,
                                 target=w0_target,
@@ -455,24 +467,34 @@ class DAGEvaluator:
                                 n_iterations=n_iterations,
                                 penalty_weight=penalty_weight,
                                 st_dev=0.01,
-                                baseline_active=baseline_active
+                                baseline_active=baseline_active,
+                                progress_callback=progress_callback
                             )
                             fit_y = results['fitted_curve']
                             excess_res = results['excess_residual']
-                            comps_y = np.column_stack(results['scaled_components']) if results[
-                                'scaled_components'] else np.zeros_like(target_x)
-                            peaks_y = np.column_stack(results['peaks_curves']) if results[
-                                'peaks_curves'] else np.zeros_like(target_x)
+                            comps_y = np.column_stack(results['scaled_components']) if results['scaled_components'] else np.zeros_like(target_x)
+                            peaks_y = np.column_stack(results['peaks_curves']) if results['peaks_curves'] else np.zeros_like(target_x)
 
-                            node.step_data['fit_metrics'] = {
+                            full_metrics = {
+                                'n_multiplier': n_multiplier,
                                 'coefficients': results['coefficients'],
                                 'base_names': base_names,
+                                'comp_areas': results.get('comp_areas', []),
+                                'area_percentages': results.get('area_percentages', []),
+                                'peaks_params': results.get('peaks_params', []),
+                                'peaks_area': results.get('peaks_area', 0.0),
+                                'baseline_area': results.get('baseline_area', 0.0),
                                 'r2': results['r2'],
                                 'rmse': results['rmse'],
-                                'chi2_red': results['chi2_red']
+                                'chi2_red': results.get('chi2_red', 0.0),
+                                'rss': results.get('rss', 0.0),
+                                'mc_iterations': n_iterations,
+                                'mc_penalty': penalty_weight,
+                                'baseline_active': baseline_active
                             }
+                            node.step_data['fit_metrics'] = full_metrics
                         else:
-                            # 2. PODGLĄD NA ŻYWO (Preview): OLS
+                            # 2. PODGLĄD NA ŻYWO: Szybki OLS
                             k_comps = len(bases_list)
                             base_mat = np.vstack(bases_list) if k_comps > 0 else np.empty((0, len(target_x)))
                             total_p = 3 + k_comps + 4 * n_peaks
@@ -507,12 +529,15 @@ class DAGEvaluator:
                                 sum_comps += c_curve
                             excess_res = w0_target - sum_comps
 
-                            p_curves = []
+                            p_curves, p_params = [], []
                             for j in range(n_peaks):
                                 pos = 3 + k_comps + j * 4
-                                p_curves.append(
-                                    gxl_peak(target_x, res_fast.x[pos], res_fast.x[pos + 1], res_fast.x[pos + 2],
-                                             res_fast.x[pos + 3]))
+                                p_a = float(res_fast.x[pos])
+                                p_c = float(res_fast.x[pos + 1])
+                                p_s = float(res_fast.x[pos + 2])
+                                p_w = float(res_fast.x[pos + 3])
+                                p_params.append({'amp': p_a, 'center': p_c, 'shape': p_s, 'width': p_w})
+                                p_curves.append(gxl_peak(target_x, p_a, p_c, p_s, p_w))
 
                             comps_y = np.column_stack(scaled_c) if scaled_c else np.zeros_like(target_x)
                             peaks_y = np.column_stack(p_curves) if p_curves else np.zeros_like(target_x)
@@ -522,39 +547,91 @@ class DAGEvaluator:
                             r2_val = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
                             rmse_val = float(np.sqrt(np.mean((w0_target - fit_y) ** 2)))
 
-                            node.step_data['fit_metrics'] = {
+                            comp_areas = [abs(float(integrate.simpson(c_crv, target_x))) for c_crv in scaled_c]
+                            sum_pks = np.sum(p_curves, axis=0) if p_curves else np.zeros_like(target_x)
+                            peaks_area = abs(float(integrate.simpson(sum_pks, target_x))) if p_curves else 0.0
+
+                            full_metrics = {
+                                'n_multiplier': n_multiplier,
                                 'coefficients': extracted_c,
                                 'base_names': base_names,
+                                'comp_areas': comp_areas,
+                                'peaks_params': p_params,
+                                'peaks_area': peaks_area,
                                 'r2': r2_val,
-                                'rmse': rmse_val
+                                'rmse': rmse_val,
+                                'rss': ss_res,
+                                'mc_iterations': n_iterations,
+                                'mc_penalty': penalty_weight,
+                                'baseline_active': baseline_active
                             }
+                            node.step_data['fit_metrics'] = full_metrics
 
-                        port_results[(node, "out_fit")] = (target_x.copy(), fit_y)
+                        combined_fit_y = np.column_stack([w0_target, fit_y])
+
+                        # Kompletna lista parametrów z dołączonymi ustawieniami MC
+                        p_labels = [
+                            'MC_Iterations', 'MC_Penalty', 'Baseline_Active',
+                            'N_multiplier', 'R2', 'RMSE', 'Chi2_red', 'RSS',
+                            'Peaks_Area', 'Baseline_Area'
+                        ]
+                        p_values = [
+                            float(full_metrics.get('mc_iterations', n_iterations)),
+                            float(full_metrics.get('mc_penalty', penalty_weight)),
+                            1.0 if full_metrics.get('baseline_active', False) else 0.0,
+                            float(full_metrics.get('n_multiplier', 1.0)),
+                            float(full_metrics.get('r2', 0.0)),
+                            float(full_metrics.get('rmse', 0.0)),
+                            float(full_metrics.get('chi2_red', 0.0)),
+                            float(full_metrics.get('rss', 0.0)),
+                            float(full_metrics.get('peaks_area', 0.0)),
+                            float(full_metrics.get('baseline_area', 0.0))
+                        ]
+                        for idx_c, c_val in enumerate(full_metrics.get('coefficients', [])):
+                            b_lbl = base_names[idx_c] if idx_c < len(base_names) else f"Comp_{idx_c+1}"
+                            p_labels.append(f"c_{b_lbl}")
+                            p_values.append(float(c_val))
+                            if idx_c < len(full_metrics.get('comp_areas', [])):
+                                p_labels.append(f"Area_{b_lbl}")
+                                p_values.append(float(full_metrics['comp_areas'][idx_c]))
+
+                        for idx_p, p_dict in enumerate(full_metrics.get('peaks_params', [])):
+                            p_labels.extend([f"Pik{idx_p+1}_Nu0", f"Pik{idx_p+1}_Amp", f"Pik{idx_p+1}_Width", f"Pik{idx_p+1}_Shape"])
+                            p_values.extend([float(p_dict['center']), float(p_dict['amp']), float(p_dict['width']), float(p_dict['shape'])])
+
+                        tbl_x = np.arange(1, len(p_values) + 1, dtype=np.float64)
+                        tbl_y = np.array(p_values, dtype=np.float64)
+
+                        port_results[(node, "out_fit")] = (target_x.copy(), combined_fit_y)
                         port_results[(node, "out_res")] = (target_x.copy(), excess_res)
                         port_results[(node, "out_fit_res")] = (target_x.copy(), w0_target - fit_y)
                         port_results[(node, "out_comps")] = (target_x.copy(), comps_y)
                         port_results[(node, "out_peaks")] = (target_x.copy(), peaks_y)
+                        port_results[(node, "out_params")] = (tbl_x, tbl_y)
 
                     except Exception as e:
                         logger.warning(f"Błąd ewaluacji HDO Fit w DAG: {e}")
-                        port_results[(node, "out_fit")] = (target_x.copy(), w0_target)
+                        port_results[(node, "out_fit")] = (target_x.copy(), np.column_stack([w0_target, w0_target]))
                         port_results[(node, "out_res")] = (target_x.copy(), np.zeros_like(target_x))
                         port_results[(node, "out_fit_res")] = (target_x.copy(), np.zeros_like(target_x))
                         port_results[(node, "out_comps")] = (target_x.copy(), np.zeros_like(target_x))
                         port_results[(node, "out_peaks")] = (target_x.copy(), np.zeros_like(target_x))
+                        port_results[(node, "out_params")] = (np.array([1.0]), np.array([0.0]))
                 else:
-                    port_results[(node, "out_fit")] = (target_x.copy(), w0_target)
+                    port_results[(node, "out_fit")] = (target_x.copy(), np.column_stack([w0_target, w0_target]))
                     port_results[(node, "out_res")] = (target_x.copy(), np.zeros_like(target_x))
                     port_results[(node, "out_fit_res")] = (target_x.copy(), np.zeros_like(target_x))
                     port_results[(node, "out_comps")] = (target_x.copy(), np.zeros_like(target_x))
                     port_results[(node, "out_peaks")] = (target_x.copy(), np.zeros_like(target_x))
+                    port_results[(node, "out_params")] = (np.array([1.0]), np.array([0.0]))
 
-                port_names[(node, "out_fit")] = [target_name]
-                port_names[(node, "out_res")] = [target_name]
-                port_names[(node, "out_fit_res")] = [target_name]
-                port_names[(node, "out_comps")] = base_names if base_names else [f"Comp_{i + 1}" for i in
-                                                                                 range(len(bases_list))]
+                port_names[(node, "out_fit")] = [f"N_{target_name}", f"Fit_{target_name}"]
+                port_names[(node, "out_res")] = [f"Res_{target_name}"]
+                port_names[(node, "out_fit_res")] = [f"ΔFit_{target_name}"]
+                port_names[(node, "out_comps")] = base_names if base_names else [f"Comp_{i + 1}" for i in range(len(bases_list))]
                 port_names[(node, "out_peaks")] = [f"Pik_{i + 1}" for i in range(n_peaks)]
+                port_names[(node, "out_params")] = ["Wartosc"]
+                node.step_data['param_labels'] = p_labels if (len(bases_list) > 0 or n_peaks > 0) else ["Param"]
 
             # =================================================================
             # 7. ZBIERACZ / MUX (MERGE SPECTRA W MACIERZ 2D)
@@ -993,7 +1070,7 @@ class DAGEvaluator:
                     max_w = float(node.step_data.get('max_wn', 1700.0))
                     bl_mode = node.step_data.get('bl_mode', 'two_point')
 
-                    mask = (curr_x >= min_w) & (curr_x <= max_w)
+                    mask = (curr_x >= min(min_w, max_w)) & (curr_x <= max(min_w, max_w))
                     if not np.any(mask):
                         mask = np.ones(len(curr_x), dtype=bool)
 
@@ -1142,7 +1219,16 @@ class DAGEvaluator:
                     port_names[(node, "out")] = all_incoming_names
 
             # =================================================================
-            # 20. POZOSTAŁE FILTRY SEKWENCYJNE (Crop, AsLS, SG, SNV itd.)
+            # 20. TERMINAL TABELI DANYCH (OUTPUT_TABLE)
+            # =================================================================
+            elif ntype == "output_table":
+                data_in = get_source_data(node.in_ports.get("in"))
+                in_names = get_source_names(node.in_ports.get("in"))
+                port_results[(node, "in")] = data_in
+                port_names[(node, "in")] = in_names
+
+            # =================================================================
+            # 21. POZOSTAŁE FILTRY SEKWENCYJNE (Crop, AsLS, SG, SNV itd.)
             # =================================================================
             else:
                 data_in = get_source_data(node.in_ports.get("in"))

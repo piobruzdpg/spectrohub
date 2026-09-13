@@ -74,11 +74,11 @@ class ProjectMetadata:
 class DataTable:
     """
     Reprezentuje tabelę danych liczbowych (profile kinetyczne A(t), stężenia MCR C(t),
-    ładunki Scores PCA/SVD, parametry dekonwolucji itp.).
+    ładunki Scores PCA/SVD, parametry dekonwolucji / HDO Fit itp.).
     """
     table_id: str
     name: str
-    x_values: np.ndarray                 # Wektor osi X (czas, temperatura, nr próbki)
+    x_values: np.ndarray                 # Wektor osi X (czas, temperatura, nr próbki lub indeks parametru)
     y_columns: Dict[str, np.ndarray]    # Słownik kolumn danych {etykieta: wektor_Y}
     x_label: str = "Czas / Indeks"
     y_label: str = "Wartość / Stężenie"
@@ -98,6 +98,11 @@ class DataTable:
     def n_cols(self) -> int:
         return len(self.y_columns)
 
+    @property
+    def is_parameter_report(self) -> bool:
+        """Zwraca True, jeśli tabela jest zestawieniem parametrów (klucz-wartość), a nie profilem kinetycznym."""
+        return "row_labels" in self.metadata and len(self.metadata["row_labels"]) > 0
+
     def clone(self, new_name: Optional[str] = None) -> 'DataTable':
         """Tworzy niezależną kopię tabeli w pamięci RAM."""
         import copy
@@ -114,15 +119,23 @@ class DataTable:
 
     def to_tsv(self, decimal_comma: bool = True) -> str:
         """Generuje ciąg znaków TSV gotowy do wklejenia w OriginLab lub MS Excel."""
-        header = [self.x_label] + list(self.y_columns.keys())
-        lines = ["\t".join(header)]
+        row_labels = self.metadata.get("row_labels", [])
+        has_custom_labels = bool(row_labels and len(row_labels) == self.n_rows)
+
         col_names = list(self.y_columns.keys())
+        first_col_header = "Parametr" if has_custom_labels else self.x_label
+        header = [first_col_header] + col_names
+        lines = ["\t".join(header)]
 
         for i in range(self.n_rows):
-            x_str = f"{self.x_values[i]:.6g}"
-            if decimal_comma:
-                x_str = x_str.replace('.', ',')
-            row = [x_str]
+            if has_custom_labels:
+                lbl_str = str(row_labels[i])
+            else:
+                lbl_str = f"{self.x_values[i]:.6g}"
+                if decimal_comma:
+                    lbl_str = lbl_str.replace('.', ',')
+
+            row = [lbl_str]
             for c in col_names:
                 val = self.y_columns[c][i] if i < len(self.y_columns[c]) else np.nan
                 v_str = f"{val:.6g}"

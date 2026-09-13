@@ -1,6 +1,7 @@
 """
 gui/project_tree.py
-Drzewo obiektów projektu z obsługą folderów okien roboczych, Drag & Drop oraz zaawansowanym eksportem.
+Drzewo obiektów projektu z obsługą folderów okien roboczych, tabel danych,
+podglądu tabelarycznego (TableViewerDialog), Drag & Drop oraz zaawansowanym eksportem.
 """
 
 import os
@@ -9,7 +10,9 @@ from typing import List, Tuple, Optional
 from PySide6.QtCore import Qt, QThreadPool, QRunnable, Slot
 from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QMenu, QAbstractItemView,
-    QInputDialog, QFileDialog, QMessageBox, QApplication
+    QInputDialog, QFileDialog, QMessageBox, QApplication,
+    QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
+    QPushButton, QHeaderView, QLabel
 )
 
 from core.session import session
@@ -19,6 +22,104 @@ from io_hub.export_manager import ExportManager
 from core.i18n import tr
 
 logger = logging.getLogger("SpectroHub")
+
+
+class TableViewerDialog(QDialog):
+    """Eleganckie okno inspekcji i kopiowania danych tabelarycznych (np. parametry HDO Fit / kinetyka)."""
+
+    def __init__(self, table: DataTable, parent=None):
+        super().__init__(parent)
+        self.table = table
+        self.setWindowTitle(f"Tabela danych: {table.name}")
+        self.resize(680, 520)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        row_labels = table.metadata.get("row_labels", [])
+        has_custom_labels = bool(row_labels and len(row_labels) == table.n_rows)
+
+        lbl_info = QLabel(f"📊 <b>{table.name}</b> &nbsp;|&nbsp; Wiersze: {table.n_rows}, Kolumny: {table.n_cols}")
+        lbl_info.setStyleSheet("color: #48cae4; font-size: 12px;")
+        layout.addWidget(lbl_info)
+
+        col_keys = list(table.y_columns.keys())
+        first_header = "Parametr / Cecha" if has_custom_labels else table.x_label
+        headers = [first_header] + col_keys
+
+        self.table_widget = QTableWidget(table.n_rows, len(headers))
+        self.table_widget.setHorizontalHeaderLabels(headers)
+        self.table_widget.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        for col_idx in range(1, len(headers)):
+            self.table_widget.horizontalHeader().setSectionResizeMode(col_idx, QHeaderView.ResizeMode.Stretch)
+        self.table_widget.setAlternatingRowColors(True)
+        self.table_widget.setStyleSheet("""
+            QTableWidget {
+                background-color: #1a1a24;
+                alternate-background-color: #22222f;
+                gridline-color: #3d3d4e;
+                color: #e0e0e0;
+                font-size: 11px;
+            }
+            QHeaderView::section {
+                background-color: #2b2b3d;
+                color: #a8dadc;
+                font-weight: bold;
+                padding: 4px;
+                border: 1px solid #3d3d4e;
+            }
+        """)
+
+        for row_idx in range(table.n_rows):
+            lbl_val = str(row_labels[row_idx]) if has_custom_labels else f"{table.x_values[row_idx]:.6g}"
+            item_lbl = QTableWidgetItem(lbl_val)
+            item_lbl.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            self.table_widget.setItem(row_idx, 0, item_lbl)
+
+            for col_i, c_name in enumerate(col_keys):
+                val = table.y_columns[c_name][row_idx] if row_idx < len(table.y_columns[c_name]) else 0.0
+                item_val = QTableWidgetItem(f"{val:.6g}")
+                item_val.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                item_val.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self.table_widget.setItem(row_idx, col_i + 1, item_val)
+
+        layout.addWidget(self.table_widget)
+
+        btns_row = QHBoxLayout()
+        btn_copy = QPushButton("📋 Kopiuj dane (TSV pod Origin / Excel)")
+        btn_copy.setStyleSheet("background-color: #2a9d8f; font-weight: bold; padding: 6px 14px;")
+        btn_copy.clicked.connect(self._copy_tsv)
+        btns_row.addWidget(btn_copy)
+
+        btn_csv = QPushButton("💾 Zapisz CSV...")
+        btn_csv.clicked.connect(self._save_csv)
+        btns_row.addWidget(btn_csv)
+
+        btns_row.addStretch()
+
+        btn_close = QPushButton("Zamknij")
+        btn_close.clicked.connect(self.accept)
+        btns_row.addWidget(btn_close)
+
+        layout.addLayout(btns_row)
+
+    def _copy_tsv(self):
+        tsv_data = self.table.to_tsv(decimal_comma=True)
+        QApplication.clipboard().setText(tsv_data)
+        QMessageBox.information(self, "Schowek", "Pomyślnie skopiowano dane tabeli w formacie TSV!")
+
+    def _save_csv(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Zapisz tabelę jako CSV", f"{ExportManager.sanitize_filename(self.table.name)}.csv", "Plik CSV (*.csv)"
+        )
+        if path:
+            try:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(self.table.to_tsv(decimal_comma=True).replace("\t", ";"))
+                QMessageBox.information(self, "Zapisano", f"Pomyślnie zapisano tabelę do pliku:\n{path}")
+            except Exception as e:
+                QMessageBox.critical(self, "Błąd", f"Błąd zapisu tabeli:\n{e}")
 
 
 class FileImportWorker(QRunnable):
@@ -94,14 +195,12 @@ class ProjectTreeWidget(QTreeWidget):
         self.root_workspaces.setExpanded(True)
         self.root_workspaces.setData(0, Qt.UserRole + 1, "section_header")
 
-        # Inicjalizacja folderów i okien z sesji
         for f_id, folder in session.folders.items():
             self._create_folder_item(f_id, folder.name, folder.parent_folder_id)
 
         for win_id, win in session.windows.items():
             self._create_window_item(win_id, win.name, win.folder_id)
 
-        # Inicjalizacja tabel danych z sesji
         for t_id, tbl in session.tables.items():
             self._create_table_item(t_id, tbl.name, tbl.folder_id)
 
@@ -109,6 +208,7 @@ class ProjectTreeWidget(QTreeWidget):
         self.itemChanged.connect(self._on_item_changed)
         self.currentItemChanged.connect(self._on_selection_changed)
         self.itemClicked.connect(self._on_selection_changed)
+        self.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.customContextMenuRequested.connect(self._show_context_menu)
 
         session.session_cleared.connect(self._on_session_cleared)
@@ -124,7 +224,6 @@ class ProjectTreeWidget(QTreeWidget):
         session.series_added.connect(self._on_series_added)
         session.series_removed.connect(self._on_series_removed)
 
-        # Sygnały okien i folderów
         session.folder_added.connect(self._on_folder_added)
         session.folder_removed.connect(self._on_folder_removed)
         session.folder_renamed.connect(self._on_folder_renamed)
@@ -135,7 +234,6 @@ class ProjectTreeWidget(QTreeWidget):
         session.window_spectrum_added.connect(self._on_window_spectrum_added)
         session.window_spectrum_removed.connect(self._on_window_spectrum_removed)
 
-        # Sygnały tabel danych
         session.table_added.connect(self._on_table_added)
         session.table_removed.connect(self._on_table_removed)
         session.table_renamed.connect(self._on_table_renamed)
@@ -147,6 +245,17 @@ class ProjectTreeWidget(QTreeWidget):
             cat.takeChildren()
         self.root_workspaces.takeChildren()
         self._is_internal_update = False
+
+    def _on_item_double_clicked(self, item: QTreeWidgetItem, column: int):
+        if not item:
+            return
+        itype = item.data(0, Qt.UserRole + 1)
+        iname = item.data(0, Qt.UserRole)
+        if itype == "data_table" and iname:
+            tbl = session.get_table(iname)
+            if tbl:
+                dlg = TableViewerDialog(tbl, parent=self)
+                dlg.exec()
 
     # --- ZARZĄDZANIE FOLDERAMI I OKNAMI W DRZEWIE ---
     def _find_folder_item(self, folder_id: str, parent: Optional[QTreeWidgetItem] = None) -> Optional[QTreeWidgetItem]:
@@ -329,7 +438,6 @@ class ProjectTreeWidget(QTreeWidget):
         first_type = first_sel.data(0, Qt.UserRole + 1)
         first_id = first_sel.data(0, Qt.UserRole)
 
-        # 1. Przeciąganie OKNA ROBOCZEGO (workspace_window)
         if first_type == "workspace_window":
             if target_type == "window_folder":
                 session.move_window_to_folder(first_id, target_id)
@@ -345,7 +453,6 @@ class ProjectTreeWidget(QTreeWidget):
                 event.acceptProposedAction()
                 return
 
-        # 2. Przeciąganie FOLDERU (window_folder)
         if first_type == "window_folder":
             if target_type == "window_folder" and target_id != first_id:
                 f = session.get_folder(first_id)
@@ -362,7 +469,6 @@ class ProjectTreeWidget(QTreeWidget):
                 event.acceptProposedAction()
                 return
 
-        # Przeciąganie TABELI DANYCH (data_table)
         if first_type == "data_table":
             if target_type == "window_folder":
                 session.move_table_to_folder(first_id, target_id)
@@ -373,7 +479,6 @@ class ProjectTreeWidget(QTreeWidget):
                 event.acceptProposedAction()
                 return
 
-        # 3. Przeciąganie WIDM do okna lub folderu
         target_win_id = None
         if target_type == "workspace_window":
             target_win_id = target_id
@@ -414,7 +519,6 @@ class ProjectTreeWidget(QTreeWidget):
         event.ignore()
 
     def _on_window_folder_changed_refresh(self):
-        # Przebudowa struktury okien przy zagnieżdżaniu folderów
         self.root_workspaces.takeChildren()
         for f_id, folder in session.folders.items():
             self._create_folder_item(f_id, folder.name, folder.parent_folder_id)
@@ -623,7 +727,6 @@ class ProjectTreeWidget(QTreeWidget):
 
         elif current == self.root_workspaces or item_type == "window_folder":
             session.set_context("window")
-            # Jeśli kliknięto na folder, uaktywnij pierwsze okno w tym folderze
             if item_type == "window_folder":
                 for i in range(current.childCount()):
                     c = current.child(i)
@@ -659,7 +762,6 @@ class ProjectTreeWidget(QTreeWidget):
     # =========================================================================
 
     def _get_window_relative_path(self, win: WorkspaceWindow) -> str:
-        """Zwraca relatywną ścieżkę katalogu okna z uwzględnieniem folderów nadrzędnych."""
         parts = [win.name]
         cur_fid = win.folder_id
         while cur_fid:
@@ -673,31 +775,11 @@ class ProjectTreeWidget(QTreeWidget):
         clean_parts = [ExportManager.sanitize_filename(p) for p in parts]
         return os.path.join(*clean_parts)
 
-    def _get_folder_relative_path(self, folder_id: str) -> str:
-        """Zwraca relatywną ścieżkę folderu z uwzględnieniem podfolderów nadrzędnych."""
-        parts = []
-        cur_fid = folder_id
-        while cur_fid:
-            f = session.get_folder(cur_fid)
-            if f:
-                parts.append(f.name)
-                cur_fid = f.parent_folder_id
-            else:
-                break
-        parts.reverse()
-        clean_parts = [ExportManager.sanitize_filename(p) for p in parts]
-        return os.path.join(*clean_parts) if clean_parts else ""
-
     def _collect_export_targets(self, clicked_item: QTreeWidgetItem,
                                 selected_items: List[QTreeWidgetItem]) -> Tuple[List[Tuple[SpectrumData, str]], str]:
-        """
-        Gromadzi obiekty widm do eksportu wraz z ich dziedziczoną ścieżką w strukturze folderów.
-        Zwraca: (lista_krotek_(SpectrumData, rel_dir), sugerowana_nazwa_bazowa).
-        """
         targets: List[Tuple[SpectrumData, str]] = []
         seen_keys = set()
 
-        # Jeśli kliknięto w element będący częścią multiselekcji
         items_to_process = selected_items if (selected_items and clicked_item in selected_items and len(selected_items) > 1) else [clicked_item]
 
         suggested_name = "Eksport_Widm"
@@ -717,21 +799,18 @@ class ProjectTreeWidget(QTreeWidget):
             itype = itm.data(0, Qt.UserRole + 1)
             iname = itm.data(0, Qt.UserRole)
 
-            # 1. Pojedyncze widmo w oknie
             if itype == "window_spectrum":
                 win_id = itm.data(0, Qt.UserRole + 2)
                 win = session.windows.get(win_id)
                 rel_dir = self._get_window_relative_path(win) if win else ""
                 add_spec(win.spectra.get(iname) if win else None, rel_dir)
 
-            # 2. Pojedyncze widmo w magazynie
             elif itype in ["spectrum", "dft"]:
                 add_spec(session.get_spectrum(iname), "Pomiary_Eksperymentalne" if itype == "spectrum" else "DFT")
 
             elif itype == "atm":
                 add_spec(session.get_spectrum(iname), "Wzorce_Atmosfery")
 
-            # 3. Całe Okno Robocze
             elif itype == "workspace_window":
                 win = session.windows.get(iname)
                 if win:
@@ -739,7 +818,6 @@ class ProjectTreeWidget(QTreeWidget):
                     for s in win.spectra.values():
                         add_spec(s, rel_dir)
 
-            # 4. Cały Folder Okien
             elif itype == "window_folder":
                 folder_id = iname
 
@@ -755,14 +833,12 @@ class ProjectTreeWidget(QTreeWidget):
                     for s in win.spectra.values():
                         add_spec(s, rel_dir)
 
-            # 5. Korzeń sekcji Okien Roboczych
             elif itm == self.root_workspaces:
                 for win in session.windows.values():
                     rel_dir = self._get_window_relative_path(win)
                     for s in win.spectra.values():
                         add_spec(s, rel_dir)
 
-            # 6. Gałęzie Magazynu
             elif itm == self.root_exp:
                 for s in session.spectra.values():
                     add_spec(s, "Pomiary_Eksperymentalne")
@@ -849,7 +925,6 @@ class ProjectTreeWidget(QTreeWidget):
                 session.rename_table(tbl_id, name.strip())
 
     def _populate_export_menu(self, menu: QMenu, item: QTreeWidgetItem, selected_items: List[QTreeWidgetItem]):
-        """Wstrzykuje inteligentne opcje zapisu i eksportu do menu kontekstowego."""
         targets, suggested_name = self._collect_export_targets(item, selected_items)
         if not targets:
             return
@@ -859,7 +934,6 @@ class ProjectTreeWidget(QTreeWidget):
         last_fmt = ExportManager.get_format_info(last_fmt_id)
         all_fmts = ExportManager.get_all_formats()
 
-        # Pojedyncze widmo (zapis bezpośredni)
         if len(targets) == 1 and (item.data(0, Qt.UserRole + 1) in ["spectrum", "dft", "atm", "window_spectrum"]):
             spec, _ = targets[0]
 
@@ -875,7 +949,6 @@ class ProjectTreeWidget(QTreeWidget):
             act_zip = sub_export.addAction("📦 Spakuj do pojedynczego ZIP...")
             act_zip.triggered.connect(lambda checked=False, f=last_fmt_id: self._export_batch_zip_dialog(targets, spec.name, f))
 
-        # Wiele widm / Okno / Folder
         else:
             act_quick_dir = menu.addAction(f"⚡ Zapisz zaznaczone ({len(targets)}) jako {last_fmt['short_name']} (Katalog)...")
             act_quick_dir.triggered.connect(lambda: self._export_batch_dir_dialog(targets, last_fmt_id))
@@ -953,6 +1026,11 @@ class ProjectTreeWidget(QTreeWidget):
             tbl_id = item.data(0, Qt.UserRole)
             tbl = session.get_table(tbl_id)
             if tbl:
+                act_view = menu.addAction("🔍 Pokaż tabelę / parametry...")
+                act_view.triggered.connect(lambda: TableViewerDialog(tbl, parent=self).exec())
+
+                menu.addSeparator()
+
                 act_copy_tsv = menu.addAction("📋 Kopiuj dane (TSV pod Origin / Excel)")
                 act_copy_tsv.triggered.connect(
                     lambda: QApplication.clipboard().setText(tbl.to_tsv(decimal_comma=True)))
@@ -986,7 +1064,6 @@ class ProjectTreeWidget(QTreeWidget):
             act_rename = menu.addAction("✏️ Zmień nazwę okna...")
             act_rename.triggered.connect(lambda: self._prompt_rename_window(win_id))
 
-            # Przenoszenie do folderów
             sub_move = menu.addMenu("📁 Przenieś do folderu...")
             act_root = sub_move.addAction("Poziom główny (bez folderu)")
             act_root.triggered.connect(lambda: session.move_window_to_folder(win_id, None))

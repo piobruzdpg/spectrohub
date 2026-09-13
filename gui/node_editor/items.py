@@ -45,7 +45,7 @@ class PortItem(QGraphicsItem):
                 col = QColor("#e63946")
             elif "recon" in self.port_id or "fit" in self.port_id:
                 col = QColor("#f4a261")
-            elif "conc" in self.port_id or "scores" in self.port_id or "area" in self.port_id:
+            elif "conc" in self.port_id or "scores" in self.port_id or "area" in self.port_id or "params" in self.port_id:
                 col = QColor("#52b788")
             elif "bl" in self.port_id:
                 col = QColor("#9d4edd")
@@ -171,8 +171,8 @@ class ConnectionItem(QGraphicsPathItem):
 
 class NodeItem(QGraphicsItem):
     """Wizualny węzeł grafu z obsługą 1-3 widm sparklines, mini-raportów i granularnych portów."""
-    WIDTH = 215
-    HEIGHT = 145
+    WIDTH = 220
+    HEIGHT = 150
 
     def __init__(self, node_type: str, title: str, step_data: Optional[Dict[str, Any]] = None):
         super().__init__()
@@ -199,29 +199,29 @@ class NodeItem(QGraphicsItem):
         # 1. Wejścia (In ports)
         if self.node_type == "math_op":
             p_a = PortItem(is_output=False, node_item=self, port_id="in_a", label="A")
-            p_a.setPos(0, 68)
+            p_a.setPos(0, 70)
             self.in_ports["in_a"] = p_a
 
             p_b = PortItem(is_output=False, node_item=self, port_id="in_b", label="B")
-            p_b.setPos(0, 108)
+            p_b.setPos(0, 112)
             self.in_ports["in_b"] = p_b
 
         elif self.node_type == "internal_standard":
             p_sig = PortItem(is_output=False, node_item=self, port_id="in_signal", label="Syg")
-            p_sig.setPos(0, 68)
+            p_sig.setPos(0, 70)
             self.in_ports["in_signal"] = p_sig
 
             p_ref = PortItem(is_output=False, node_item=self, port_id="in_ref", label="IS")
-            p_ref.setPos(0, 108)
+            p_ref.setPos(0, 112)
             self.in_ports["in_ref"] = p_ref
 
         elif self.node_type == "vaporfit":
             p_sig = PortItem(is_output=False, node_item=self, port_id="in_signal", label="Syg")
-            p_sig.setPos(0, 68)
+            p_sig.setPos(0, 70)
             self.in_ports["in_signal"] = p_sig
 
             p_atm = PortItem(is_output=False, node_item=self, port_id="in_atm", label="Atm", allow_multiple=True)
-            p_atm.setPos(0, 108)
+            p_atm.setPos(0, 112)
             self.in_ports["in_atm"] = p_atm
 
         elif self.node_type == "hdo_decomposition":
@@ -241,20 +241,15 @@ class NodeItem(QGraphicsItem):
             p_mc.setPos(0, 120)
             self.in_ports["in_mc"] = p_mc
 
-        elif self.node_type in ("output_window", "merge_spectra"):
+        elif self.node_type in ("output_window", "output_table", "merge_spectra"):
             p_in = PortItem(is_output=False, node_item=self, port_id="in", label="In", allow_multiple=True)
-            p_in.setPos(0, 88)
+            p_in.setPos(0, 90)
             self.in_ports["in"] = p_in
 
         elif self.node_type not in ("input", "spectrum_select", "dft_broadener",
                                     "hdo_spectrum_scaled", "synthetic_peak", "mc_params"):
             p_in = PortItem(is_output=False, node_item=self, port_id="in", label="In")
-            p_in.setPos(0, 88)
-            self.in_ports["in"] = p_in
-
-        elif self.node_type in ("output_window", "output_table", "merge_spectra"):
-            p_in = PortItem(is_output=False, node_item=self, port_id="in", label="In", allow_multiple=True)
-            p_in.setPos(0, 88)
+            p_in.setPos(0, 90)
             self.in_ports["in"] = p_in
 
         # 2. Wyjścia (Out ports)
@@ -292,67 +287,71 @@ class NodeItem(QGraphicsItem):
             self.out_ports["out_res"] = p_res
 
         elif self.node_type == "hdo_decomposition":
-            p_fit = PortItem(is_output=True, node_item=self, port_id="out_fit", label="Fit")
-            p_fit.setPos(self.WIDTH, 38)
+            p_fit = PortItem(is_output=True, node_item=self, port_id="out_fit", label="Ź+Fit")
+            p_fit.setPos(self.WIDTH, 34)
             self.out_ports["out_fit"] = p_fit
 
             p_res = PortItem(is_output=True, node_item=self, port_id="out_res", label="Res")
-            p_res.setPos(self.WIDTH, 62)
+            p_res.setPos(self.WIDTH, 54)
             self.out_ports["out_res"] = p_res
 
             p_fres = PortItem(is_output=True, node_item=self, port_id="out_fit_res", label="ΔFit")
-            p_fres.setPos(self.WIDTH, 86)
+            p_fres.setPos(self.WIDTH, 74)
             self.out_ports["out_fit_res"] = p_fres
 
             p_cmp = PortItem(is_output=True, node_item=self, port_id="out_comps", label="W_k")
-            p_cmp.setPos(self.WIDTH, 108)
+            p_cmp.setPos(self.WIDTH, 94)
             self.out_ports["out_comps"] = p_cmp
 
             p_pks = PortItem(is_output=True, node_item=self, port_id="out_peaks", label="Pks")
-            p_pks.setPos(self.WIDTH, 130)
+            p_pks.setPos(self.WIDTH, 114)
             self.out_ports["out_peaks"] = p_pks
+
+            p_tab = PortItem(is_output=True, node_item=self, port_id="out_params", label="Tab")
+            p_tab.setPos(self.WIDTH, 134)
+            self.out_ports["out_params"] = p_tab
 
         elif self.node_type == "mc_params":
             p_out = PortItem(is_output=True, node_item=self, port_id="out_mc", label="MC")
-            p_out.setPos(self.WIDTH, 88)
+            p_out.setPos(self.WIDTH, 90)
             self.out_ports["out_mc"] = p_out
 
         elif self.node_type in ("hdo_spectrum_scaled", "synthetic_peak"):
             p_out = PortItem(is_output=True, node_item=self, port_id="out", label="Out")
-            p_out.setPos(self.WIDTH, 88)
+            p_out.setPos(self.WIDTH, 90)
             self.out_ports["out"] = p_out
 
         elif self.node_type == "band_integrate":
             p_out = PortItem(is_output=True, node_item=self, port_id="out", label="Area")
-            p_out.setPos(self.WIDTH, 88)
+            p_out.setPos(self.WIDTH, 90)
             self.out_ports["out"] = p_out
 
         elif self.node_type == "merge_spectra":
             p_out = PortItem(is_output=True, node_item=self, port_id="out", label="Mat")
-            p_out.setPos(self.WIDTH, 88)
+            p_out.setPos(self.WIDTH, 90)
             self.out_ports["out"] = p_out
 
         elif self.node_type in ("asls", "airpls", "poly_bl", "linear_bl"):
             p_out = PortItem(is_output=True, node_item=self, port_id="out", label="Syg")
-            p_out.setPos(self.WIDTH, 68)
+            p_out.setPos(self.WIDTH, 70)
             self.out_ports["out"] = p_out
 
             p_bl = PortItem(is_output=True, node_item=self, port_id="out_bl", label="BL")
-            p_bl.setPos(self.WIDTH, 108)
+            p_bl.setPos(self.WIDTH, 112)
             self.out_ports["out_bl"] = p_bl
 
         elif self.node_type == "vaporfit":
             p_out = PortItem(is_output=True, node_item=self, port_id="out", label="Syg")
-            p_out.setPos(self.WIDTH, 68)
+            p_out.setPos(self.WIDTH, 70)
             self.out_ports["out"] = p_out
 
             p_atm_fit = PortItem(is_output=True, node_item=self, port_id="out_atm", label="Atm")
-            p_atm_fit.setPos(self.WIDTH, 108)
+            p_atm_fit.setPos(self.WIDTH, 112)
             self.out_ports["out_atm"] = p_atm_fit
 
         else:
             p_out = PortItem(is_output=True, node_item=self, port_id="out", label="Out")
-            p_out.setPos(self.WIDTH, 88)
+            p_out.setPos(self.WIDTH, 90)
             self.out_ports["out"] = p_out
 
     def boundingRect(self) -> QRectF:
@@ -455,21 +454,21 @@ class NodeItem(QGraphicsItem):
         if self.node_type == "math_op":
             painter.setFont(QFont("Arial", 8, QFont.Bold))
             painter.setPen(QColor("#ffb703"))
-            painter.drawText(QRectF(10, 58, 20, 20), Qt.AlignLeft | Qt.AlignVCenter, "A")
+            painter.drawText(QRectF(10, 60, 20, 20), Qt.AlignLeft | Qt.AlignVCenter, "A")
             painter.setPen(QColor("#fb8500"))
-            painter.drawText(QRectF(10, 98, 20, 20), Qt.AlignLeft | Qt.AlignVCenter, "B")
+            painter.drawText(QRectF(10, 102, 20, 20), Qt.AlignLeft | Qt.AlignVCenter, "B")
         elif self.node_type == "internal_standard":
             painter.setFont(QFont("Arial", 8, QFont.Bold))
             painter.setPen(QColor("#ffb703"))
-            painter.drawText(QRectF(9, 58, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "Syg")
+            painter.drawText(QRectF(9, 60, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "Syg")
             painter.setPen(QColor("#fb8500"))
-            painter.drawText(QRectF(9, 98, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "IS")
+            painter.drawText(QRectF(9, 102, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "IS")
         elif self.node_type == "vaporfit":
             painter.setFont(QFont("Arial", 8, QFont.Bold))
             painter.setPen(QColor("#ffb703"))
-            painter.drawText(QRectF(9, 58, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "Syg")
+            painter.drawText(QRectF(9, 60, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "Syg")
             painter.setPen(QColor("#fb8500"))
-            painter.drawText(QRectF(9, 98, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "Atm")
+            painter.drawText(QRectF(9, 102, 24, 20), Qt.AlignLeft | Qt.AlignVCenter, "Atm")
         elif self.node_type == "hdo_decomposition":
             painter.setFont(QFont("Arial", 7, QFont.Bold))
             painter.setPen(QColor("#ffb703"))
@@ -503,40 +502,42 @@ class NodeItem(QGraphicsItem):
         elif self.node_type == "hdo_decomposition":
             painter.setFont(QFont("Arial", 7, QFont.Bold))
             painter.setPen(QColor("#f4a261"))
-            painter.drawText(QRectF(self.WIDTH - 36, 28, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Fit")
+            painter.drawText(QRectF(self.WIDTH - 42, 24, 32, 20), Qt.AlignRight | Qt.AlignVCenter, "Ź+Fit")
             painter.setPen(QColor("#e63946"))
-            painter.drawText(QRectF(self.WIDTH - 36, 52, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Res")
+            painter.drawText(QRectF(self.WIDTH - 36, 44, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Res")
             painter.setPen(QColor("#ffd166"))
-            painter.drawText(QRectF(self.WIDTH - 36, 76, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "ΔFit")
+            painter.drawText(QRectF(self.WIDTH - 36, 64, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "ΔFit")
             painter.setPen(QColor("#06d6a0"))
-            painter.drawText(QRectF(self.WIDTH - 36, 98, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "W_k")
+            painter.drawText(QRectF(self.WIDTH - 36, 84, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "W_k")
             painter.setPen(QColor("#ff006e"))
-            painter.drawText(QRectF(self.WIDTH - 36, 120, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Pks")
+            painter.drawText(QRectF(self.WIDTH - 36, 104, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Pks")
+            painter.setPen(QColor("#52b788"))
+            painter.drawText(QRectF(self.WIDTH - 36, 124, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Tab")
         elif self.node_type == "mc_params":
             painter.setFont(QFont("Arial", 8, QFont.Bold))
             painter.setPen(QColor("#ff9f1c"))
-            painter.drawText(QRectF(self.WIDTH - 36, 78, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "MC")
+            painter.drawText(QRectF(self.WIDTH - 36, 80, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "MC")
         elif self.node_type == "band_integrate":
             painter.setFont(QFont("Arial", 8, QFont.Bold))
             painter.setPen(QColor("#52b788"))
-            painter.drawText(QRectF(self.WIDTH - 40, 78, 30, 20), Qt.AlignRight | Qt.AlignVCenter, "Area")
+            painter.drawText(QRectF(self.WIDTH - 40, 80, 30, 20), Qt.AlignRight | Qt.AlignVCenter, "Area")
         elif self.node_type == "merge_spectra":
             painter.setFont(QFont("Arial", 8, QFont.Bold))
             painter.setPen(QColor("#06d6a0"))
-            painter.drawText(QRectF(self.WIDTH - 40, 78, 30, 20), Qt.AlignRight | Qt.AlignVCenter, "Mat")
+            painter.drawText(QRectF(self.WIDTH - 40, 80, 30, 20), Qt.AlignRight | Qt.AlignVCenter, "Mat")
         elif len(self.out_ports) > 1:
             painter.setFont(QFont("Arial", 8, QFont.Bold))
             painter.setPen(QColor("#48cae4"))
-            painter.drawText(QRectF(self.WIDTH - 36, 58, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Syg")
+            painter.drawText(QRectF(self.WIDTH - 36, 60, 26, 20), Qt.AlignRight | Qt.AlignVCenter, "Syg")
             painter.setPen(QColor("#9d4edd") if "out_bl" in self.out_ports else QColor("#00b4d8"))
             lbl_b = "BL" if "out_bl" in self.out_ports else "Atm"
-            painter.drawText(QRectF(self.WIDTH - 36, 98, 26, 20), Qt.AlignRight | Qt.AlignVCenter, lbl_b)
+            painter.drawText(QRectF(self.WIDTH - 36, 102, 26, 20), Qt.AlignRight | Qt.AlignVCenter, lbl_b)
 
         # Sparklines
         box_left = 32 if len(self.in_ports) > 1 else 10
-        box_right = self.WIDTH - (38 if len(self.out_ports) > 1 else 10)
+        box_right = self.WIDTH - (42 if self.node_type == "hdo_decomposition" else (38 if len(self.out_ports) > 1 else 10))
         box_w = box_right - box_left
-        box_rect = QRectF(box_left, 46, box_w, 88)
+        box_rect = QRectF(box_left, 46, box_w, 92)
 
         painter.setBrush(QBrush(QColor("#141419")))
         painter.setPen(QPen(QColor("#343a40"), 1))
@@ -605,7 +606,10 @@ class NodeItem(QGraphicsItem):
             elif self.node_type == "vaporfit": node_col = QColor("#48cae4")
             else: node_col = QColor("#00f5d4")
 
-            if len(curves) == 1:
+            if self.node_type == "hdo_decomposition" and len(curves) == 2:
+                # Kolor 0: Źródło przeskalowane (błękit), Kolor 1: Fit (pomarańcz)
+                palette = [QColor("#48cae4"), QColor("#f4a261")]
+            elif len(curves) == 1:
                 palette = [node_col]
             elif len(curves) == 2:
                 palette = [QColor("#48cae4"), QColor("#ffd166")]
@@ -615,7 +619,7 @@ class NodeItem(QGraphicsItem):
             for idx, c_data in enumerate(curves):
                 y_norm = (c_data[sampled_indices] - y_min) / y_rng
                 y_norm = np.clip(np.nan_to_num(y_norm, nan=0.0), 0.0, 1.0)
-                y_coords = (46 + 88 - 4) - y_norm * (88 - 8)
+                y_coords = (46 + 92 - 4) - y_norm * (92 - 8)
 
                 path = QPainterPath()
                 path.moveTo(x_coords[0], y_coords[0])
@@ -700,16 +704,16 @@ class NodeItem(QGraphicsItem):
         if action == act_dup:
             if self.scene() and hasattr(self.scene(), 'dialog_owner'):
                 self.scene().dialog_owner.duplicate_node(self)
-            elif action == act_edit:
-                if self.node_type in ("input", "output", "output_window", "math_op", "scalar_math", "vaporfit",
-                                      "spectrum_select", "output_table",
-                                      "photometry", "dft_broadener",
-                                      "svd_denoise", "mcr_decompose", "matrix_scaling",
-                                      "internal_standard", "band_integrate", "merge_spectra",
-                                      "hdo_spectrum_scaled", "synthetic_peak", "mc_params", "hdo_decomposition"):
-                    dlg = NodeParamDialog(self)
-                else:
-                    dlg = StepParamDialog(self.step_data)
+        elif action == act_edit:
+            if self.node_type in ("input", "output", "output_window", "math_op", "scalar_math", "vaporfit",
+                                  "spectrum_select", "output_table",
+                                  "photometry", "dft_broadener",
+                                  "svd_denoise", "mcr_decompose", "matrix_scaling",
+                                  "internal_standard", "band_integrate", "merge_spectra",
+                                  "hdo_spectrum_scaled", "synthetic_peak", "mc_params", "hdo_decomposition"):
+                dlg = NodeParamDialog(self)
+            else:
+                dlg = StepParamDialog(self.step_data)
             if dlg.exec() == QDialog.Accepted and self.scene() and hasattr(self.scene(), 'dialog_owner'):
                 self.scene().dialog_owner.recalculate_graph_preview()
                 self.scene().dialog_owner.sync_state_to_session()

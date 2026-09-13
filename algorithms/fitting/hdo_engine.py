@@ -22,7 +22,6 @@ def gxl_peak(wavenb: np.ndarray, amp: float, center: float, shape: float, width:
     """
     diff_sq = ((wavenb - center) / max(width, 1e-4)) ** 2
     exponent = -((1.0 - shape) / 2.0) * diff_sq
-    # Zabezpieczenie przed overflow w float64 (exp poniżej -100 to numeryczne 0.0)
     exponent_safe = np.clip(exponent, -100.0, 0.0)
     numerator = np.exp(exponent_safe)
     denominator = 1.0 + shape * diff_sq
@@ -43,12 +42,10 @@ def evaluate_total_fit(param: np.ndarray, wavenb: np.ndarray,
     else:
         fit_y = np.zeros_like(wavenb, dtype=np.float64)
 
-    # Suma ważonych widm bazowych: sum(c_i * W_i)
     if k_components > 0:
         coeffs = param[3: 3 + k_components]
         fit_y += np.dot(coeffs, base_matrix)
 
-    # Suma pików syntetycznych GxL
     start_peaks = 3 + k_components
     for i in range(n_peaks):
         pos = start_peaks + i * 4
@@ -98,15 +95,12 @@ class HDOFitEngine:
         total_p = 3 + k_components + 4 * n_peaks
         guesses = np.zeros((n_samples, total_p), dtype=np.float64)
 
-        # Baseline: start wokół 0
         guesses[:, 0:3] = 0.0
 
-        # Losowanie wag dla każdego z k widm bazowych
         for i in range(k_components):
             low, high = comp_bounds[i]
             guesses[:, 3 + i] = np.random.uniform(low, high, n_samples)
 
-        # Losowanie parametrów pików syntetycznych GxL
         max_amp = max(np.max(target), 1e-3)
         wn_min, wn_max = np.min(wavenb), np.max(wavenb)
         start_peaks = 3 + k_components
@@ -183,6 +177,7 @@ class HDOFitEngine:
         best_params = guesses[0]
 
         ctx = multiprocessing.get_context("spawn")
+        notify_step = max(1, n_iterations // 100)
 
         with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers, mp_context=ctx) as executor:
             futures = [executor.submit(_mc_fit_worker, t) for t in tasks]
@@ -192,9 +187,9 @@ class HDOFitEngine:
                     best_rss = rss
                     best_params = params
 
-                if progress_callback and (idx % max(1, n_iterations // 50) == 0 or idx == n_iterations - 1):
-                    # Callback zwraca True, jeśli użytkownik kliknął Anuluj
-                    should_cancel = progress_callback(int((idx + 1) / n_iterations * 100), best_rss)
+                if progress_callback and (idx % notify_step == 0 or idx == n_iterations - 1):
+                    # Przekazanie: aktualny krok, całkowite iteracje, najlepsze RSS
+                    should_cancel = progress_callback(idx + 1, n_iterations, best_rss)
                     if should_cancel:
                         for f in futures:
                             f.cancel()
@@ -275,5 +270,8 @@ class HDOFitEngine:
             'rss': ss_res,
             'r2': r2,
             'rmse': rmse,
-            'chi2_red': chi2_red
+            'chi2_red': chi2_red,
+            'n_iterations': n_iterations,
+            'penalty_weight': penalty_weight,
+            'baseline_active': baseline_active
         }

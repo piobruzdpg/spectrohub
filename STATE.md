@@ -559,6 +559,26 @@ spectrohub/
 * **Integracja z edycją węzła `output`:** Dwuklik i menu PPM na klocku zapisu standardowego otwiera pełne okno konfiguracji nazewnictwa.
 * **Stabilizacja odświeżania podglądu:** Naprawiono obsługę dwuelementowej krotki `(port_results, port_names)` w `recalculate_graph_preview()`, eliminując błąd `AttributeError` podczas edycji potoku.
 
+### 11.09.2026 — Checkpoint: Obiekt DataTable, Obsługa Folderowa Profili i Terminal output_table
 
+**1. Nowa Struktura Danych: Tabele i Profile Liczbowe (`core/models.py`, `core/session.py`)**
+* **Model `DataTable`:** Pierwszorzędna reprezentacja danych niewidmowych: profili kinetycznych $A(t)$, ramp temperaturowych $A(T)$, stężeń MCR-ALS $C(t)$, ładunków Scores PCA/SVD oraz całek pasm.
+* **Wbudowany format TSV:** Metoda `.to_tsv()` generująca sformatowany ciąg z uwzględnieniem przecinka dziesiętnego, gotowy do natychmiastowego wklejenia w OriginLab lub MS Excel.
+* **Integracja z sesją:** Nowy kontekst `'table'`, rejestracja w `session.tables` oraz zestaw sygnałów (`table_added`, `table_removed`, `table_folder_changed`, `active_table_changed`).
+
+**2. Dedykowany Węzeł Terminalowy DAG (`output_table`)**
+* **Przechwytywanie strumieni numerycznych:** Węzeł `output_table` („📊 Zapisz jako Tabelę / Profil”) automatycznie zapisuje dane z portów `Area`, `out_conc` czy `out_scores` bez sztucznego rzutowania ich na format widma.
+* **Konfiguracja w `NodeParamDialog`:** Elastyczny dobór nazwy tabeli, docelowego folderu w drzewie projektu oraz etykiet osi X i Y.
+* **Rejestracja w palecie:** Dodanie węzła do sekcji *Węzły Końcowe (Terminale)* z obsługą kabli multi-input.
+
+**3. Prezentacja na Wykresie i Integracja z Eksploratorem (`canvas.py`, `project_tree.py`)**
+* **Automatyczne przełączanie osi (`draw_table`):** Wybór tabeli w drzewie generuje na `SpectroCanvas` klasyczny wykres punktowo-liniowy $X-Y$ z normalną (nieodwróconą) osią X, paletą wieloserijną i dolnym paskiem informacyjnym.
+* **Architektura folderowa (Drag & Drop):** Tabele funkcjonują w tych samych folderach co okna robocze z pełnym wsparciem przeciągania myszą między gałęziami i na poziom główny.
+* **Menu kontekstowe PPM:** Bezpośrednie kopiowanie danych TSV do schowka systemowego pod Origin/Excel, eksport do pliku CSV, zmiana nazwy i relokacja w strukturze folderów.
+* **Stabilizacja fontów Matplotliba:** Usunięcie glifów emoji z adnotacji na wykresie, eliminujące błędy `UserWarning: Glyph missing from font DejaVu Sans`.
+
+**4. Trwałość Stanu w Kontenerze .shub (`io_hub/project_io.py`)**
+* **Format projektu v1.2.0:** Pełna serializacja manifestu tabel w `project.json` oraz bezstratny binarny zrzut wektorów X i kolumn Y do archiwum `data.npz` (`float64`).
+* **Bezpieczeństwo sesji:** Prawidłowe odtwarzanie powiązań tabel z folderami przy wczytywaniu projektu oraz czyszczeniu sesji.
 
 

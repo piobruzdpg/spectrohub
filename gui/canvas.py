@@ -2,6 +2,7 @@
 gui/canvas.py
 Wysokowydajny dwupanelowy wykres Matplotlib (Góra: Widma i Serie 2D, Dół: Residua/Kinetyka).
 Podwójny klik LPM = Reset zoomu, PPM = Menu kontekstowe, drag LPM = Zoom na obu panelach.
+Inteligentna obsługa tabel profili i raportów parametrów (HDO Fit).
 """
 
 import logging
@@ -45,7 +46,6 @@ class SpectroCanvas(QWidget):
         self.canvas = FigureCanvasQTAgg(self.fig)
         self.layout.addWidget(self.canvas)
 
-        # Stałe osie tworzone raz na cały czas życia obiektu
         self.ax_main = self.fig.add_subplot(4, 1, (1, 3))
         self.ax_sub = self.fig.add_subplot(4, 1, 4)
         self.ax_sub_top = self.ax_sub.twiny()
@@ -53,7 +53,6 @@ class SpectroCanvas(QWidget):
 
         self.fig.subplots_adjust(left=0.08, right=0.96, top=0.92, bottom=0.09, hspace=0.28)
 
-        # Maszyna stanów zoomu
         self.zoom_start = None
         self.zoom_rect = None
         self.zoom_target_ax = None
@@ -65,14 +64,12 @@ class SpectroCanvas(QWidget):
         self.interaction_mode = "normal"
         self._deconv_cache: Optional[Dict[str, Any]] = None
 
-        # Stan przekrojów kinetycznych
         self.kinetic_traces: List[Dict[str, Any]] = []
         self.last_kinetic_export_data: Optional[Dict[str, Any]] = None
 
         self._apply_styling()
         self._connect_events()
 
-        # Sygnały Magazynu Danych
         session.spectrum_added.connect(self.redraw_all)
         session.spectra_batch_added.connect(self.redraw_all)
         session.spectrum_removed.connect(self.redraw_all)
@@ -85,14 +82,12 @@ class SpectroCanvas(QWidget):
         session.series_visibility_changed.connect(self.redraw_all)
         session.active_series_changed.connect(self.redraw_all)
 
-        # Sygnały Okien Roboczych i Przełączania Kontekstu
         session.active_window_changed.connect(self.redraw_all)
         session.window_spectrum_added.connect(self.redraw_all)
         session.window_spectrum_removed.connect(self.redraw_all)
         session.window_visibility_changed.connect(self.redraw_all)
         session.context_changed.connect(self.redraw_all)
 
-        # Sygnały Tabel Danych
         session.active_table_changed.connect(self._on_active_table_changed)
 
     def _apply_styling(self):
@@ -135,7 +130,6 @@ class SpectroCanvas(QWidget):
         self.ax_sub_top.set_visible(False)
         self._apply_styling()
 
-        # Pobieramy widma w zależności od tego, czy patrzymy na Okno Robocze, czy na Magazyn
         visible_spectra = session.get_display_spectra()
         visible_series = session.get_visible_series() if session.active_context == "storage" else []
         active_spec = session.active_spectrum
@@ -149,7 +143,6 @@ class SpectroCanvas(QWidget):
         min_y, max_y = float('inf'), float('-inf')
         palette = ['#ee6c4d', '#98c1d9', '#3d5a80', '#2a9d8f', '#e76f51', '#f4a261']
 
-        # 1. POJEDYNCZE WIDMA (LineCollection przy > 15 widmach)
         n_spectra = len(visible_spectra)
         if n_spectra > 15:
             segments = []
@@ -199,7 +192,6 @@ class SpectroCanvas(QWidget):
                     h = (spec.stick_intens / (m_i if m_i > 0 else 1.0)) * m_y * 0.95
                     self.ax_main.vlines(f_scaled, 0, h, color=color, alpha=0.75, lw=1.2, ls='-', zorder=2.8)
 
-        # 2. SERIE 2D / TENSORY 3D
         series_colormaps = ['viridis', 'plasma', 'cividis', 'inferno']
         for s_idx, s_obj in enumerate(visible_series):
             is_series_active = (active_series and s_obj.name == active_series.name)
@@ -253,17 +245,12 @@ class SpectroCanvas(QWidget):
     # =========================================================================
 
     def _get_evolutionary_dataset(self) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray, str, bool]]:
-        """
-        Zwraca: (wavelengths, d_matrix, x_axis_values, x_axis_label, is_time_series).
-        Rozróżnia serię 2D z fizyczną osią czasu od zwykłej partii pojedynczych widm.
-        """
         active_series = session.active_series
         if not active_series:
             vis_series = session.get_visible_series()
             if vis_series:
                 active_series = vis_series[0]
 
-        # 1. SERIA 2D / TENSOR 3D
         if active_series:
             mat = active_series.get_matrix_2d()
             wn = active_series.wavenumbers
@@ -281,7 +268,6 @@ class SpectroCanvas(QWidget):
 
             return wn, mat, x_vals, x_label, is_time_series
 
-        # 2. PLIKI EKSPERYMENTALNE (POJEDYNCZE WIDMA WIDOCZNE W AKTYWNYM WIDOKU)
         vis_specs = session.get_display_spectra()
         if len(vis_specs) > 1:
             ref_wn = vis_specs[0].wavenumbers
@@ -298,7 +284,6 @@ class SpectroCanvas(QWidget):
         return None
 
     def _update_kinetic_slice(self, chosen_wn: float, add_trace: bool = False):
-        """Generuje i renderuje dolny wykres profilu kinetycznego dla wybranego pasma."""
         dataset = self._get_evolutionary_dataset()
         if not dataset:
             return
@@ -308,7 +293,6 @@ class SpectroCanvas(QWidget):
         exact_wn = float(wavelengths[idx])
         profile = d_matrix[idx, :]
 
-        # Obsługa Multi-Trace
         if not add_trace:
             for trace in self.kinetic_traces:
                 if 'v_line' in trace and trace['v_line']:
@@ -506,7 +490,6 @@ class SpectroCanvas(QWidget):
     # =========================================================================
 
     def _on_press(self, event):
-        # 1. PRAWY PRZYCISK MYSZY (PPM) -> MENU KONTEKSTOWE
         if event.button in [2, 3]:
             if event.inaxes in (self.ax_sub, self.ax_sub_top):
                 self._show_sub_context_menu()
@@ -515,7 +498,6 @@ class SpectroCanvas(QWidget):
                 self._show_main_context_menu()
                 return
 
-        # 2. PODWÓJNE KLIKNIĘCIE LEWYM PRZYCISKIEM (LPM DBLCLICK) -> RESET ZOOMU
         if event.button == 1 and getattr(event, 'dblclick', False):
             if event.inaxes == self.ax_main:
                 self._reset_main_zoom()
@@ -524,7 +506,6 @@ class SpectroCanvas(QWidget):
                 self._reset_sub_zoom()
                 return
 
-        # 3. ZDARZENIA NA DOLNYM PANELU (LPM -> POCZĄTEK ZOOMU)
         if event.inaxes in (self.ax_sub, self.ax_sub_top) and event.button == 1:
             if event.xdata is not None and event.ydata is not None:
                 self.zoom_target_ax = self.ax_sub
@@ -538,7 +519,6 @@ class SpectroCanvas(QWidget):
         if event.inaxes != self.ax_main:
             return
 
-        # 4. ZDARZENIA NA GÓRNYM PANELU
         modifiers = QApplication.keyboardModifiers()
         is_shift = bool(modifiers & Qt.ShiftModifier)
         is_other_mod = bool(modifiers & (Qt.ControlModifier | Qt.MetaModifier | Qt.AltModifier))
@@ -597,7 +577,6 @@ class SpectroCanvas(QWidget):
         dx = abs(x1 - x0)
         dy = abs(y1 - y0)
 
-        # A. ZOOM DOLNEGO PANELU
         if target_ax == self.ax_sub:
             if dx > 0.5 or dy > 0.005:
                 self.ax_sub.set_xlim(min(x0, x1), max(x0, x1))
@@ -607,7 +586,6 @@ class SpectroCanvas(QWidget):
                 self.canvas.draw_idle()
             return
 
-        # B. GÓRNY PANEL: ZOOM vs KLIK ANIALITYCZNY
         if dx > 3.0 or dy > 0.01:
             current_xlim = self.ax_main.get_xlim()
             is_inverted = current_xlim[0] > current_xlim[1]
@@ -804,7 +782,7 @@ class SpectroCanvas(QWidget):
             self.draw_table(table)
 
     def draw_table(self, table: Optional[DataTable] = None):
-        """Renderuje profil liczbowy DataTable jako elegancki wykres punktowo-liniowy X-Y."""
+        """Renderuje tabelę DataTable (dla profili kinetycznych: wykres X-Y; dla raportu parametrów: czytelna karta)."""
         if table is None:
             table = session.active_table
         if not table or table.n_rows == 0:
@@ -819,6 +797,49 @@ class SpectroCanvas(QWidget):
         self.ax_sub_top.set_visible(False)
         self._apply_styling()
 
+        clean_name = table.name.replace("📊", "").strip()
+
+        # BRANCH A: Tabela jest zestawieniem parametrów HDO / Fit (klucz-wartość)
+        if table.is_parameter_report:
+            row_labels = table.metadata.get("row_labels", [])
+            val_col = next(iter(table.y_columns.values())) if table.y_columns else []
+
+            # Wyciągnięcie kluczowych parametrów do podsumowania
+            summary_lines = [
+                f"TABELA PARAMETRÓW: {clean_name.upper()}",
+                "─" * 45
+            ]
+            for r_idx, lbl in enumerate(row_labels):
+                if r_idx < len(val_col):
+                    v = val_col[r_idx]
+                    if any(k in lbl for k in ['R2', 'RMSE', 'Chi2_red', 'RSS', 'N_multiplier', 'MC_Iterations']):
+                        summary_lines.append(f"  • {lbl:<18}: {v:.6g}")
+
+            summary_lines.append("─" * 45)
+            summary_lines.append("💡 Kliknij dwukrotnie tabelę w drzewie projektu, aby wyświetlić pełną tabelę wartości.")
+
+            full_card_text = "\n".join(summary_lines)
+
+            self.ax_main.text(
+                0.08, 0.5, full_card_text,
+                color="#00e5ff", fontfamily="monospace", fontsize=10,
+                va='center', ha='left', transform=self.ax_main.transAxes
+            )
+            self.ax_main.set_xticks([])
+            self.ax_main.set_yticks([])
+            self.ax_main.set_ylabel("")
+
+            self.ax_sub.set_ylabel("Status", color="#dcdcdc", fontsize=9)
+            self.ax_sub.text(
+                0.5, 0.5,
+                f"Zestawienie Parametrów: {clean_name}  |  {table.n_rows} parametrów  |  PPM: Kopiuj TSV / Zapisz CSV",
+                color="#a8dadc", ha='center', va='center',
+                transform=self.ax_sub.transAxes, fontsize=10
+            )
+            self.canvas.draw_idle()
+            return
+
+        # BRANCH B: Standardowy profil liczbowy (np. kinetyka, stężenia MCR, Scores)
         x = table.x_values
         palette = ['#00e5ff', '#ee6c4d', '#2a9d8f', '#f4a261', '#e0aaff', '#ffd166', '#ff4d6d']
 
@@ -831,7 +852,6 @@ class SpectroCanvas(QWidget):
         self.ax_main.set_ylabel(table.y_label, color="#dcdcdc", fontsize=10)
         self.ax_main.grid(True, linestyle='--', alpha=0.3, color='#888888')
 
-        # Normalna, nieodwrócona oś X (wartości rosną w prawo)
         min_x, max_x = float(np.min(x)), float(np.max(x))
         dx = (max_x - min_x) * 0.04 if max_x > min_x else 0.5
         self.ax_main.set_xlim(min_x - dx, max_x + dx)
@@ -849,8 +869,6 @@ class SpectroCanvas(QWidget):
         self.initial_xlim = self.ax_main.get_xlim()
         self.initial_ylim = self.ax_main.get_ylim()
 
-        # Dolny panel informacyjny (bez emoji dla silnika fontów Matplotliba)
-        clean_name = table.name.replace("📊", "").strip()
         self.ax_sub.set_ylabel("Status", color="#dcdcdc", fontsize=9)
         self.ax_sub.text(
             0.5, 0.5,
