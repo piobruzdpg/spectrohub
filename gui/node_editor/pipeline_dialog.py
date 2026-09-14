@@ -1,33 +1,29 @@
 """
 gui/node_editor/pipeline_dialog.py
 Główne okno edytora węzłów (QMainWindow) z architekturą wielozakładkową (Multi-Tab),
-przypięciem do lewej, wydzielaniem przez przeciągnięcie (Tear-off) lub menu PPM, dokowalną paletą
-oraz modalnym oknem postępu Monte Carlo.
+pustym oknem startowym oraz dynamicznym repozytorium szablonów w katalogu Graph_Templates/.
 """
 
 from typing import List, Dict, Any, Optional, Tuple
-import numpy as np
+import os
 import copy
 import json
 import logging
 
+import numpy as np
+
 from PySide6.QtWidgets import (
     QMainWindow, QDockWidget, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QGraphicsView, QGraphicsScene, QMenu, QLabel,
-    QComboBox, QCheckBox, QMessageBox, QToolBar, QFileDialog,
+    QCheckBox, QMessageBox, QToolBar, QFileDialog,
     QTabWidget, QTabBar, QInputDialog, QProxyStyle, QStyle,
     QProgressDialog, QApplication
 )
-
-from PySide6.QtCore import Qt, QPointF, QRectF, QTimer, QSettings, Signal
-from PySide6.QtGui import QPainter, QBrush, QColor, QPen
+from PySide6.QtCore import Qt, QPointF, QRectF, QTimer, QSettings, Signal, QUrl
+from PySide6.QtGui import QPainter, QBrush, QColor, QPen, QDesktopServices
 
 from core.session import session
-from core.models import SpectrumData, SpectralSeries, DataTable
-from gui.workspaces.ws_preprocessing import (
-    ModifySpectrumCommand, BatchPipelineCommand,
-    ModifySeriesCommand, AddBatchSpectraCommand
-)
+from core.models import SpectrumData, DataTable
 from gui.node_editor.items import NodeItem, PortItem, ConnectionItem
 from gui.node_editor.evaluator import DAGEvaluator
 from gui.node_editor.palette import NodeLibraryWidget, MIME_NODE_TYPE
@@ -35,8 +31,172 @@ from gui.node_editor.palette import NodeLibraryWidget, MIME_NODE_TYPE
 logger = logging.getLogger("SpectroHub")
 
 
+# =============================================================================
+# OBSŁUGA KATALOGU SZABLONÓW (Graph_Templates/)
+# =============================================================================
+
+def get_templates_dir() -> str:
+    """Zwraca ścieżkę do katalogu Graph_Templates w głównym folderze projektu."""
+    root_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    templates_dir = os.path.join(root_dir, "Graph_Templates")
+    if not os.path.exists(templates_dir):
+        alt_dir = os.path.join(root_dir, "graph_templates")
+        if os.path.exists(alt_dir):
+            return alt_dir
+        os.makedirs(templates_dir, exist_ok=True)
+    return templates_dir
+
+
+def _ensure_factory_templates(templates_dir: str):
+    """Generuje wbudowane szablony fabryczne, jeśli katalog Graph_Templates jest pusty."""
+    existing = [f for f in os.listdir(templates_dir) if f.lower().endswith(".json")]
+    if existing:
+        return
+
+    factory_presets = {
+        "01_Dekompozycja_HDO.json": {
+            "title": "🧪 Dekompozycja HDO / Monte Carlo",
+            "nodes": [
+                {"id": "n0", "type": "hdo_source_spectrum", "title": "📥 Widmo Źródłowe (W₀ · N)", "pos_x": 40.0, "pos_y": 60.0, "step_data": {"type": "hdo_source_spectrum", "name": "Widmo Źródłowe W₀", "n_multiplier": 1.0, "selected_spectrum": ""}},
+                {"id": "n1", "type": "hdo_spectrum_scaled", "title": "Widmo Składowe (W₁ · c)", "pos_x": 40.0, "pos_y": 210.0, "step_data": {"type": "hdo_spectrum_scaled", "name": "Widmo Skalowane", "scale": 1.0, "w_min": 0.0, "w_max": 1.5, "selected_spectrum": ""}},
+                {"id": "n2", "type": "synthetic_peak", "title": "Pik Syntetyczny (GxL)", "pos_x": 40.0, "pos_y": 360.0, "step_data": {"type": "synthetic_peak", "name": "Pik GxL @ 1650", "shape": "gxl", "center": 1650.0, "amp": 0.4, "width": 35.0, "shape_param": 0.5}},
+                {"id": "n3", "type": "hdo_config", "title": "⚙️ Konfiguracja HDO", "pos_x": 40.0, "pos_y": 510.0, "step_data": {"type": "hdo_config", "name": "Cfg: Auto (iter=3000)", "base_name": "", "prefix": "", "suffix": "", "n_iter": 3000, "penalty_weight": 10.0, "baseline_active": False}},
+                {"id": "n4", "type": "hdo_decomposition", "title": "Dekompozycja HDO / MC", "pos_x": 380.0, "pos_y": 210.0, "step_data": {"type": "hdo_decomposition", "name": "Solwer HDO"}},
+                {"id": "n5", "type": "output_folder", "title": "📁 Zapis do Folderu", "pos_x": 720.0, "pos_y": 210.0, "step_data": {"type": "output_folder", "name": "📁 Zapis do Folderu", "parent_folder_id": None}}
+            ],
+            "connections": [
+                {"from_node": "n0", "from_port": "out", "to_node": "n4", "to_port": "in_target"},
+                {"from_node": "n1", "from_port": "out", "to_node": "n4", "to_port": "in_bases"},
+                {"from_node": "n2", "from_port": "out", "to_node": "n4", "to_port": "in_peaks"},
+                {"from_node": "n3", "from_port": "out_cfg", "to_node": "n4", "to_port": "in_cfg"},
+                {"from_node": "n4", "from_port": "out_x", "to_node": "n5", "to_port": "in"}
+            ]
+        },
+        "02_Odszumianie_SVD.json": {
+            "title": "📊 Odszumianie SVD Rank-k + AsLS",
+            "nodes": [
+                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
+                {"id": "n1", "type": "svd_denoise", "title": "Odszumiacz SVD (k=3)", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "svd_denoise", "name": "SVD Denoise (k=3)", "k": 3, "center": False}},
+                {"id": "n2", "type": "asls", "title": "Linia Bazowa AsLS", "pos_x": 540.0, "pos_y": 140.0, "step_data": {"type": "asls", "name": "AsLS (λ=1e5, p=0.001)", "lam": 1e5, "p": 0.001}},
+                {"id": "n3", "type": "output_window", "title": "🗂️ Nowe Okno: Odszumione", "pos_x": 800.0, "pos_y": 140.0, "step_data": {"type": "output_window", "name": "🗂️ Okno: Odszumione SVD", "window_name": "Odszumione SVD", "mode": "create_new"}}
+            ],
+            "connections": [
+                {"from_node": "n0", "from_port": "out", "to_node": "n1", "to_port": "in"},
+                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in"},
+                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"}
+            ]
+        },
+        "03_MCR_ALS.json": {
+            "title": "🔬 Rozdział MCR-ALS",
+            "nodes": [
+                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Wszystkie widoczne", "source_mode": "visible"}},
+                {"id": "n1", "type": "asls", "title": "Linia Bazowa AsLS", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "asls", "name": "AsLS (λ=1e5, p=0.001)", "lam": 1e5, "p": 0.001}},
+                {"id": "n2", "type": "mcr_decompose", "title": "Dekompozycja MCR-ALS", "pos_x": 540.0, "pos_y": 140.0, "step_data": {"type": "mcr_decompose", "name": "MCR-ALS (k=2)", "method": "mcr_als", "k": 2, "non_negative": True, "closure": False, "unimodal": False, "max_iter": 500}},
+                {"id": "n3", "type": "output_window", "title": "🗂️ Nowe Okno: Czyste Widma", "pos_x": 800.0, "pos_y": 140.0, "step_data": {"type": "output_window", "name": "🗂️ Okno: MCR Składniki", "window_name": "MCR Składniki", "mode": "create_new"}}
+            ],
+            "connections": [
+                {"from_node": "n0", "from_port": "out", "to_node": "n1", "to_port": "in"},
+                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in"},
+                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"}
+            ]
+        },
+        "04_Kompensacja_ATM_AsLS.json": {
+            "title": "☁️ Kompensacja Atmosferyczna + AsLS",
+            "nodes": [
+                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Wszystkie widoczne", "source_mode": "visible"}},
+                {"id": "n1", "type": "vaporfit", "title": "VaporFit (Para wodna i CO₂)", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "vaporfit", "name": "VaporFit (SG=11)", "sg_points": 11, "sg_poly": 3}},
+                {"id": "n2", "type": "crop", "title": "Przycięcie (Crop)", "pos_x": 520.0, "pos_y": 140.0, "step_data": {"type": "crop", "name": "Przycięcie [1000–1800]", "min_w": 1000.0, "max_w": 1800.0}},
+                {"id": "n3", "type": "asls", "title": "Linia Bazowa AsLS", "pos_x": 760.0, "pos_y": 140.0, "step_data": {"type": "asls", "name": "AsLS (λ=1e5, p=0.001)", "lam": 1e5, "p": 0.001}},
+                {"id": "n4", "type": "output", "title": "💾 ZAPIS WYNIKU", "pos_x": 1000.0, "pos_y": 140.0, "step_data": {"type": "output", "name": "Zapis"}}
+            ],
+            "connections": [
+                {"from_node": "n0", "from_port": "out", "to_node": "n1", "to_port": "in_signal"},
+                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in"},
+                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"},
+                {"from_node": "n3", "from_port": "out", "to_node": "n4", "to_port": "in"}
+            ]
+        },
+        "05_Amid_I.json": {
+            "title": "🧬 Analiza Amidu I (Białka 1720–1580 cm⁻¹)",
+            "nodes": [
+                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
+                {"id": "n1", "type": "crop", "title": "Przycięcie Amidu I", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "crop", "name": "Przycięcie [1580–1720]", "min_w": 1580.0, "max_w": 1720.0}},
+                {"id": "n2", "type": "linear_bl", "title": "Linia bazowa (krańce)", "pos_x": 520.0, "pos_y": 140.0, "step_data": {"type": "linear_bl", "name": "Linia krańcowa"}},
+                {"id": "n3", "type": "minmax", "title": "Normalizacja Min-Max", "pos_x": 760.0, "pos_y": 140.0, "step_data": {"type": "minmax", "name": "Min-Max [0, 1]"}},
+                {"id": "n4", "type": "output", "title": "💾 ZAPIS WYNIKU", "pos_x": 1000.0, "pos_y": 140.0, "step_data": {"type": "output", "name": "Zapis"}}
+            ],
+            "connections": [
+                {"from_node": "n0", "from_port": "out", "to_node": "n1", "to_port": "in"},
+                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in"},
+                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"},
+                {"from_node": "n3", "from_port": "out", "to_node": "n4", "to_port": "in"}
+            ]
+        },
+        "06_Druga_Pochodna.json": {
+            "title": "🔍 Detekcja Składowych (2. Pochodna SG + Offset)",
+            "nodes": [
+                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
+                {"id": "n1", "type": "crop", "title": "Przycięcie Pasma", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "crop", "name": "Przycięcie [1500–1750]", "min_w": 1500.0, "max_w": 1750.0}},
+                {"id": "n2", "type": "sg_smooth", "title": "Wygładzanie SG", "pos_x": 520.0, "pos_y": 140.0, "step_data": {"type": "sg_smooth", "name": "SG (okno=13, st=3)", "win": 13, "poly": 3}},
+                {"id": "n3", "type": "deriv2", "title": "2. Pochodna (-) SG", "pos_x": 760.0, "pos_y": 140.0, "step_data": {"type": "deriv2", "name": "2. Pochodna SG (-) (okno=13)", "win": 13, "poly": 3}},
+                {"id": "n4", "type": "offset_min", "title": "Offset (Min ➔ 0.0)", "pos_x": 1000.0, "pos_y": 140.0, "step_data": {"type": "offset_min", "name": "Offset Min"}},
+                {"id": "n5", "type": "output", "title": "💾 ZAPIS WYNIKU", "pos_x": 1240.0, "pos_y": 140.0, "step_data": {"type": "output", "name": "Zapis"}}
+            ],
+            "connections": [
+                {"from_node": "n0", "from_port": "out", "to_node": "n1", "to_port": "in"},
+                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in"},
+                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"},
+                {"from_node": "n3", "from_port": "out", "to_node": "n4", "to_port": "in"},
+                {"from_node": "n4", "from_port": "out", "to_node": "n5", "to_port": "in"}
+            ]
+        },
+        "07_Spektroskopia_Roznicowa.json": {
+            "title": "🧪 Spektroskopia Różnicowa (A - k·B)",
+            "nodes": [
+                {"id": "n0", "type": "input", "title": "📈 Próbka Badana (A)", "pos_x": 40.0, "pos_y": 80.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
+                {"id": "n1", "type": "spectrum_select", "title": "Widmo Odniesienia (B)", "pos_x": 40.0, "pos_y": 240.0, "step_data": {"type": "spectrum_select", "name": "Ref: (wybierz)", "selected_spectrum": ""}},
+                {"id": "n2", "type": "math_op", "title": "Operacja Dwuwidmowa", "pos_x": 340.0, "pos_y": 160.0, "step_data": {"type": "math_op", "name": "A - 1.000·B", "op": "sub", "k": 1.0}},
+                {"id": "n3", "type": "linear_bl", "title": "Korekcja Linii Krańcowej", "pos_x": 580.0, "pos_y": 160.0, "step_data": {"type": "linear_bl", "name": "Linia krańcowa"}},
+                {"id": "n4", "type": "output", "title": "💾 ZAPIS WYNIKU", "pos_x": 820.0, "pos_y": 160.0, "step_data": {"type": "output", "name": "Zapis"}}
+            ],
+            "connections": [
+                {"from_node": "n0", "from_port": "out", "to_node": "n2", "to_port": "in_a"},
+                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in_b"},
+                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"},
+                {"from_node": "n3", "from_port": "out", "to_node": "n4", "to_port": "in"}
+            ]
+        },
+        "08_Porownanie_DFT.json": {
+            "title": "⚛️ Porównanie DFT z Eksperymentem",
+            "nodes": [
+                {"id": "n0", "type": "input", "title": "📈 Pomiary (A)", "pos_x": 40.0, "pos_y": 80.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
+                {"id": "n1", "type": "dft_broadener", "title": "⚛️ Splot DFT (B)", "pos_x": 40.0, "pos_y": 240.0, "step_data": {"type": "dft_broadener", "name": "DFT Broadener", "scale_factor": 0.965, "fwhm": 12.0, "shape": "lorentzian"}},
+                {"id": "n2", "type": "math_op", "title": "Różnica A - k·B", "pos_x": 340.0, "pos_y": 160.0, "step_data": {"type": "math_op", "name": "A - 1.000·B", "op": "sub", "k": 1.0}},
+                {"id": "n3", "type": "output_window", "title": "🗂️ Nowe Okno: Residua DFT", "pos_x": 620.0, "pos_y": 160.0, "step_data": {"type": "output_window", "name": "🗂️ Okno: Residua DFT", "window_name": "Residua DFT", "mode": "create_new"}}
+            ],
+            "connections": [
+                {"from_node": "n0", "from_port": "out", "to_node": "n2", "to_port": "in_a"},
+                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in_b"},
+                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"}
+            ]
+        }
+    }
+
+    for fname, data in factory_presets.items():
+        fpath = os.path.join(templates_dir, fname)
+        try:
+            with open(fpath, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"Nie udało się utworzyć szablonu {fname}: {e}")
+
+
+# =============================================================================
+# SERIALIZACJA NUMPY DO JSON
+# =============================================================================
+
 class NpEncoder(json.JSONEncoder):
-    """Zapewnia bezbłędny zrzut typów NumPy do natywnego formatu JSON."""
+    """Zapewnia poprawny zrzut obiektów NumPy do natywnego formatu JSON."""
     def default(self, obj):
         if isinstance(obj, np.ndarray):
             return obj.tolist()
@@ -50,7 +210,7 @@ class NpEncoder(json.JSONEncoder):
 
 
 def clean_for_json(obj):
-    """Rekurencyjnie usuwa duże bufory binarne i konwertuje skalary NumPy."""
+    """Rekurencyjnie czyści słownik z niepotrzebnych buforów wykonawczych i typów NumPy."""
     if isinstance(obj, dict):
         cleaned = {}
         for k, v in obj.items():
@@ -71,8 +231,11 @@ def clean_for_json(obj):
     return obj
 
 
+# =============================================================================
+# KOMPONENTY ZAKŁADEK I SCENY
+# =============================================================================
+
 class PipelineTabInfo:
-    """Kontener metadanych pojedynczej zakładki potoku."""
     def __init__(self, title: str, view: 'NodeView', scene: 'NodeScene'):
         self.title = title
         self.view = view
@@ -81,7 +244,6 @@ class PipelineTabInfo:
 
 
 class LeftAlignedTabStyle(QProxyStyle):
-    """Wymusza wyrównanie zakładek do lewej krawędzi (omija domyślne centrowanie na macOS)."""
     def styleHint(self, hint, option=None, widget=None, returnData=None):
         hint_val = int(hint.value) if hasattr(hint, 'value') else int(hint)
         target_val = int(QStyle.StyleHint.SH_TabBar_Alignment.value) if hasattr(QStyle.StyleHint.SH_TabBar_Alignment, 'value') else int(QStyle.StyleHint.SH_TabBar_Alignment)
@@ -91,7 +253,6 @@ class LeftAlignedTabStyle(QProxyStyle):
 
 
 class DetachableTabBar(QTabBar):
-    """Pasek zakładek z obsługą odrywania przez przeciągnięcie poza pasek oraz lewostronnego układu."""
     tabDetached = Signal(int)
 
     def __init__(self, parent=None):
@@ -121,8 +282,6 @@ class DetachableTabBar(QTabBar):
 
 
 class NodeScene(QGraphicsScene):
-    """Scena grafowa z obsługą przeciągania kabli, duplikacji i menu kontekstowego."""
-
     def __init__(self, dialog_owner: 'NodePipelineDialog', parent=None):
         super().__init__(parent)
         self.dialog_owner = dialog_owner
@@ -216,8 +375,6 @@ class NodeScene(QGraphicsScene):
 
 
 class NodeView(QGraphicsView):
-    """Widok z siatką współrzędnych, zoomem, panoramowaniem i obsługą upuszczania węzłów."""
-
     def __init__(self, scene: QGraphicsScene, parent=None):
         super().__init__(scene, parent)
         self.setRenderHints(QPainter.Antialiasing | QPainter.SmoothPixmapTransform)
@@ -334,8 +491,6 @@ class NodeView(QGraphicsView):
 
 
 class FloatingPipelineWindow(QMainWindow):
-    """Niezależne okno pływające dla wydzielonej zakładki potoku."""
-
     def __init__(self, tab_info: PipelineTabInfo, dialog_owner: 'NodePipelineDialog'):
         super().__init__(dialog_owner)
         self.tab_info = tab_info
@@ -386,9 +541,11 @@ class FloatingPipelineWindow(QMainWindow):
         super().closeEvent(event)
 
 
-class NodePipelineDialog(QMainWindow):
-    """Główne okno edytora potoku DAG z architekturą wielozakładkową i wydzielanymi oknami."""
+# =============================================================================
+# GŁÓWNE OKNO EDYTORA POTOKU
+# =============================================================================
 
+class NodePipelineDialog(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Potok Przetwarzania Węzłowego (DAG Node Engine)")
@@ -482,9 +639,13 @@ class NodePipelineDialog(QMainWindow):
         self._init_toolbar()
         self._restore_ui_state()
 
+        # Inicjalizacja katalogu szablonów i szablonów fabrycznych
+        _ensure_factory_templates(get_templates_dir())
+
         if session.dag_state:
             self.import_graph_state(session.dag_state)
         else:
+            # Puste okno startowe bez zbędnych nodów
             self.add_pipeline_tab(title="Główny potok")
             self.sync_state_to_session()
 
@@ -522,10 +683,9 @@ class NodePipelineDialog(QMainWindow):
         view = NodeView(scene, self)
         scene.selectionChanged.connect(self._on_selection_changed)
 
+        # Jeśli przekazano dane grafu, odtwórz je; w przeciwnym razie okno startowe pozostaje CZYSTE
         if graph_data and "nodes" in graph_data:
             self._deserialize_to_scene(scene, graph_data)
-        else:
-            self._spawn_default_pipeline(scene)
 
         tab_info = PipelineTabInfo(t_name, view, scene)
         self.tabs.append(tab_info)
@@ -566,7 +726,7 @@ class NodePipelineDialog(QMainWindow):
         if self.tab_widget.count() == 1:
             reply = QMessageBox.question(
                 self, "Resetuj potok",
-                "To jest jedyna otwarta zakładka. Czy chcesz zresetować potok do stanu domyślnego?",
+                "To jest jedyna otwarta zakładka. Czy chcesz zresetować potok do pustej sceny?",
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply == QMessageBox.Yes:
@@ -617,10 +777,7 @@ class NodePipelineDialog(QMainWindow):
             return
 
         nodes_list, conns_list = self._serialize_scene(tab.scene)
-        data = {
-            "nodes": nodes_list,
-            "connections": conns_list
-        }
+        data = {"nodes": nodes_list, "connections": conns_list}
         self.add_pipeline_tab(title=f"{tab.title} (Kopia)", graph_data=data, make_active=True)
 
     def _detach_tab_by_index(self, index: int):
@@ -693,12 +850,13 @@ class NodePipelineDialog(QMainWindow):
         btn_fit.clicked.connect(lambda: self.view.fit_to_content() if self.view else None)
         toolbar.addWidget(btn_fit)
 
-        btn_presets = QPushButton("📑 Szablony Potoków...")
-        btn_presets.setStyleSheet("background-color: #4a4e69; font-weight: bold; padding: 5px 12px;")
+        # Dynamiczne menu szablonów z katalogu Graph_Templates/
+        self.btn_presets = QPushButton("📑 Szablony Potoków...")
+        self.btn_presets.setStyleSheet("background-color: #4a4e69; font-weight: bold; padding: 5px 12px;")
         menu_presets = QMenu(self)
-        self._populate_presets_menu(menu_presets)
-        btn_presets.setMenu(menu_presets)
-        toolbar.addWidget(btn_presets)
+        menu_presets.aboutToShow.connect(lambda: self._populate_presets_menu(menu_presets))
+        self.btn_presets.setMenu(menu_presets)
+        toolbar.addWidget(self.btn_presets)
 
         toolbar.addSeparator()
 
@@ -714,7 +872,7 @@ class NodePipelineDialog(QMainWindow):
         btn_del.clicked.connect(lambda: self._delete_selected())
         toolbar.addWidget(btn_del)
 
-        btn_clear = QPushButton("Reset grafu")
+        btn_clear = QPushButton("Wyczyść scenę")
         btn_clear.clicked.connect(self._clear_graph)
         toolbar.addWidget(btn_clear)
 
@@ -732,7 +890,8 @@ class NodePipelineDialog(QMainWindow):
         self.dock_library.setObjectName("DockNodeLibrary")
         self.dock_library.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
 
-        categories = self._get_node_categories()
+        from gui.node_editor.registry import get_categories_dict
+        categories = get_categories_dict()
         self.palette_widget = NodeLibraryWidget(
             categories_dict=categories,
             on_node_double_clicked=self._on_palette_node_double_clicked,
@@ -746,12 +905,9 @@ class NodePipelineDialog(QMainWindow):
             center_scene = self.view.mapToScene(self.view.viewport().rect().center())
             self._add_processing_node(title, step_data, pos=center_scene)
 
-    def _get_node_categories(self) -> Dict[str, list]:
-        from gui.node_editor.registry import get_categories_dict
-        return get_categories_dict()
-
     def _populate_node_menu(self, menu: QMenu, pos: Optional[QPointF] = None, target_scene: Optional[NodeScene] = None):
-        categories = self._get_node_categories()
+        from gui.node_editor.registry import get_categories_dict
+        categories = get_categories_dict()
         for cat_name, items in categories.items():
             sub = menu.addMenu(cat_name)
             for label, data in items:
@@ -792,34 +948,6 @@ class NodePipelineDialog(QMainWindow):
         self.sync_state_to_session()
         return clone
 
-    def _spawn_default_pipeline(self, scene: Optional[NodeScene] = None):
-        target_scene = scene or self.scene
-        if not target_scene:
-            return
-
-        in_node = NodeItem(node_type="input", title="📥 ŹRÓDŁO DANYCH",
-                           step_data={'type': 'input', 'name': "Źródło: Aktywne widmo", 'source_mode': 'active'})
-        in_node.setPos(40, 120)
-        target_scene.addItem(in_node)
-
-        crop_node = NodeItem(node_type="crop", title="Przycięcie (Crop)",
-                             step_data={'type': 'crop', 'name': "Przycięcie [1000–1800]", 'min_w': 1000.0, 'max_w': 1800.0})
-        crop_node.setPos(280, 120)
-        target_scene.addItem(crop_node)
-
-        asls_node = NodeItem(node_type="asls", title="Linia Bazowa AsLS",
-                             step_data={'type': 'asls', 'name': "AsLS (λ=1e5, p=0.001)", 'lam': 1e5, 'p': 0.001})
-        asls_node.setPos(520, 120)
-        target_scene.addItem(asls_node)
-
-        out_node = NodeItem(node_type="output", title="💾 ZAPIS WYNIKU")
-        out_node.setPos(760, 120)
-        target_scene.addItem(out_node)
-
-        target_scene.addItem(ConnectionItem(in_node.out_ports["out"], crop_node.in_ports["in"]))
-        target_scene.addItem(ConnectionItem(crop_node.out_ports["out"], asls_node.in_ports["in"]))
-        target_scene.addItem(ConnectionItem(asls_node.out_ports["out"], out_node.in_ports["in"]))
-
     def _delete_selected(self, scene: Optional[NodeScene] = None):
         target_scene = scene or self.scene
         if not target_scene:
@@ -838,210 +966,71 @@ class NodePipelineDialog(QMainWindow):
         self.sync_state_to_session()
 
     def _clear_graph(self):
+        """Czyści aktywną scenę do zera bez wymuszonego wstawiania węzłów."""
         if not self.scene:
             return
         self.scene.clear()
-        self._spawn_default_pipeline(self.scene)
         self.recalculate_graph_preview(target_scene=self.scene)
         self.sync_state_to_session()
 
-    # --- PROCEDURY LABORATORYJNE (PRESETS) ---
+    # =========================================================================
+    # DYNAMICZNE REPOZYTORIUM SZABLONÓW (Graph_Templates/)
+    # =========================================================================
+
     def _populate_presets_menu(self, menu: QMenu):
-        sub_factory = menu.addMenu("🧪 Wbudowane procedury laboratoryjne")
+        menu.clear()
+        templates_dir = get_templates_dir()
+        files = sorted([f for f in os.listdir(templates_dir) if f.lower().endswith(".json")])
 
-        act_hdo = sub_factory.addAction("🧪 Dekompozycja HDO / Monte Carlo (W₀ - k·W₁ + Pasma GxL)")
-        act_hdo.triggered.connect(self._load_preset_hdo_decomposition)
+        if files:
+            for fname in files:
+                fpath = os.path.join(templates_dir, fname)
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    title = data.get("title", os.path.splitext(fname)[0].replace("_", " "))
+                except Exception:
+                    title = os.path.splitext(fname)[0].replace("_", " ")
 
-        act_svd = sub_factory.addAction("📊 Odszumianie SVD Rank-k + Linia Bazowa ➔ Nowe Okno")
-        act_svd.triggered.connect(self._load_preset_svd_denoise)
-
-        act_mcr = sub_factory.addAction("🔬 Rozdział MCR-ALS (Czyste składniki) ➔ Nowe Okno")
-        act_mcr.triggered.connect(self._load_preset_mcr_pipeline)
-
-        act_atm = sub_factory.addAction("☁️ Kompensacja Atmosferyczna + AsLS")
-        act_atm.triggered.connect(self._load_preset_atmospheric_asls)
-
-        act_amide = sub_factory.addAction("🧬 Analiza Amidu I (Białka 1720–1580 cm⁻¹)")
-        act_amide.triggered.connect(self._load_preset_amide_i)
-
-        act_deriv2 = sub_factory.addAction("🔍 Detekcja Składowych (2. Pochodna SG + Offset)")
-        act_deriv2.triggered.connect(self._load_preset_second_derivative)
-
-        act_diff = sub_factory.addAction("🧪 Spektroskopia Różnicowa (A - k·B)")
-        act_diff.triggered.connect(self._load_preset_differential_math)
-
-        act_dft = sub_factory.addAction("⚛️ Porównanie DFT z Eksperymentem (Splot + Odejmowanie)")
-        act_dft.triggered.connect(self._load_preset_dft_comparison)
+                act = menu.addAction(title)
+                act.triggered.connect(lambda chk=False, p=fpath: self._load_preset_from_file_path(p))
+        else:
+            act_empty = menu.addAction("(Brak szablonów w katalogu Graph_Templates)")
+            act_empty.setEnabled(False)
 
         menu.addSeparator()
 
-        act_save_file = menu.addAction("💾 Zapisz potok jako szablon (*.json)...")
-        act_save_file.triggered.connect(self._save_preset_to_json)
+        act_save = menu.addAction("💾 Zapisz potok do Graph_Templates...")
+        act_save.triggered.connect(self._save_preset_to_json)
 
-        act_load_file = menu.addAction("📂 Wczytaj szablon z pliku (*.json)...")
-        act_load_file.triggered.connect(self._load_preset_from_json)
+        act_load = menu.addAction("📂 Wczytaj szablon z pliku zewnętrznego...")
+        act_load.triggered.connect(self._load_preset_from_json)
 
-    def _load_preset_hdo_decomposition(self):
-        data = {
-            "nodes": [
-                {"id": "n0", "type": "hdo_source_spectrum", "title": "📥 Widmo Źródłowe (W₀ · N)", "pos_x": 40.0,
-                 "pos_y": 60.0,
-                 "step_data": {"type": "hdo_source_spectrum", "name": "Widmo Źródłowe W₀", "n_multiplier": 1.0,
-                               "selected_spectrum": ""}},
-                {"id": "n1", "type": "hdo_spectrum_scaled", "title": "Widmo Składowe (W₁ · c)", "pos_x": 40.0,
-                 "pos_y": 210.0,
-                 "step_data": {"type": "hdo_spectrum_scaled", "name": "Widmo Skalowane", "scale": 1.0, "w_min": 0.0,
-                               "w_max": 1.5, "selected_spectrum": ""}},
-                {"id": "n2", "type": "synthetic_peak", "title": "Pik Syntetyczny (GxL)", "pos_x": 40.0, "pos_y": 360.0,
-                 "step_data": {"type": "synthetic_peak", "name": "Pik GxL @ 1650", "shape": "gxl", "center": 1650.0,
-                               "amp": 0.4, "width": 35.0, "shape_param": 0.5}},
-                {"id": "n3", "type": "hdo_config", "title": "⚙️ Konfiguracja HDO", "pos_x": 40.0, "pos_y": 510.0,
-                 "step_data": {"type": "hdo_config", "name": "Cfg: Auto (iter=3000)", "base_name": "", "prefix": "",
-                               "suffix": "", "n_iter": 3000, "penalty_weight": 10.0, "baseline_active": False}},
-                {"id": "n4", "type": "hdo_decomposition", "title": "Dekompozycja HDO / MC", "pos_x": 380.0,
-                 "pos_y": 210.0, "step_data": {"type": "hdo_decomposition", "name": "Solwer HDO"}},
-                {"id": "n5", "type": "output_folder", "title": "📁 Zapis do Folderu", "pos_x": 720.0, "pos_y": 210.0,
-                 "step_data": {"type": "output_folder", "name": "📁 Zapis do Folderu", "parent_folder_id": None}}
-            ],
-            "connections": [
-                {"from_node": "n0", "from_port": "out", "to_node": "n4", "to_port": "in_target"},
-                {"from_node": "n1", "from_port": "out", "to_node": "n4", "to_port": "in_bases"},
-                {"from_node": "n2", "from_port": "out", "to_node": "n4", "to_port": "in_peaks"},
-                {"from_node": "n3", "from_port": "out_cfg", "to_node": "n4", "to_port": "in_cfg"},
-                {"from_node": "n4", "from_port": "out_x", "to_node": "n5", "to_port": "in"}
-            ]
-        }
-        self.add_pipeline_tab(title="Dekompozycja HDO", graph_data=data, make_active=True)
+        menu.addSeparator()
 
-    def _load_preset_svd_denoise(self):
-        data = {
-            "nodes": [
-                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
-                {"id": "n1", "type": "svd_denoise", "title": "Odszumiacz SVD (k=3)", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "svd_denoise", "name": "SVD Denoise (k=3)", "k": 3, "center": False}},
-                {"id": "n2", "type": "asls", "title": "Linia Bazowa AsLS", "pos_x": 540.0, "pos_y": 140.0, "step_data": {"type": "asls", "name": "AsLS (λ=1e5, p=0.001)", "lam": 1e5, "p": 0.001}},
-                {"id": "n3", "type": "output_window", "title": "🗂️ Nowe Okno: Odszumione", "pos_x": 800.0, "pos_y": 140.0, "step_data": {"type": "output_window", "name": "🗂️ Okno: Odszumione SVD", "window_name": "Odszumione SVD", "mode": "create_new"}}
-            ],
-            "connections": [
-                {"from_node": "n0", "from_port": "out", "to_node": "n1", "to_port": "in"},
-                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in"},
-                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"}
-            ]
-        }
-        self.add_pipeline_tab(title="Odszumianie SVD", graph_data=data, make_active=True)
+        act_open_dir = menu.addAction("📁 Otwórz katalog szablonów na dysku...")
+        act_open_dir.triggered.connect(lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(templates_dir)))
 
-    def _load_preset_mcr_pipeline(self):
-        data = {
-            "nodes": [
-                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Wszystkie widoczne", "source_mode": "visible"}},
-                {"id": "n1", "type": "asls", "title": "Linia Bazowa AsLS", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "asls", "name": "AsLS (λ=1e5, p=0.001)", "lam": 1e5, "p": 0.001}},
-                {"id": "n2", "type": "mcr_decompose", "title": "Dekompozycja MCR-ALS", "pos_x": 540.0, "pos_y": 140.0, "step_data": {"type": "mcr_decompose", "name": "MCR-ALS (k=2)", "method": "mcr_als", "k": 2, "non_negative": True, "closure": False, "unimodal": False, "max_iter": 500}},
-                {"id": "n3", "type": "output_window", "title": "🗂️ Nowe Okno: Czyste Widma", "pos_x": 800.0, "pos_y": 140.0, "step_data": {"type": "output_window", "name": "🗂️ Okno: MCR Składniki", "window_name": "MCR Składniki", "mode": "create_new"}}
-            ],
-            "connections": [
-                {"from_node": "n0", "from_port": "out", "to_node": "n1", "to_port": "in"},
-                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in"},
-                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"}
-            ]
-        }
-        self.add_pipeline_tab(title="MCR-ALS", graph_data=data, make_active=True)
-
-    def _load_preset_atmospheric_asls(self):
-        data = {
-            "nodes": [
-                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Wszystkie widoczne", "source_mode": "visible"}},
-                {"id": "n1", "type": "vaporfit", "title": "VaporFit (Para wodna i CO₂)", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "vaporfit", "name": "VaporFit (SG=11)", "sg_points": 11, "sg_poly": 3}},
-                {"id": "n2", "type": "crop", "title": "Przycięcie (Crop)", "pos_x": 520.0, "pos_y": 140.0, "step_data": {"type": "crop", "name": "Przycięcie [1000–1800]", "min_w": 1000.0, "max_w": 1800.0}},
-                {"id": "n3", "type": "asls", "title": "Linia Bazowa AsLS", "pos_x": 760.0, "pos_y": 140.0, "step_data": {"type": "asls", "name": "AsLS (λ=1e5, p=0.001)", "lam": 1e5, "p": 0.001}},
-                {"id": "n4", "type": "output", "title": "💾 ZAPIS WYNIKU", "pos_x": 1000.0, "pos_y": 140.0, "step_data": {"type": "output", "name": "Zapis"}}
-            ],
-            "connections": [
-                {"from_node": "n0", "from_port": "out", "to_node": "n1", "to_port": "in_signal"},
-                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in"},
-                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"},
-                {"from_node": "n3", "from_port": "out", "to_node": "n4", "to_port": "in"}
-            ]
-        }
-        self.add_pipeline_tab(title="VaporFit + AsLS", graph_data=data, make_active=True)
-
-    def _load_preset_amide_i(self):
-        data = {
-            "nodes": [
-                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
-                {"id": "n1", "type": "crop", "title": "Przycięcie Amidu I", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "crop", "name": "Przycięcie [1580–1720]", "min_w": 1580.0, "max_w": 1720.0}},
-                {"id": "n2", "type": "linear_bl", "title": "Linia bazowa (krańce)", "pos_x": 520.0, "pos_y": 140.0, "step_data": {"type": "linear_bl", "name": "Linia krańcowa"}},
-                {"id": "n3", "type": "minmax", "title": "Normalizacja Min-Max", "pos_x": 760.0, "pos_y": 140.0, "step_data": {"type": "minmax", "name": "Min-Max [0, 1]"}},
-                {"id": "n4", "type": "output", "title": "💾 ZAPIS WYNIKU", "pos_x": 1000.0, "pos_y": 140.0, "step_data": {"type": "output", "name": "Zapis"}}
-            ],
-            "connections": [
-                {"from_node": "n0", "from_port": "out", "to_node": "n1", "to_port": "in"},
-                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in"},
-                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"},
-                {"from_node": "n3", "from_port": "out", "to_node": "n4", "to_port": "in"}
-            ]
-        }
-        self.add_pipeline_tab(title="Amid I", graph_data=data, make_active=True)
-
-    def _load_preset_second_derivative(self):
-        data = {
-            "nodes": [
-                {"id": "n0", "type": "input", "title": "📥 ŹRÓDŁO DANYCH", "pos_x": 40.0, "pos_y": 140.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
-                {"id": "n1", "type": "crop", "title": "Przycięcie Pasma", "pos_x": 280.0, "pos_y": 140.0, "step_data": {"type": "crop", "name": "Przycięcie [1500–1750]", "min_w": 1500.0, "max_w": 1750.0}},
-                {"id": "n2", "type": "sg_smooth", "title": "Wygładzanie SG", "pos_x": 520.0, "pos_y": 140.0, "step_data": {"type": "sg_smooth", "name": "SG (okno=13, st=3)", "win": 13, "poly": 3}},
-                {"id": "n3", "type": "deriv2", "title": "2. Pochodna (-) SG", "pos_x": 760.0, "pos_y": 140.0, "step_data": {"type": "deriv2", "name": "2. Pochodna SG (-) (okno=13)", "win": 13, "poly": 3}},
-                {"id": "n4", "type": "offset_min", "title": "Offset (Min ➔ 0.0)", "pos_x": 1000.0, "pos_y": 140.0, "step_data": {"type": "offset_min", "name": "Offset Min"}},
-                {"id": "n5", "type": "output", "title": "💾 ZAPIS WYNIKU", "pos_x": 1240.0, "pos_y": 140.0, "step_data": {"type": "output", "name": "Zapis"}}
-            ],
-            "connections": [
-                {"from_node": "n0", "from_port": "out", "to_node": "n1", "to_port": "in"},
-                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in"},
-                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"},
-                {"from_node": "n3", "from_port": "out", "to_node": "n4", "to_port": "in"},
-                {"from_node": "n4", "from_port": "out", "to_node": "n5", "to_port": "in"}
-            ]
-        }
-        self.add_pipeline_tab(title="2. Pochodna", graph_data=data, make_active=True)
-
-    def _load_preset_differential_math(self):
-        data = {
-            "nodes": [
-                {"id": "n0", "type": "input", "title": "📈 Próbka Badana (A)", "pos_x": 40.0, "pos_y": 80.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
-                {"id": "n1", "type": "spectrum_select", "title": "Widmo Odniesienia (B)", "pos_x": 40.0, "pos_y": 240.0, "step_data": {"type": "spectrum_select", "name": "Ref: (wybierz)", "selected_spectrum": ""}},
-                {"id": "n2", "type": "math_op", "title": "Operacja Dwuwidmowa", "pos_x": 340.0, "pos_y": 160.0, "step_data": {"type": "math_op", "name": "A - 1.000·B", "op": "sub", "k": 1.0}},
-                {"id": "n3", "type": "linear_bl", "title": "Korekcja Linii Krańcowej", "pos_x": 580.0, "pos_y": 160.0, "step_data": {"type": "linear_bl", "name": "Linia krańcowa"}},
-                {"id": "n4", "type": "output", "title": "💾 ZAPIS WYNIKU", "pos_x": 820.0, "pos_y": 160.0, "step_data": {"type": "output", "name": "Zapis"}}
-            ],
-            "connections": [
-                {"from_node": "n0", "from_port": "out", "to_node": "n2", "to_port": "in_a"},
-                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in_b"},
-                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"},
-                {"from_node": "n3", "from_port": "out", "to_node": "n4", "to_port": "in"}
-            ]
-        }
-        self.add_pipeline_tab(title="Różnicowa", graph_data=data, make_active=True)
-
-    def _load_preset_dft_comparison(self):
-        data = {
-            "nodes": [
-                {"id": "n0", "type": "input", "title": "📈 Pomiary (A)", "pos_x": 40.0, "pos_y": 80.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
-                {"id": "n1", "type": "dft_broadener", "title": "⚛️ Splot DFT (B)", "pos_x": 40.0, "pos_y": 240.0, "step_data": {"type": "dft_broadener", "name": "DFT Broadener", "scale_factor": 0.965, "fwhm": 12.0, "shape": "lorentzian"}},
-                {"id": "n2", "type": "math_op", "title": "Różnica A - k·B", "pos_x": 340.0, "pos_y": 160.0, "step_data": {"type": "math_op", "name": "A - 1.000·B", "op": "sub", "k": 1.0}},
-                {"id": "n3", "type": "output_window", "title": "🗂️ Nowe Okno: Residua DFT", "pos_x": 620.0, "pos_y": 160.0, "step_data": {"type": "output_window", "name": "🗂️ Okno: Residua DFT", "window_name": "Residua DFT", "mode": "create_new"}}
-            ],
-            "connections": [
-                {"from_node": "n0", "from_port": "out", "to_node": "n2", "to_port": "in_a"},
-                {"from_node": "n1", "from_port": "out", "to_node": "n2", "to_port": "in_b"},
-                {"from_node": "n2", "from_port": "out", "to_node": "n3", "to_port": "in"}
-            ]
-        }
-        self.add_pipeline_tab(title="Porównanie DFT", graph_data=data, make_active=True)
+    def _load_preset_from_file_path(self, path: str):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            title = data.get("title", os.path.splitext(os.path.basename(path))[0].replace("_", " "))
+            self.add_pipeline_tab(title=title, graph_data=data, make_active=True)
+        except Exception as e:
+            QMessageBox.critical(self, "Błąd odczytu", f"Nie udało się wczytać szablonu:\n{e}")
 
     def _save_preset_to_json(self):
+        templates_dir = get_templates_dir()
+        curr = self.current_tab
+        def_name = f"{curr.title.replace(' ', '_')}.json" if curr else "szablon_potoku.json"
+        def_path = os.path.join(templates_dir, def_name)
+
         path, _ = QFileDialog.getSaveFileName(
-            self, "Zapisz szablon potoku", "szablon_potoku.json", "Szablon Potoku SpectroHub (*.json)"
+            self, "Zapisz szablon potoku", def_path, "Szablon Potoku SpectroHub (*.json)"
         )
         if path:
             try:
-                curr = self.current_tab
                 if not curr:
                     return
                 nodes_list, conns_list = self._serialize_scene(curr.scene)
@@ -1052,23 +1041,17 @@ class NodePipelineDialog(QMainWindow):
                 }
                 with open(path, "w", encoding="utf-8") as f:
                     json.dump(state, f, indent=2, ensure_ascii=False, cls=NpEncoder)
-                QMessageBox.information(self, "Zapisano", f"Pomyślnie zapisano szablon potoku do pliku:\n{path}")
+                QMessageBox.information(self, "Zapisano", f"Pomyślnie zapisano szablon potoku do:\n{path}")
             except Exception as e:
                 QMessageBox.critical(self, "Błąd zapisu", f"Nie udało się zapisać szablonu:\n{e}")
 
     def _load_preset_from_json(self):
+        templates_dir = get_templates_dir()
         path, _ = QFileDialog.getOpenFileName(
-            self, "Wczytaj szablon potoku", "", "Szablon Potoku SpectroHub (*.json)"
+            self, "Wczytaj szablon potoku", templates_dir, "Szablon Potoku SpectroHub (*.json)"
         )
         if path:
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                title = data.get("title", "Wczytany potok")
-                self.add_pipeline_tab(title=title, graph_data=data, make_active=True)
-                QMessageBox.information(self, "Załadowano", f"Wczytano szablon potoku jako nową zakładkę:\n'{title}'.")
-            except Exception as e:
-                QMessageBox.critical(self, "Błąd odczytu", f"Nie udało się wczytać szablonu:\n{e}")
+            self._load_preset_from_file_path(path)
 
     def _serialize_scene(self, scene: NodeScene) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         nodes_list, conns_list = [], []
@@ -1201,11 +1184,10 @@ class NodePipelineDialog(QMainWindow):
             return visible[0].wavenumbers.copy(), visible[0].intensities.copy(), 1
 
         wn = np.linspace(4000, 400, 1200)
-        y = 0.8 * np.exp(-((wn - 1650) / 35) ** 2) + 0.4 * np.exp(-((wn - 1540) / 40) ** 2) + 0.05 * np.random.normal(0, 0.02, len(wn))
+        y = 0.8 * np.exp(-((wn - 1650) / 35) ** 2) + 0.4 * np.exp(-((wn - 1540) / 40) ** 2)
         return wn, y, 1
 
     def recalculate_graph_preview(self, target_scene: Optional[NodeScene] = None):
-        """Przelicza graf DAG w lekkim trybie podglądu (bez blokowania pętli zdarzeń)."""
         scene = target_scene or self.scene
         if not scene:
             return
@@ -1226,7 +1208,6 @@ class NodePipelineDialog(QMainWindow):
             eval_results = eval_out
 
         for node in all_nodes:
-            # Całkowicie generyczne wyznaczenie portu podglądu
             if node.node_obj:
                 if not getattr(node.node_obj, 'has_preview', True):
                     node.preview_x = None
@@ -1340,7 +1321,7 @@ class NodePipelineDialog(QMainWindow):
             target_node = selected[0]
         else:
             for item in self.scene.items():
-                if isinstance(item, NodeItem) and item.node_type in ("output", "output_window"):
+                if isinstance(item, NodeItem) and item.node_type in ("output", "output_window", "output_folder"):
                     target_node = item
                     break
 
@@ -1379,11 +1360,6 @@ class NodePipelineDialog(QMainWindow):
             labels = [f"👁 {target_node.title} [{i + 1}/{len(curves)}]" for i in range(len(curves))]
 
         existing_lines = getattr(canvas, '_node_preview_lines', [])
-        old_single = getattr(canvas, '_node_preview_line', None)
-        if old_single is not None:
-            existing_lines.append(old_single)
-            canvas._node_preview_line = None
-
         for line in existing_lines:
             try:
                 line.remove()
@@ -1409,7 +1385,6 @@ class NodePipelineDialog(QMainWindow):
         self.execute_tab_pipeline(self.current_tab)
 
     def execute_tab_pipeline(self, tab: PipelineTabInfo):
-        """Wykonuje pełne obliczenia potoku aktywnej zakładki z formatowaniem nazw widm wyjściowych."""
         scene = tab.scene
         all_nodes = [item for item in scene.items() if isinstance(item, NodeItem)]
         ordered_nodes, has_cycle = DAGEvaluator.topological_sort(all_nodes)
@@ -1418,11 +1393,9 @@ class NodePipelineDialog(QMainWindow):
             QMessageBox.warning(self, "Błąd", "Wykryto zapętlenie w grafie (cykl). Potok musi być acykliczny.")
             return
 
-        terminals = [n for n in all_nodes if
-                     n.node_type in ("output", "output_window", "output_table", "output_folder")]
+        terminals = [n for n in all_nodes if n.node_type in ("output", "output_window", "output_table", "output_folder")]
         if not terminals:
-            QMessageBox.warning(self, "Błąd",
-                                "Brak węzła końcowego ('Zapis Wyniku', 'Kopiuj do okna roboczego' lub 'Zapisz jako Tabelę').")
+            QMessageBox.warning(self, "Błąd", "Brak węzła końcowego (Zapis Wyniku, Okno, Tabela lub Folder).")
             return
 
         self._clear_canvas_preview()
@@ -1472,10 +1445,10 @@ class NodePipelineDialog(QMainWindow):
                     continue
 
                 # =============================================================
-                # BRANCH A: TERMINAL TABELI DANYCH / PROFILI (DataTable)
+                # BRANCH A: TERMINAL TABELI DANYCH (DataTable)
                 # =============================================================
                 if term_node.node_type == "output_table":
-                    tbl_name = term_node.step_data.get("table_name", "Parametry HDO")
+                    tbl_name = term_node.step_data.get("table_name", "Parametry")
                     target_folder_id = term_node.step_data.get("folder_id")
                     x_lbl = term_node.step_data.get("x_label", "Indeks / Parametr")
                     y_lbl = term_node.step_data.get("y_label", "Wartość")
@@ -1495,12 +1468,7 @@ class NodePipelineDialog(QMainWindow):
                         if collected_x is None:
                             collected_x = new_x.copy()
 
-                        if src_node.node_type == "hdo_decomposition" and src_port == "out_params":
-                            param_labels = src_node.step_data.get('param_labels', [])
-                            col_title = f"Wartość_{src_node.title}" if len(incoming_conns) > 1 else "Wartość"
-                            y_cols[col_title] = new_y.flatten().copy()
-                            meta_dict["row_labels"] = param_labels
-                        elif new_y.ndim == 2:
+                        if new_y.ndim == 2:
                             for col in range(new_y.shape[1]):
                                 col_n = src_names[col] if col < len(src_names) else f"{src_node.title}_{col + 1}"
                                 y_cols[col_n] = new_y[:, col].copy()
@@ -1523,23 +1491,7 @@ class NodePipelineDialog(QMainWindow):
                     continue
 
                 # =============================================================
-                # BRANCH B: TERMINALE WIDM (output_window oraz output)
-                # =============================================================
-                target_window_id = None
-                if term_node.node_type == "output_window":
-                    win_name = term_node.step_data.get("window_name", "Skorygowane")
-                    mode = term_node.step_data.get("mode", "create_new")
-
-                    if mode == "append_existing":
-                        for wid, win in session.windows.items():
-                            if win.name.lower() == win_name.lower():
-                                target_window_id = wid
-                                break
-                    if not target_window_id:
-                        target_window_id = session.add_window(name=win_name)
-
-                # =============================================================
-                # BRANCH C: TERMINAL FOLDERU (output_folder)
+                # BRANCH B: TERMINAL FOLDERU (output_folder)
                 # =============================================================
                 if term_node.node_type == "output_folder":
                     parent_fid = term_node.step_data.get("parent_folder_id")
@@ -1547,7 +1499,6 @@ class NodePipelineDialog(QMainWindow):
                         src_node = conn.out_port.node_item
                         src_port = conn.out_port.port_id
 
-                        # Pobieramy bundle z pamięci wykonawczej węzła lub obiektu domenowego
                         bundle = None
                         if hasattr(src_node, 'node_obj') and hasattr(src_node.node_obj, 'runtime_bundles'):
                             bundle = src_node.node_obj.runtime_bundles.get(src_port)
@@ -1562,6 +1513,7 @@ class NodePipelineDialog(QMainWindow):
                             win_id = session.add_window(name=f_name, folder_id=folder_id)
 
                             wn = bundle['wavenumbers']
+
                             # 1. Widmo badane W0
                             s_w0 = SpectrumData(
                                 wavenumbers=wn.copy(), intensities=bundle['w0_target'].copy(),
@@ -1601,14 +1553,12 @@ class NodePipelineDialog(QMainWindow):
                             coeffs = bundle['coeffs']
                             if comps_y.ndim == 2:
                                 for col in range(comps_y.shape[1]):
-                                    b_title = base_names[col] if col < len(base_names) else f"Comp_{col + 1}"
+                                    b_title = base_names[col] if col < len(base_names) else f"Comp_{col+1}"
                                     c_val = coeffs[col] if col < len(coeffs) else 1.0
                                     s_comp = SpectrumData(
                                         wavenumbers=wn.copy(), intensities=comps_y[:, col].copy(),
-                                        name=f"{f_name}_{b_title} (c={c_val:.4f})", file_path="",
-                                        file_type="processed",
-                                        metadata={"source": "HDO Component", "coeff": c_val,
-                                                  **bundle['metrics']}
+                                        name=f"{f_name}_{b_title} (c={c_val:.4f})", file_path="", file_type="processed",
+                                        metadata={"source": "HDO Component", "coeff": c_val, **bundle['metrics']}
                                     )
                                     session.add_spectrum_to_window(win_id, s_comp)
 
@@ -1618,12 +1568,12 @@ class NodePipelineDialog(QMainWindow):
                                 for col in range(peaks_y.shape[1]):
                                     s_pk = SpectrumData(
                                         wavenumbers=wn.copy(), intensities=peaks_y[:, col].copy(),
-                                        name=f"{f_name}_Pik_{col + 1}", file_path="", file_type="processed",
+                                        name=f"{f_name}_Pik_{col+1}", file_path="", file_type="processed",
                                         metadata={"source": "HDO Synthetic Peak", **bundle['metrics']}
                                     )
                                     session.add_spectrum_to_window(win_id, s_pk)
 
-                            # 7. Tabela danych (DataTable)
+                            # 7. Tabela parametrów
                             new_table = DataTable(
                                 table_id="",
                                 name=f_name,
@@ -1636,6 +1586,22 @@ class NodePipelineDialog(QMainWindow):
                             )
                             session.add_table(new_table, make_active=False)
                     continue
+
+                # =============================================================
+                # BRANCH C: TERMINALE WIDM (output_window oraz output)
+                # =============================================================
+                target_window_id = None
+                if term_node.node_type == "output_window":
+                    win_name = term_node.step_data.get("window_name", "Skorygowane")
+                    mode = term_node.step_data.get("mode", "create_new")
+
+                    if mode == "append_existing":
+                        for wid, win in session.windows.items():
+                            if win.name.lower() == win_name.lower():
+                                target_window_id = wid
+                                break
+                    if not target_window_id:
+                        target_window_id = session.add_window(name=win_name)
 
                 used_names = set()
                 if target_window_id and target_window_id in session.windows:
@@ -1682,67 +1648,7 @@ class NodePipelineDialog(QMainWindow):
 
                     branch_tag = f" [{src_node.title}]" if len(incoming_conns) > 1 else ""
 
-                    if src_node.node_type == "hdo_decomposition":
-                        metrics = src_node.step_data.get('fit_metrics', {})
-                        r2_tag = f" (R²={metrics.get('r2', 0):.4f})" if 'r2' in metrics else ""
-                        coeffs = metrics.get('coefficients', [])
-                        base_names = metrics.get('base_names', [])
-                        n_mult = metrics.get('n_multiplier', 1.0)
-                        target_base = src_names[0] if src_names else "W0"
-
-                        if src_port == "out_fit" and new_y.ndim == 2:
-                            raw_n_src = f"{prefix}{target_base} · {n_mult:.2f}{suffix}{branch_tag}"
-                            new_created.append(SpectrumData(
-                                wavenumbers=new_x.copy(), intensities=new_y[:, 0].copy(),
-                                name=make_unique_name(raw_n_src) if term_node.node_type == "output_window" else raw_n_src,
-                                file_path="", file_type="processed",
-                                metadata={"source": "HDO Scaled Source", **metrics}
-                            ))
-                            raw_n_fit = f"{prefix}Fit_{target_base}{suffix}{r2_tag}{branch_tag}"
-                            new_created.append(SpectrumData(
-                                wavenumbers=new_x.copy(), intensities=new_y[:, 1].copy(),
-                                name=make_unique_name(raw_n_fit) if term_node.node_type == "output_window" else raw_n_fit,
-                                file_path="", file_type="fit",
-                                metadata={"source": "HDO Total Fit", **metrics}
-                            ))
-                        elif src_port == "out_comps" and new_y.ndim == 2:
-                            for col in range(new_y.shape[1]):
-                                b_title = base_names[col] if col < len(base_names) else f"Comp_{col + 1}"
-                                c_val = coeffs[col] if col < len(coeffs) else 1.0
-                                raw_n = f"{prefix}{b_title}{suffix} (c={c_val:.4f}){branch_tag}"
-                                new_created.append(SpectrumData(
-                                    wavenumbers=new_x.copy(), intensities=new_y[:, col].copy(),
-                                    name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
-                                    file_path="", file_type="processed",
-                                    metadata={"source": "HDO Component", "coeff": c_val, **metrics}
-                                ))
-                        elif src_port == "out_peaks" and new_y.ndim == 2:
-                            for col in range(new_y.shape[1]):
-                                raw_n = f"{prefix}Pik_GxL_{col + 1}{suffix}{branch_tag}"
-                                new_created.append(SpectrumData(
-                                    wavenumbers=new_x.copy(), intensities=new_y[:, col].copy(),
-                                    name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
-                                    file_path="", file_type="processed",
-                                    metadata={"source": "HDO Synthetic Peak", **metrics}
-                                ))
-                        elif src_port == "out_res":
-                            raw_n = f"{prefix}Residuum_{target_base}{suffix}{r2_tag}{branch_tag}"
-                            new_created.append(SpectrumData(
-                                wavenumbers=new_x.copy(), intensities=new_y.copy(),
-                                name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
-                                file_path="", file_type="residual",
-                                metadata={"source": "HDO Excess Residual", **metrics}
-                            ))
-                        else:
-                            raw_n = f"{prefix}ΔFit_{target_base}{suffix}{r2_tag}{branch_tag}"
-                            new_created.append(SpectrumData(
-                                wavenumbers=new_x.copy(), intensities=new_y.copy(),
-                                name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
-                                file_path="", file_type="residual",
-                                metadata={"source": "HDO Fit Residual", **metrics}
-                            ))
-
-                    elif new_y.ndim == 2:
+                    if new_y.ndim == 2:
                         n_cols = new_y.shape[1]
                         for col in range(n_cols):
                             orig_n = src_names[col] if col < len(src_names) else f"Widmo_{col + 1}"
@@ -1754,7 +1660,6 @@ class NodePipelineDialog(QMainWindow):
                                 file_path="", file_type="processed",
                                 metadata={"dag_pipeline": [n.title for n in ordered_nodes], "orig_name": orig_n}
                             ))
-
                     else:
                         active = session.active_spectrum
                         orig_n = src_names[0] if src_names else (active.name if active else "Widmo")
@@ -1770,6 +1675,7 @@ class NodePipelineDialog(QMainWindow):
                             ))
                         else:
                             if active:
+                                from gui.workspaces.ws_preprocessing import ModifySpectrumCommand
                                 cmd = ModifySpectrumCommand(
                                     active, f"DAG: {raw_n}", active.intensities, new_y,
                                     active.wavenumbers, new_x, old_meta=active.metadata,
@@ -1779,6 +1685,7 @@ class NodePipelineDialog(QMainWindow):
                                 session.undo_stack.push(cmd)
 
                 if term_node.node_type == "output_window" and new_created:
+                    from gui.workspaces.ws_preprocessing import AddBatchSpectraCommand
                     session.undo_stack.push(AddBatchSpectraCommand(
                         new_created,
                         f"DAG do okna '{term_node.step_data.get('window_name')}' ({len(new_created)} widm)",

@@ -606,3 +606,45 @@ spectrohub/
 * **Czysty `items.py`:** Zlikwidowano setki linii drabinek `if...elif...elif`. `NodeItem` pobiera porty, wymiary, nagłówki i niestandardowe nakładki (np. raporty HDO) bezpośrednio z obiektu `node_obj`.
 * **Czysty `evaluator.py`:** Silnik ogranicza się do sortowania topologicznego grafu (algorytm Kahna) oraz propagacji strumieni numerycznych do `node.compute()`.
 * **Usunięcie `dialogs.py`:** Skasowano monolityczny plik z uniwersalnym oknem parametrów — każdy węzeł posiada dedykowany, sprofilowany formularz w swoim pliku domenowym.
+
+
+### 14.09.2026 — Checkpoint: Architektura Wtyczkowa Węzłów DAG, Ergonomia Drzewa i Reorganizacja HDO Suite
+
+**1. Architektura Wtyczkowa i Auto-Discovery Węzłów (`gui/node_editor/`)**
+
+* **Abstrakcja `BaseNode` i `PortDef`:** Każdy węzeł definiuje swoje porty, kolorystykę, domyślne parametry, formularz konfiguracyjny (`create_config_dialog`) oraz logikę numeryczną (`compute`).
+* **Auto-Discovery i Rejestr (`registry.py`):** Dynamiczne wykrywanie węzłów z katalogu `gui/node_editor/nodes/` za pomocą dekoratora `@register_node` z automatycznym zasilaniem palety biblioteki w lewym doku.
+* **Likwidacja monolitów i długu technicznego:**
+* Usunięto zbędny plik `dialogs.py` — każdy węzeł posiada dedykowany formularz w swoim module domenowym lub korzysta z `StepParamDialog`.
+* Drastycznie odchudzono `items.py` (usunięto setki linii drabinek `if...elif`; `NodeItem` odpytuje instancję `node_obj`).
+* Uproszczono `evaluator.py` do sortowania topologicznego (algorytm Kahna) i czystej delegacji obliczeń do węzłów.
+
+
+* **Rozbicie na 10 autonomicznych modułów domenowych:** `node_baseline.py`, `node_io.py`, `node_terminals.py`, `node_filters.py`, `node_math.py`, `node_photometry.py`, `node_atmospheric.py`, `node_quantum.py`, `node_chemometrics.py`, `node_hdo.py`.
+
+**2. Ergonomia Drzewa Projektu i Nowe Ikony Okien (`project_tree.py`, `session.py`)**
+
+* **Czysty start obszarów roboczych:** Zlikwidowano wymuszone tworzenie domyślnego „Okno 1 (Główne)” na starcie programu oraz podczas `clear_all()`.
+* **Pełna swoboda usuwania okien:** Odblokowano możliwość usunięcia ostatniego okna roboczego z bezpiecznym powrotem do kontekstu Magazynu Danych (`storage`).
+* **Czytelna separacja wizualna:** Zastąpiono mylącą ikonkę kart indeksowych (`🗂️`) jednoznaczną ikoną okna (`🪟`), eliminując pomyłki z żółtymi folderami (`📁`).
+
+**3. Reorganizacja Suity HDO i Terminal Folderowy (`node_hdo.py`, `node_terminals.py`)**
+
+* **Węzeł Widma Źródłowego (`HdoSourceSpectrumNode`):** Dedykowany bloczek dla $W_0$ z własnym wyborem widma z projektu i mnożnikiem $N$.
+* **Naturalna skala podglądu (Sparklines):** Wyeliminowano sztuczne dopełnianie zerami do 4000–400 cm⁻¹ w węzłach $W_0$, $W_k$ oraz pikach syntetycznych — wykresy w bloczkach idealnie wypełniają szerokość kafelków w swoim rzeczywistym paśmie.
+* **Węzeł Konfiguracji HDO (`HdoConfigNode`):** Scalono parametry nazwy bazowej, prefiksów, sufiksów, iteracji MC, kary oraz linii bazowej. Wyłączono fałszywy komunikat „Brak sygnału” (`has_preview = False`).
+* **Trójmetodowy Solwer HDO:** Zredukowano 6 portów wyjściowych do 3 portów metod (`out_x`, `out_y`, `out_z`).
+* **Terminal Zapisu do Folderu (`OutputFolderNode`):** Odbiera wyniki z wybranej metody i tworzy w drzewie folder `{prefix}{base_name}{suffix}_{n_peaks}p_{metoda}`, a w nim:
+* Okno robocze `🪟` ze wszystkimi krzywymi ($W_0\cdot N$, fit, residua, składowe $W_k$, piki).
+* Tabelę danych `📊` z kompletem parametrów dopasowania.
+* Spójne dziedziczenie nazwy po folderze nadrzędnym.
+
+
+
+**4. Bezpieczna Serializacja JSON i Pełna Kontrola Grafu (`pipeline_dialog.py`, `items.py`)**
+
+* **Eliminacja błędu serializacji:** Rozdzielono parametry potoku od dużych tablic numerycznych (`runtime_bundles`), zintegrowano koder `NpEncoder` oraz filtr `clean_for_json`, umożliwiając bezbłędny zapis potoków do plików `.json`.
+* **Swoboda edycji grafu:** Odblokowano usuwanie i duplikowanie węzła startowego `input` (klawisz `Delete`, menu kontekstowe, `⌘D` / `Ctrl+D`).
+
+---
+
