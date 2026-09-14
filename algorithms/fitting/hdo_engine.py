@@ -58,13 +58,18 @@ def hdo_residuals(param: np.ndarray, target: np.ndarray, wavenb: np.ndarray,
                   base_matrix: np.ndarray, n_peaks: int,
                   penalty_weight: float, baseline_active: bool) -> np.ndarray:
     """
-    Wektorowa funkcja celu z asymetryczną karą za przekraczanie widma badanego.
-    diff = fit_y - target; jeśli diff > 0 -> kara = diff * penalty_weight.
+    Wektorowa funkcja residuów z asymetryczną wagą kary.
+    Gdy fit_y > target, residuum rośnie o mnożnik kary (1.0 + penalty_weight),
+    co w najmniejszych kwadratach karze przekroczenie z wagą (1 + P)^2.
     """
     fit_y = evaluate_total_fit(param, wavenb, base_matrix, n_peaks, baseline_active)
-    diff = fit_y - target
-    penalty = np.where(diff > 0, diff * penalty_weight, 0.0)
-    return target - (fit_y + penalty)
+    raw_res = target - fit_y
+
+    # Asymetryczna kara: gdy fit_y > target (raw_res < 0), wymuszamy silniejszy opór
+    if penalty_weight > 0.0:
+        weight_mask = np.where(raw_res < 0.0, 1.0 + penalty_weight, 1.0)
+        return raw_res * weight_mask
+    return raw_res
 
 
 def _mc_fit_worker(args) -> Tuple[float, np.ndarray]:
@@ -74,7 +79,7 @@ def _mc_fit_worker(args) -> Tuple[float, np.ndarray]:
         res = least_squares(
             hdo_residuals, param_guess,
             args=(target, wavenb, base_matrix, n_peaks, penalty_weight, baseline_active),
-            bounds=bounds, ftol=1.49e-5, xtol=1.49e-5, max_nfev=250
+            bounds=bounds, ftol=1.49e-5, xtol=1.49e-5, max_nfev=350
         )
         fit_y = evaluate_total_fit(res.x, wavenb, base_matrix, n_peaks, baseline_active)
         rss = float(np.sum((target - fit_y) ** 2))
@@ -99,7 +104,10 @@ class HDOFitEngine:
 
         for i in range(k_components):
             low, high = comp_bounds[i]
-            guesses[:, 3 + i] = np.random.uniform(low, high, n_samples)
+            # Zapewnienie poprawnych granic losowania
+            low_bound = max(0.0, low)
+            high_bound = max(low_bound + 1e-4, high)
+            guesses[:, 3 + i] = np.random.uniform(low_bound, high_bound, n_samples)
 
         max_amp = max(np.max(target), 1e-3)
         wn_min, wn_max = np.min(wavenb), np.max(wavenb)
@@ -130,8 +138,6 @@ class HDOFitEngine:
                         progress_callback: Optional[Any] = None) -> Dict[str, Any]:
         """
         Główna metoda obliczeniowa dekompozycji.
-        Zwraca pełen zestaw parametrów, dopasowane widmo, krzywe składowe,
-        czyste residuum nadmiarowe oraz statystyki całkowe.
         """
         k_components = len(base_spectra_list)
         if k_components > 0:
@@ -153,19 +159,21 @@ class HDOFitEngine:
         if not baseline_active:
             lower[0:3], upper[0:3] = -1e-9, 1e-9
         else:
-            lower[0:3], upper[0:3] = -0.1, 0.1
+            lower[0:3], upper[0:3] = -0.05, 0.05
 
         for i in range(k_components):
-            lower[3 + i], upper[3 + i] = comp_bounds[i][0], comp_bounds[i][1]
+            b_low, b_high = comp_bounds[i]
+            lower[3 + i] = max(0.0, b_low)
+            upper[3 + i] = max(lower[3 + i] + 1e-6, b_high)
 
         start_peaks = 3 + k_components
-        wn_span = np.max(wavenb) - np.min(wavenb)
+        wn_span = max(float(np.max(wavenb) - np.min(wavenb)), 10.0)
         for j in range(n_peaks):
             pos = start_peaks + j * 4
-            lower[pos], upper[pos] = 0.0, 2.0 * max(np.max(target), 1e-2)
-            lower[pos + 1], upper[pos + 1] = np.min(wavenb) - 20.0, np.max(wavenb) + 20.0
+            lower[pos], upper[pos] = 0.0, 2.5 * max(float(np.max(target)), 1e-2)
+            lower[pos + 1], upper[pos + 1] = float(np.min(wavenb)), float(np.max(wavenb))
             lower[pos + 2], upper[pos + 2] = 0.0, 1.0
-            lower[pos + 3], upper[pos + 3] = 2.0, 0.6 * wn_span
+            lower[pos + 3], upper[pos + 3] = 2.0, 0.8 * wn_span
 
         bounds = (lower, upper)
         tasks = [
@@ -188,17 +196,14 @@ class HDOFitEngine:
                     best_params = params
 
                 if progress_callback and (idx % notify_step == 0 or idx == n_iterations - 1):
-                    # Przekazanie: aktualny krok, całkowite iteracje, najlepsze RSS
                     should_cancel = progress_callback(idx + 1, n_iterations, best_rss)
                     if should_cancel:
                         for f in futures:
                             f.cancel()
                         break
 
-        # 1. Obliczenie krzywej dopasowania (Total Fit)
         fitted_curve = evaluate_total_fit(best_params, wavenb, base_matrix, n_peaks, baseline_active)
 
-        # 2. Składowe ważone: c_i * W_i
         scaled_components = []
         sum_components = np.zeros_like(wavenb)
         extracted_coeffs = []
@@ -209,7 +214,6 @@ class HDOFitEngine:
             scaled_components.append(comp_curve)
             sum_components += comp_curve
 
-        # 3. Piki syntetyczne
         peaks_curves = []
         sum_peaks = np.zeros_like(wavenb)
         start_peaks = 3 + k_components
@@ -226,16 +230,13 @@ class HDOFitEngine:
             peaks_curves.append(p_y)
             sum_peaks += p_y
 
-        # 4. Czyste residuum nadmiarowe
         excess_residual = target - sum_components
 
-        # 5. Linia bazowa
         if baseline_active:
             baseline_curve = best_params[0] * (wavenb ** 2) + best_params[1] * wavenb + best_params[2]
         else:
             baseline_curve = np.zeros_like(wavenb)
 
-        # 6. Analiza całkowa (Simpsona)
         comp_areas = [abs(float(integrate.simpson(c_curve, wavenb))) for c_curve in scaled_components]
         peaks_area = abs(float(integrate.simpson(sum_peaks, wavenb))) if n_peaks > 0 else 0.0
         baseline_area = abs(float(integrate.simpson(baseline_curve, wavenb))) if baseline_active else 0.0
@@ -245,7 +246,6 @@ class HDOFitEngine:
             (a / total_area * 100.0) if total_area > 0 else 0.0 for a in comp_areas
         ]
 
-        # 7. Metryki GoF
         ss_res = float(np.sum((target - fitted_curve) ** 2))
         ss_tot = float(np.sum((target - np.mean(target)) ** 2))
         r2 = 1.0 - (ss_res / ss_tot) if ss_tot > 0 else 0.0

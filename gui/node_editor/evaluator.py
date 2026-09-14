@@ -472,8 +472,10 @@ class DAGEvaluator:
                             )
                             fit_y = results['fitted_curve']
                             excess_res = results['excess_residual']
-                            comps_y = np.column_stack(results['scaled_components']) if results['scaled_components'] else np.zeros_like(target_x)
-                            peaks_y = np.column_stack(results['peaks_curves']) if results['peaks_curves'] else np.zeros_like(target_x)
+                            comps_y = np.column_stack(results['scaled_components']) if results[
+                                'scaled_components'] else np.zeros_like(target_x)
+                            peaks_y = np.column_stack(results['peaks_curves']) if results[
+                                'peaks_curves'] else np.zeros_like(target_x)
 
                             full_metrics = {
                                 'n_multiplier': n_multiplier,
@@ -494,28 +496,61 @@ class DAGEvaluator:
                             }
                             node.step_data['fit_metrics'] = full_metrics
                         else:
-                            # 2. PODGLĄD NA ŻYWO: Szybki OLS
+                            # 2. PODGLĄD NA ŻYWO: Szybki OLS z twardymi więzami nieujemności
                             k_comps = len(bases_list)
                             base_mat = np.vstack(bases_list) if k_comps > 0 else np.empty((0, len(target_x)))
                             total_p = 3 + k_comps + 4 * n_peaks
                             param_init = np.zeros(total_p, dtype=np.float64)
 
-                            for i in range(k_comps):
-                                param_init[3 + i] = 0.5 * (bounds_list[i][0] + bounds_list[i][1])
+                            # Inicjalizacja wektora ograniczeń (Bounds)
+                            lower_fast = np.full(total_p, -np.inf)
+                            upper_fast = np.full(total_p, np.inf)
 
-                            max_amp = max(np.max(w0_target), 1e-3)
+                            if not baseline_active:
+                                lower_fast[0:3], upper_fast[0:3] = -1e-9, 1e-9
+                            else:
+                                lower_fast[0:3], upper_fast[0:3] = -0.05, 0.05
+
+                            for i in range(k_comps):
+                                b_low, b_high = bounds_list[i]
+                                b_low_clamped = max(0.0, float(b_low))
+                                b_high_clamped = max(b_low_clamped + 1e-6, float(b_high))
+                                lower_fast[3 + i] = b_low_clamped
+                                upper_fast[3 + i] = b_high_clamped
+                                param_init[3 + i] = 0.5 * (b_low_clamped + b_high_clamped)
+
+                            max_amp = max(float(np.max(w0_target)), 1e-3)
+                            wn_min = float(np.min(target_x))
+                            wn_max = float(np.max(target_x))
+                            wn_span = max(wn_max - wn_min, 10.0)
+
+                            start_p = 3 + k_comps
                             for j in range(n_peaks):
-                                pos = 3 + k_comps + j * 4
+                                pos = start_p + j * 4
                                 pn = synth_peak_nodes[j]
-                                param_init[pos] = float(pn.step_data.get('amp', 0.5 * max_amp))
-                                param_init[pos + 1] = float(pn.step_data.get('center', 1650.0))
-                                param_init[pos + 2] = float(pn.step_data.get('shape_param', 0.5))
-                                param_init[pos + 3] = float(pn.step_data.get('width', 30.0))
+
+                                init_amp = float(pn.step_data.get('amp', 0.4 * max_amp))
+                                init_center = float(pn.step_data.get('center', 0.5 * (wn_min + wn_max)))
+                                init_shape = float(pn.step_data.get('shape_param', 0.5))
+                                init_width = float(pn.step_data.get('width', 30.0))
+
+                                param_init[pos] = np.clip(init_amp, 0.0, 2.5 * max_amp)
+                                param_init[pos + 1] = np.clip(init_center, wn_min, wn_max)
+                                param_init[pos + 2] = np.clip(init_shape, 0.0, 1.0)
+                                param_init[pos + 3] = np.clip(init_width, 2.0, 0.8 * wn_span)
+
+                                lower_fast[pos], upper_fast[pos] = 0.0, 2.5 * max(max_amp, 1e-2)
+                                lower_fast[pos + 1], upper_fast[pos + 1] = wn_min, wn_max
+                                lower_fast[pos + 2], upper_fast[pos + 2] = 0.0, 1.0
+                                lower_fast[pos + 3], upper_fast[pos + 3] = 2.0, 0.8 * wn_span
+
+                            bounds_fast = (lower_fast, upper_fast)
 
                             res_fast = least_squares(
                                 hdo_residuals, param_init,
                                 args=(w0_target, target_x, base_mat, n_peaks, penalty_weight, baseline_active),
-                                max_nfev=35, ftol=1e-3, xtol=1e-3
+                                bounds=bounds_fast,
+                                max_nfev=50, ftol=1e-3, xtol=1e-3
                             )
                             fit_y = evaluate_total_fit(res_fast.x, target_x, base_mat, n_peaks, baseline_active)
 
@@ -588,7 +623,7 @@ class DAGEvaluator:
                             float(full_metrics.get('baseline_area', 0.0))
                         ]
                         for idx_c, c_val in enumerate(full_metrics.get('coefficients', [])):
-                            b_lbl = base_names[idx_c] if idx_c < len(base_names) else f"Comp_{idx_c+1}"
+                            b_lbl = base_names[idx_c] if idx_c < len(base_names) else f"Comp_{idx_c + 1}"
                             p_labels.append(f"c_{b_lbl}")
                             p_values.append(float(c_val))
                             if idx_c < len(full_metrics.get('comp_areas', [])):
@@ -596,8 +631,10 @@ class DAGEvaluator:
                                 p_values.append(float(full_metrics['comp_areas'][idx_c]))
 
                         for idx_p, p_dict in enumerate(full_metrics.get('peaks_params', [])):
-                            p_labels.extend([f"Pik{idx_p+1}_Nu0", f"Pik{idx_p+1}_Amp", f"Pik{idx_p+1}_Width", f"Pik{idx_p+1}_Shape"])
-                            p_values.extend([float(p_dict['center']), float(p_dict['amp']), float(p_dict['width']), float(p_dict['shape'])])
+                            p_labels.extend([f"Pik{idx_p + 1}_Nu0", f"Pik{idx_p + 1}_Amp", f"Pik{idx_p + 1}_Width",
+                                             f"Pik{idx_p + 1}_Shape"])
+                            p_values.extend([float(p_dict['center']), float(p_dict['amp']), float(p_dict['width']),
+                                             float(p_dict['shape'])])
 
                         tbl_x = np.arange(1, len(p_values) + 1, dtype=np.float64)
                         tbl_y = np.array(p_values, dtype=np.float64)
@@ -628,7 +665,8 @@ class DAGEvaluator:
                 port_names[(node, "out_fit")] = [f"N_{target_name}", f"Fit_{target_name}"]
                 port_names[(node, "out_res")] = [f"Res_{target_name}"]
                 port_names[(node, "out_fit_res")] = [f"ΔFit_{target_name}"]
-                port_names[(node, "out_comps")] = base_names if base_names else [f"Comp_{i + 1}" for i in range(len(bases_list))]
+                port_names[(node, "out_comps")] = base_names if base_names else [f"Comp_{i + 1}" for i in
+                                                                                 range(len(bases_list))]
                 port_names[(node, "out_peaks")] = [f"Pik_{i + 1}" for i in range(n_peaks)]
                 port_names[(node, "out_params")] = ["Wartosc"]
                 node.step_data['param_labels'] = p_labels if (len(bases_list) > 0 or n_peaks > 0) else ["Param"]
