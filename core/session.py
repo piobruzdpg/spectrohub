@@ -100,7 +100,7 @@ class ProjectSession(QObject):
         self._folders: Dict[str, WindowFolder] = {}
         self._folder_counter = 0
 
-        # Okna robocze
+        # Okna robocze (startujemy z czystym słownikiem, bez wymuszonego Okna 1)
         self._windows: Dict[str, WorkspaceWindow] = {}
         self._active_window_id: Optional[str] = None
         self._window_counter = 0
@@ -113,8 +113,6 @@ class ProjectSession(QObject):
         # Kontekst globalny i gałąź magazynu
         self._active_context: str = "storage"
         self._active_storage_branch: str = "experimental"
-
-        self.add_window("Okno 1 (Główne)")
 
     # --- METADANE PROJEKTU ---
     def update_metadata(self, title: Optional[str] = None, author: Optional[str] = None,
@@ -292,6 +290,9 @@ class ProjectSession(QObject):
             if self._active_window_id == window_id:
                 new_active = next(iter(self._windows.keys()), None)
                 self.set_active_window(new_active)
+                # Jeśli usunięto ostatnie okno, wracamy do kontekstu Magazynu Danych
+                if new_active is None:
+                    self.set_context("storage")
 
     def set_active_window(self, window_id: Optional[str]):
         if window_id is not None and window_id not in self._windows:
@@ -667,7 +668,6 @@ class ProjectSession(QObject):
         logger.info("Wyczyszczono sesję projektu.")
         self.session_cleared.emit()
         self.metadata_changed.emit(self.metadata)
-        self.add_window("Okno 1 (Główne)")
 
 
 session = ProjectSession()

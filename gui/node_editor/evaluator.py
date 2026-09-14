@@ -98,7 +98,6 @@ class DAGEvaluator:
 
             # Dodatkowy kontekst dla Solwera HDO
             if node.node_type == "hdo_decomposition":
-                # Bounds dla widm składowych W_k
                 p_bas = node.in_ports.get("in_bases")
                 b_list = []
                 if p_bas:
@@ -110,7 +109,6 @@ class DAGEvaluator:
                             b_list.append((w_min, w_max))
                 node_inputs["in_bases_bounds"] = b_list
 
-                # Parametry z podłączonych pików syntetycznych
                 p_pks = node.in_ports.get("in_peaks")
                 pk_params = []
                 if p_pks:
@@ -119,17 +117,17 @@ class DAGEvaluator:
                             pk_params.append(conn.out_port.node_item.step_data)
                 node_inputs["in_peaks_params"] = pk_params
 
-                # Parametry z węzła Monte Carlo
-                mc_node = None
-                p_mc = node.in_ports.get("in_mc")
-                if p_mc and p_mc.connections and p_mc.connections[0].out_port:
-                    mc_node = p_mc.connections[0].out_port.node_item
+                # Pobieramy konfigurację z portu in_cfg
+                cfg_node = None
+                p_cfg = node.in_ports.get("in_cfg")
+                if p_cfg and p_cfg.connections and p_cfg.connections[0].out_port:
+                    cfg_node = p_cfg.connections[0].out_port.node_item
                 else:
                     for other in ordered_nodes:
-                        if other.node_type == "mc_params":
-                            mc_node = other
+                        if other.node_type == "hdo_config":
+                            cfg_node = other
                             break
-                node_inputs["in_mc_config"] = mc_node.step_data if mc_node else {}
+                node_inputs["in_cfg_config"] = cfg_node.step_data if cfg_node else {}
 
             # Wywołanie czystej metody compute() w węźle
             try:

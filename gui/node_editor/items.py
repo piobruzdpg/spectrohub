@@ -251,8 +251,10 @@ class NodeItem(QGraphicsItem):
                 painter.setPen(p.color.lighter(120))
                 painter.drawText(QRectF(self.WIDTH - 36, p.pos().y() - 10, 26, 20), Qt.AlignRight | Qt.AlignVCenter, p.label)
 
+        # Sparklines
         box_left = 32 if len(self.in_ports) > 1 else 10
-        box_right = self.WIDTH - (42 if self.node_type == "hdo_decomposition" else (38 if len(self.out_ports) > 1 else 10))
+        box_right = self.WIDTH - (
+            42 if self.node_type == "hdo_decomposition" else (38 if len(self.out_ports) > 1 else 10))
         box_w = box_right - box_left
         box_rect = QRectF(box_left, 46, box_w, 92)
 
@@ -263,6 +265,12 @@ class NodeItem(QGraphicsItem):
         if self.node_obj:
             self.node_obj.draw_custom_overlay(painter, box_rect)
 
+        # Jeśli węzeł nie posiada podglądu wykresu (np. Konfiguracja HDO), nie rysujemy krzywych ani "Brak sygnału"
+        has_preview = getattr(self.node_obj, 'has_preview', True) if self.node_obj else (
+                    self.node_type not in ("mc_params", "hdo_config"))
+        if not has_preview:
+            return
+
         curves = []
         if self.preview_y is not None:
             y_raw = self.preview_y
@@ -270,10 +278,14 @@ class NodeItem(QGraphicsItem):
                 curves = [y_raw.copy()]
             elif y_raw.ndim == 2 and y_raw.shape[0] > 1:
                 n_c = y_raw.shape[1]
-                if n_c == 1: curves = [y_raw[:, 0].copy()]
-                elif n_c == 2: curves = [y_raw[:, 0].copy(), y_raw[:, 1].copy()]
-                elif n_c == 3: curves = [y_raw[:, 0].copy(), y_raw[:, 1].copy(), y_raw[:, 2].copy()]
-                elif n_c > 3: curves = [y_raw[:, 0].copy(), y_raw[:, n_c // 2].copy(), y_raw[:, -1].copy()]
+                if n_c == 1:
+                    curves = [y_raw[:, 0].copy()]
+                elif n_c == 2:
+                    curves = [y_raw[:, 0].copy(), y_raw[:, 1].copy()]
+                elif n_c == 3:
+                    curves = [y_raw[:, 0].copy(), y_raw[:, 1].copy(), y_raw[:, 2].copy()]
+                elif n_c > 3:
+                    curves = [y_raw[:, 0].copy(), y_raw[:, n_c // 2].copy(), y_raw[:, -1].copy()]
 
         if curves and len(curves[0]) > 1:
             if self.preview_x is not None and len(self.preview_x) == len(curves[0]):
@@ -293,7 +305,12 @@ class NodeItem(QGraphicsItem):
 
             x_coords = box_left + 3 + (sampled_indices / (n_pts - 1)) * (box_w - 6)
 
-            if self.node_type == "hdo_decomposition" and len(curves) == 2:
+            # Dwukolorowa reprezentacja dopasowania (Źródło = błękit, Fit = pomarańcz)
+            is_fit_display = self.node_type in ("hdo_decomposition", "output_folder") or getattr(self.node_obj,
+                                                                                                 'node_type',
+                                                                                                 '') in (
+                                 "hdo_decomposition", "output_folder")
+            if is_fit_display and len(curves) == 2:
                 palette = [QColor("#48cae4"), QColor("#f4a261")]
             elif len(curves) == 1:
                 palette = [QColor("#00f5d4")]
@@ -316,12 +333,11 @@ class NodeItem(QGraphicsItem):
                 painter.setBrush(Qt.NoBrush)
                 painter.drawPath(path)
         else:
-            if self.node_type != "mc_params":
-                font_italic = QFont("Arial", 8)
-                font_italic.setItalic(True)
-                painter.setFont(font_italic)
-                painter.setPen(QColor("#6c757d"))
-                painter.drawText(box_rect, Qt.AlignCenter, "Brak sygnału")
+            font_italic = QFont("Arial", 8)
+            font_italic.setItalic(True)
+            painter.setFont(font_italic)
+            painter.setPen(QColor("#6c757d"))
+            painter.drawText(box_rect, Qt.AlignCenter, "Brak sygnału")
 
     def itemChange(self, change, value):
         if change == QGraphicsItem.ItemPositionHasChanged:
@@ -347,7 +363,7 @@ class NodeItem(QGraphicsItem):
         menu = QMenu()
         act_dup = menu.addAction("📋 Duplikuj węzeł (⌘D / Ctrl+D)")
         act_edit = menu.addAction("✏️ Edytuj parametry...")
-        act_del = menu.addAction("✕ Usuń węzeł (Del)") if self.node_type != "input" else None
+        act_del = menu.addAction("✕ Usuń węzeł (Del)")
 
         action = menu.exec(event.screenPos())
         if action == act_dup:
@@ -355,7 +371,7 @@ class NodeItem(QGraphicsItem):
                 self.scene().dialog_owner.duplicate_node(self)
         elif action == act_edit:
             self.mouseDoubleClickEvent(event)
-        elif act_del and action == act_del:
+        elif action == act_del:
             sc = self.scene()
             for p in list(self.in_ports.values()) + list(self.out_ports.values()):
                 for c in list(p.connections):

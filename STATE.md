@@ -582,3 +582,27 @@ spectrohub/
 * **Bezpieczeństwo sesji:** Prawidłowe odtwarzanie powiązań tabel z folderami przy wczytywaniu projektu oraz czyszczeniu sesji.
 
 
+### 14.09.2026 — Checkpoint: Architektura Wtyczkowa Węzłów DAG (Plugin Architecture & Node Registry)
+
+**1. Modularny Rejestr Węzłów (`gui/node_editor/base.py`, `registry.py`)**
+* **Abstrakcja `BaseNode` & `PortDef`:** Każdy węzeł definiuje swoje porty, kolorystykę, domyślne parametry, formularz konfiguracyjny (`create_config_dialog`) oraz czystą logikę obliczeniową (`compute`).
+* **Auto-Discovery i Dekorator `@register_node`:** Dynamiczne skanowanie pakietu `gui/node_editor/nodes/` i rejestracja klas w locie bez konieczności ręcznego importowania w rdzeniu silnika.
+* **Dynamiczna Paleta:** Drzewo biblioteki węzłów w lewym doku (`palette.py`, `pipeline_dialog.py`) zasila się automatycznie z metadanych zarejestrowanych klas.
+
+**2. Domknięcie Izolacji Domenowej (`gui/node_editor/nodes/`)**
+* **Rozbicie na 10 autonomicznych modułów:**
+  * `node_io.py`: Węzeł startowy źródła (1D/2D/Seria), selekcja z projektu (ATM/Exp) oraz Mux/Zbieracz.
+  * `node_terminals.py`: Terminale zapisu standardowego, okna roboczego oraz tabeli danych (`DataTable`).
+  * `node_baseline.py`: AsLS, airPLS/airALS, wielomianowa oraz krańcowa.
+  * `node_filters.py`: Savitzky-Golay, 1. i 2. pochodna, FSD Kauppinena, Crop, SNV, Min-Max, normy $L_1$/$L_2$ i offsety.
+  * `node_math.py`: Operacje dwuwidmowe $A \pm k\cdot B$, mnożenie/dzielenie przez skalar, standard wewnętrzny (IS) oraz całkowanie pasma/kinetyka.
+  * `node_photometry.py`: Przeliczenia fotometryczne $A \leftrightarrow T \leftrightarrow \%T$ oraz formalizm Kubelki-Munka DRIFTS.
+  * `node_atmospheric.py`: VaporFit Suite z analitycznym OLS, autotuningiem SG i metrykami gładkości SDV/SSI.
+  * `node_quantum.py`: Splot drgań DFT z dopasowaniem FWHM, kształtu (Gauss/Lorentz) i skalowaniem częstości $\sigma$.
+  * `node_chemometrics.py`: Odszumiacz SVD/PCA Rank-$k$, dekompozycja MCR-ALS/SPEXFA oraz skalowania macierzowe.
+  * `node_hdo.py`: Wieloprocesowy solwer HDO/Monte Carlo, pasma syntetyczne GxL, widma składowe z wagami i parametry MC.
+
+**3. Likwidacja Długu Technologicznego i Monolitów**
+* **Czysty `items.py`:** Zlikwidowano setki linii drabinek `if...elif...elif`. `NodeItem` pobiera porty, wymiary, nagłówki i niestandardowe nakładki (np. raporty HDO) bezpośrednio z obiektu `node_obj`.
+* **Czysty `evaluator.py`:** Silnik ogranicza się do sortowania topologicznego grafu (algorytm Kahna) oraz propagacji strumieni numerycznych do `node.compute()`.
+* **Usunięcie `dialogs.py`:** Skasowano monolityczny plik z uniwersalnym oknem parametrów — każdy węzeł posiada dedykowany, sprofilowany formularz w swoim pliku domenowym.

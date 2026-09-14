@@ -35,6 +35,42 @@ from gui.node_editor.palette import NodeLibraryWidget, MIME_NODE_TYPE
 logger = logging.getLogger("SpectroHub")
 
 
+class NpEncoder(json.JSONEncoder):
+    """Zapewnia bezbłędny zrzut typów NumPy do natywnego formatu JSON."""
+    def default(self, obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.floating, float)):
+            return float(obj)
+        if isinstance(obj, (np.integer, int)):
+            return int(obj)
+        if isinstance(obj, (np.bool_, bool)):
+            return bool(obj)
+        return super().default(obj)
+
+
+def clean_for_json(obj):
+    """Rekurencyjnie usuwa duże bufory binarne i konwertuje skalary NumPy."""
+    if isinstance(obj, dict):
+        cleaned = {}
+        for k, v in obj.items():
+            if k.startswith("hdo_bundle_"):
+                continue
+            cleaned[k] = clean_for_json(v)
+        return cleaned
+    elif isinstance(obj, (list, tuple)):
+        return [clean_for_json(v) for v in obj]
+    elif isinstance(obj, np.ndarray):
+        return obj.tolist()
+    elif isinstance(obj, (np.floating, float)):
+        return float(obj)
+    elif isinstance(obj, (np.integer, int)):
+        return int(obj)
+    elif isinstance(obj, (np.bool_, bool)):
+        return bool(obj)
+    return obj
+
+
 class PipelineTabInfo:
     """Kontener metadanych pojedynczej zakładki potoku."""
     def __init__(self, title: str, view: 'NodeView', scene: 'NodeScene'):
@@ -105,7 +141,7 @@ class NodeScene(QGraphicsScene):
         if event.button() == Qt.LeftButton and (event.modifiers() & (Qt.ControlModifier | Qt.MetaModifier)):
             node = item if isinstance(item, NodeItem) else (
                 item.parentItem() if (item and isinstance(item.parentItem(), NodeItem)) else None)
-            if isinstance(node, NodeItem) and node.node_type != "input" and not isinstance(item, PortItem):
+            if isinstance(node, NodeItem) and not isinstance(item, PortItem):
                 clone = NodeItem(node.node_type, node.title, copy.deepcopy(node.step_data))
                 clone.setPos(node.pos())
                 self.addItem(clone)
@@ -743,7 +779,7 @@ class NodePipelineDialog(QMainWindow):
     def duplicate_node(self, node: NodeItem, offset: QPointF = QPointF(35, 35),
                        scene: Optional[NodeScene] = None) -> Optional[NodeItem]:
         target_scene = scene or self.scene
-        if not target_scene or node.node_type == "input":
+        if not target_scene:
             return None
 
         clone = NodeItem(node.node_type, node.title, copy.deepcopy(node.step_data))
@@ -791,8 +827,6 @@ class NodePipelineDialog(QMainWindow):
 
         for item in target_scene.selectedItems():
             if isinstance(item, NodeItem):
-                if item.node_type == "input":
-                    continue
                 for p in list(item.in_ports.values()) + list(item.out_ports.values()):
                     for c in list(p.connections):
                         c.disconnect()
@@ -850,21 +884,31 @@ class NodePipelineDialog(QMainWindow):
     def _load_preset_hdo_decomposition(self):
         data = {
             "nodes": [
-                {"id": "n0", "type": "input", "title": "📥 Próbka Badana (W₀)", "pos_x": 40.0, "pos_y": 60.0, "step_data": {"type": "input", "name": "Źródło: Aktywne widmo", "source_mode": "active"}},
-                {"id": "n1", "type": "hdo_spectrum_scaled", "title": "Widmo Składowe (W₁ · c)", "pos_x": 40.0, "pos_y": 210.0, "step_data": {"type": "hdo_spectrum_scaled", "name": "Widmo Skalowane", "scale": 1.0, "w_min": 0.0, "w_max": 1.5}},
-                {"id": "n2", "type": "synthetic_peak", "title": "Pik Syntetyczny (GxL)", "pos_x": 40.0, "pos_y": 360.0, "step_data": {"type": "synthetic_peak", "name": "Pik GxL @ 1650", "shape": "gxl", "center": 1650.0, "amp": 0.4, "width": 35.0, "shape_param": 0.5}},
-                {"id": "n3", "type": "mc_params", "title": "Parametry MC", "pos_x": 40.0, "pos_y": 510.0, "step_data": {"type": "mc_params", "name": "MC Params (iter=3000)", "n_iter": 3000, "penalty_weight": 10.0, "baseline_active": False}},
-                {"id": "n4", "type": "hdo_decomposition", "title": "Dekompozycja HDO / MC", "pos_x": 380.0, "pos_y": 210.0, "step_data": {"type": "hdo_decomposition", "name": "HDO Fit (N=1.0)", "n_multiplier": 1.0}},
-                {"id": "n5", "type": "output_window", "title": "🗂️ Okno: Czyste Residuum", "pos_x": 720.0, "pos_y": 140.0, "step_data": {"type": "output_window", "name": "🗂️ Okno: Residuum HDO", "window_name": "Residuum HDO", "mode": "create_new"}},
-                {"id": "n6", "type": "output_table", "title": "📊 Zapisz Parametry HDO", "pos_x": 720.0, "pos_y": 320.0, "step_data": {"type": "output_table", "name": "📊 Tabela: Parametry HDO", "table_name": "Parametry HDO", "x_label": "Parametr", "y_label": "Wartość", "folder_id": None}}
+                {"id": "n0", "type": "hdo_source_spectrum", "title": "📥 Widmo Źródłowe (W₀ · N)", "pos_x": 40.0,
+                 "pos_y": 60.0,
+                 "step_data": {"type": "hdo_source_spectrum", "name": "Widmo Źródłowe W₀", "n_multiplier": 1.0,
+                               "selected_spectrum": ""}},
+                {"id": "n1", "type": "hdo_spectrum_scaled", "title": "Widmo Składowe (W₁ · c)", "pos_x": 40.0,
+                 "pos_y": 210.0,
+                 "step_data": {"type": "hdo_spectrum_scaled", "name": "Widmo Skalowane", "scale": 1.0, "w_min": 0.0,
+                               "w_max": 1.5, "selected_spectrum": ""}},
+                {"id": "n2", "type": "synthetic_peak", "title": "Pik Syntetyczny (GxL)", "pos_x": 40.0, "pos_y": 360.0,
+                 "step_data": {"type": "synthetic_peak", "name": "Pik GxL @ 1650", "shape": "gxl", "center": 1650.0,
+                               "amp": 0.4, "width": 35.0, "shape_param": 0.5}},
+                {"id": "n3", "type": "hdo_config", "title": "⚙️ Konfiguracja HDO", "pos_x": 40.0, "pos_y": 510.0,
+                 "step_data": {"type": "hdo_config", "name": "Cfg: Auto (iter=3000)", "base_name": "", "prefix": "",
+                               "suffix": "", "n_iter": 3000, "penalty_weight": 10.0, "baseline_active": False}},
+                {"id": "n4", "type": "hdo_decomposition", "title": "Dekompozycja HDO / MC", "pos_x": 380.0,
+                 "pos_y": 210.0, "step_data": {"type": "hdo_decomposition", "name": "Solwer HDO"}},
+                {"id": "n5", "type": "output_folder", "title": "📁 Zapis do Folderu", "pos_x": 720.0, "pos_y": 210.0,
+                 "step_data": {"type": "output_folder", "name": "📁 Zapis do Folderu", "parent_folder_id": None}}
             ],
             "connections": [
                 {"from_node": "n0", "from_port": "out", "to_node": "n4", "to_port": "in_target"},
                 {"from_node": "n1", "from_port": "out", "to_node": "n4", "to_port": "in_bases"},
                 {"from_node": "n2", "from_port": "out", "to_node": "n4", "to_port": "in_peaks"},
-                {"from_node": "n3", "from_port": "out_mc", "to_node": "n4", "to_port": "in_mc"},
-                {"from_node": "n4", "from_port": "out_res", "to_node": "n5", "to_port": "in"},
-                {"from_node": "n4", "from_port": "out_params", "to_node": "n6", "to_port": "in"}
+                {"from_node": "n3", "from_port": "out_cfg", "to_node": "n4", "to_port": "in_cfg"},
+                {"from_node": "n4", "from_port": "out_x", "to_node": "n5", "to_port": "in"}
             ]
         }
         self.add_pipeline_tab(title="Dekompozycja HDO", graph_data=data, make_active=True)
@@ -1007,7 +1051,7 @@ class NodePipelineDialog(QMainWindow):
                     "connections": conns_list
                 }
                 with open(path, "w", encoding="utf-8") as f:
-                    json.dump(state, f, indent=2, ensure_ascii=False)
+                    json.dump(state, f, indent=2, ensure_ascii=False, cls=NpEncoder)
                 QMessageBox.information(self, "Zapisano", f"Pomyślnie zapisano szablon potoku do pliku:\n{path}")
             except Exception as e:
                 QMessageBox.critical(self, "Błąd zapisu", f"Nie udało się zapisać szablonu:\n{e}")
@@ -1038,7 +1082,7 @@ class NodePipelineDialog(QMainWindow):
                 "title": node.title,
                 "pos_x": float(node.pos().x()),
                 "pos_y": float(node.pos().y()),
-                "step_data": copy.deepcopy(node.step_data)
+                "step_data": clean_for_json(copy.deepcopy(node.step_data))
             })
 
         for node, n_id in node_to_id.items():
@@ -1182,14 +1226,26 @@ class NodePipelineDialog(QMainWindow):
             eval_results = eval_out
 
         for node in all_nodes:
-            main_key = (node, "out") if node.node_type not in ("output", "output_window", "output_table",
-                                                               "hdo_decomposition", "mc_params") else (node, "in")
-            if node.node_type == "hdo_decomposition":
-                main_key = (node, "out_fit")
-            elif node.node_type == "mc_params":
-                main_key = (node, "out_mc")
+            # Całkowicie generyczne wyznaczenie portu podglądu
+            if node.node_obj:
+                if not getattr(node.node_obj, 'has_preview', True):
+                    node.preview_x = None
+                    node.preview_y = None
+                    node.update()
+                    continue
 
-            res_x, res_y = eval_results.get(main_key, (None, None))
+                if getattr(node.node_obj, 'preview_port_id', None):
+                    port_to_preview = node.node_obj.preview_port_id
+                elif node.out_ports:
+                    port_to_preview = next(iter(node.out_ports.keys()))
+                elif node.in_ports:
+                    port_to_preview = next(iter(node.in_ports.keys()))
+                else:
+                    port_to_preview = "out"
+            else:
+                port_to_preview = "out" if node.out_ports else "in"
+
+            res_x, res_y = eval_results.get((node, port_to_preview), (None, None))
 
             node_total = total_count
             if res_y is not None and res_y.ndim == 2:
@@ -1309,9 +1365,9 @@ class NodePipelineDialog(QMainWindow):
             self._clear_canvas_preview()
             return
 
-        if target_node.node_type == "hdo_decomposition" and len(curves) == 2:
+        if target_node.node_type in ("hdo_decomposition", "output_folder") and len(curves) == 2:
             colors = ["#48cae4", "#f4a261"]
-            labels = [f"👁 {target_node.title} (Źródło)", f"👁 {target_node.title} (Fit)"]
+            labels = [f"👁 {target_node.title} (W₀)", f"👁 {target_node.title} (Fit)"]
         elif len(curves) == 1:
             colors = ["#ffb703"]
             labels = [f"👁 Podgląd: {target_node.title}"]
@@ -1362,7 +1418,8 @@ class NodePipelineDialog(QMainWindow):
             QMessageBox.warning(self, "Błąd", "Wykryto zapętlenie w grafie (cykl). Potok musi być acykliczny.")
             return
 
-        terminals = [n for n in all_nodes if n.node_type in ("output", "output_window", "output_table")]
+        terminals = [n for n in all_nodes if
+                     n.node_type in ("output", "output_window", "output_table", "output_folder")]
         if not terminals:
             QMessageBox.warning(self, "Błąd",
                                 "Brak węzła końcowego ('Zapis Wyniku', 'Kopiuj do okna roboczego' lub 'Zapisz jako Tabelę').")
@@ -1480,6 +1537,105 @@ class NodePipelineDialog(QMainWindow):
                                 break
                     if not target_window_id:
                         target_window_id = session.add_window(name=win_name)
+
+                # =============================================================
+                # BRANCH C: TERMINAL FOLDERU (output_folder)
+                # =============================================================
+                if term_node.node_type == "output_folder":
+                    parent_fid = term_node.step_data.get("parent_folder_id")
+                    for conn in incoming_conns:
+                        src_node = conn.out_port.node_item
+                        src_port = conn.out_port.port_id
+
+                        # Pobieramy bundle z pamięci wykonawczej węzła lub obiektu domenowego
+                        bundle = None
+                        if hasattr(src_node, 'node_obj') and hasattr(src_node.node_obj, 'runtime_bundles'):
+                            bundle = src_node.node_obj.runtime_bundles.get(src_port)
+                        elif hasattr(src_node, 'runtime_bundles'):
+                            bundle = src_node.runtime_bundles.get(src_port)
+                        elif f"hdo_bundle_{src_port}" in src_node.step_data:
+                            bundle = src_node.step_data.get(f"hdo_bundle_{src_port}")
+
+                        if bundle:
+                            f_name = bundle['folder_name']
+                            folder_id = session.add_folder(name=f_name, parent_folder_id=parent_fid)
+                            win_id = session.add_window(name=f_name, folder_id=folder_id)
+
+                            wn = bundle['wavenumbers']
+                            # 1. Widmo badane W0
+                            s_w0 = SpectrumData(
+                                wavenumbers=wn.copy(), intensities=bundle['w0_target'].copy(),
+                                name=f"{f_name}_W0", file_path="", file_type="processed",
+                                metadata={"source": "HDO W0 Target", **bundle['metrics']}
+                            )
+                            session.add_spectrum_to_window(win_id, s_w0)
+
+                            # 2. Fit całkowity
+                            r2_val = bundle['metrics'].get('r2', 0.0)
+                            s_fit = SpectrumData(
+                                wavenumbers=wn.copy(), intensities=bundle['fit_y'].copy(),
+                                name=f"{f_name}_Fit (R²={r2_val:.4f})", file_path="", file_type="fit",
+                                metadata={"source": "HDO Total Fit", **bundle['metrics']}
+                            )
+                            session.add_spectrum_to_window(win_id, s_fit)
+
+                            # 3. Residuum nadmiarowe
+                            s_res = SpectrumData(
+                                wavenumbers=wn.copy(), intensities=bundle['excess_res'].copy(),
+                                name=f"{f_name}_Res_Nadmiarowe", file_path="", file_type="residual",
+                                metadata={"source": "HDO Excess Residual", **bundle['metrics']}
+                            )
+                            session.add_spectrum_to_window(win_id, s_res)
+
+                            # 4. Residuum dopasowania (ΔFit)
+                            s_fres = SpectrumData(
+                                wavenumbers=wn.copy(), intensities=bundle['fit_res'].copy(),
+                                name=f"{f_name}_ΔFit", file_path="", file_type="residual",
+                                metadata={"source": "HDO Fit Residual", **bundle['metrics']}
+                            )
+                            session.add_spectrum_to_window(win_id, s_fres)
+
+                            # 5. Składowe Wk
+                            comps_y = bundle['comps_y']
+                            base_names = bundle['base_names']
+                            coeffs = bundle['coeffs']
+                            if comps_y.ndim == 2:
+                                for col in range(comps_y.shape[1]):
+                                    b_title = base_names[col] if col < len(base_names) else f"Comp_{col + 1}"
+                                    c_val = coeffs[col] if col < len(coeffs) else 1.0
+                                    s_comp = SpectrumData(
+                                        wavenumbers=wn.copy(), intensities=comps_y[:, col].copy(),
+                                        name=f"{f_name}_{b_title} (c={c_val:.4f})", file_path="",
+                                        file_type="processed",
+                                        metadata={"source": "HDO Component", "coeff": c_val,
+                                                  **bundle['metrics']}
+                                    )
+                                    session.add_spectrum_to_window(win_id, s_comp)
+
+                            # 6. Piki syntetyczne
+                            peaks_y = bundle['peaks_y']
+                            if peaks_y.ndim == 2:
+                                for col in range(peaks_y.shape[1]):
+                                    s_pk = SpectrumData(
+                                        wavenumbers=wn.copy(), intensities=peaks_y[:, col].copy(),
+                                        name=f"{f_name}_Pik_{col + 1}", file_path="", file_type="processed",
+                                        metadata={"source": "HDO Synthetic Peak", **bundle['metrics']}
+                                    )
+                                    session.add_spectrum_to_window(win_id, s_pk)
+
+                            # 7. Tabela danych (DataTable)
+                            new_table = DataTable(
+                                table_id="",
+                                name=f_name,
+                                x_values=bundle['table_x'],
+                                y_columns={"Wartość": bundle['table_y']},
+                                x_label="Parametr",
+                                y_label="Wartość",
+                                folder_id=folder_id,
+                                metadata={"row_labels": bundle['param_labels'], **bundle['metrics']}
+                            )
+                            session.add_table(new_table, make_active=False)
+                    continue
 
                 used_names = set()
                 if target_window_id and target_window_id in session.windows:

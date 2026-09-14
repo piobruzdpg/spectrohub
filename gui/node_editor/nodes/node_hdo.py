@@ -1,6 +1,11 @@
 """
 gui/node_editor/nodes/node_hdo.py
-Węzły dekompozycji HDO / MC i pików syntetycznych z autonomicznymi dialogami.
+Zintegrowana gałąź dekompozycji HDO / Monte Carlo:
+- HdoSourceSpectrumNode: Widmo źródłowe W₀ z mnożnikiem N
+- HdoSpectrumScaledNode: Widmo składowe Wₖ ze skalarem c i wagami w_min/w_max
+- SyntheticPeakNode: Generator pasma syntetycznego (GxL/Gauss/Lorentz)
+- HdoConfigNode: Konfiguracja HDO (nazewnictwo, MC iteracje, kara, linia bazowa)
+- HdoDecompositionNode: Solwer z 3 wyjściami metod (out_x, out_y, out_z)
 """
 
 from typing import List, Dict, Any, Tuple, Optional
@@ -11,7 +16,7 @@ from PySide6.QtGui import QColor, QFont
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QDialogButtonBox,
-    QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox, QLabel
+    QComboBox, QDoubleSpinBox, QSpinBox, QCheckBox, QLabel, QLineEdit
 )
 
 from gui.node_editor.base import BaseNode, PortDef
@@ -48,6 +53,99 @@ def _generate_synthetic_peak(x: np.ndarray, shape: str, center: float,
         return amp * (eta * l + (1.0 - eta) * g)
     return np.zeros_like(x)
 
+
+# =============================================================================
+# 1. WIDMO ŹRÓDŁOWE (W₀ · N)
+# =============================================================================
+
+class HdoSourceSpectrumDialog(QDialog):
+    def __init__(self, node: 'HdoSourceSpectrumNode', parent=None):
+        super().__init__(parent)
+        self.node = node
+        self.step = node.step_data
+        self.setWindowTitle("Widmo źródłowe W₀")
+        self.resize(420, 180)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.combo_spec = QComboBox()
+        for name in session.spectra.keys():
+            self.combo_spec.addItem(f"📈 {name}", name)
+        cur_s = self.step.get('selected_spectrum', '')
+        idx = self.combo_spec.findData(cur_s)
+        if idx >= 0:
+            self.combo_spec.setCurrentIndex(idx)
+        form.addRow("Widmo badane z projektu:", self.combo_spec)
+
+        self.spin_mult_n = QDoubleSpinBox()
+        self.spin_mult_n.setRange(0.01, 100.0)
+        self.spin_mult_n.setDecimals(3)
+        self.spin_mult_n.setSingleStep(0.05)
+        self.spin_mult_n.setValue(float(self.step.get('n_multiplier', 1.0)))
+        form.addRow("Mnożnik widma (N):", self.spin_mult_n)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._save_and_accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _save_and_accept(self):
+        sel_s = self.combo_spec.currentData() or ""
+        n_val = float(self.spin_mult_n.value())
+        self.step['selected_spectrum'] = sel_s
+        self.step['n_multiplier'] = n_val
+        short_n = sel_s[:16] + "…" if len(sel_s) > 16 else sel_s
+        self.step['name'] = f"W₀: {short_n} · {n_val:.2f}" if sel_s else "Widmo Źródłowe W₀"
+        self.accept()
+
+
+@register_node
+class HdoSourceSpectrumNode(BaseNode):
+    node_type = "hdo_source_spectrum"
+    title = "📥 Widmo Źródłowe (W₀ · N)"
+    category = "Dekompozycja HDO & Pasma Syntetyczne"
+    header_gradient = ("#1b4332", "#2d6a4f")
+
+    @classmethod
+    def default_step_data(cls) -> Dict[str, Any]:
+        return {
+            "type": cls.node_type,
+            "name": "Widmo Źródłowe W₀",
+            "selected_spectrum": "",
+            "n_multiplier": 1.0
+        }
+
+    def get_ports(self) -> List[PortDef]:
+        return [
+            PortDef(port_id="out", label="W₀", is_output=True, color=QColor("#52b788"), pos_y=90)
+        ]
+
+    def create_config_dialog(self, parent=None):
+        return HdoSourceSpectrumDialog(self, parent=parent)
+
+    def compute(self, inputs, input_names, is_execution=False, progress_callback=None):
+        sel_name = self.step_data.get('selected_spectrum', '')
+        n_mult = float(self.step_data.get('n_multiplier', 1.0))
+        spec = session.get_spectrum(sel_name)
+
+        if not spec and session.active_spectrum:
+            spec = session.active_spectrum
+            sel_name = spec.name
+
+        if spec:
+            sx = spec.wavenumbers.copy()
+            sy = spec.intensities.copy() * n_mult
+            return {"out": (sx, sy)}, {"out": [sel_name]}
+
+        def_x = np.linspace(4000, 400, 1000)
+        return {"out": (def_x, np.zeros_like(def_x))}, {"out": ["W₀"]}
+
+
+# =============================================================================
+# 2. WIDMO SKŁADOWE (Wₖ · c)
+# =============================================================================
 
 class HdoSpectrumScaledDialog(QDialog):
     def __init__(self, node: 'HdoSpectrumScaledNode', parent=None):
@@ -106,6 +204,47 @@ class HdoSpectrumScaledDialog(QDialog):
         self.step['name'] = f"{short_n} · {scale:.2f}" if sel_s else "Widmo Skalowane"
         self.accept()
 
+
+@register_node
+class HdoSpectrumScaledNode(BaseNode):
+    node_type = "hdo_spectrum_scaled"
+    title = "📈 Widmo Składowe (Wk · c)"
+    category = "Dekompozycja HDO & Pasma Syntetyczne"
+    header_gradient = ("#1d3557", "#457b9d")
+
+    @classmethod
+    def default_step_data(cls) -> Dict[str, Any]:
+        return {
+            "type": cls.node_type, "name": "Widmo Skalowane", "selected_spectrum": "",
+            "scale": 1.0, "w_min": 0.0, "w_max": 1.5
+        }
+
+    def get_ports(self) -> List[PortDef]:
+        return [
+            PortDef(port_id="out", label="Out", is_output=True, color=QColor("#457b9d"), pos_y=90)
+        ]
+
+    def create_config_dialog(self, parent=None):
+        return HdoSpectrumScaledDialog(self, parent=parent)
+
+    def compute(self, inputs, input_names, is_execution=False, progress_callback=None):
+        sel_name = self.step_data.get('selected_spectrum', '')
+        scale = float(self.step_data.get('scale', 1.0))
+        spec = session.get_spectrum(sel_name)
+
+        # Zwracamy WŁASNY zakres X i Y widma bez paddingu zerami (rozciągnięty sparkline)
+        if spec:
+            sx = spec.wavenumbers.copy()
+            sy = spec.intensities.copy() * scale
+            return {"out": (sx, sy)}, {"out": [sel_name]}
+
+        def_x = np.linspace(4000, 400, 1000)
+        return {"out": (def_x, np.zeros_like(def_x))}, {"out": ["Widmo Skalowane"]}
+
+
+# =============================================================================
+# 3. PASMO SYNTETYCZNE
+# =============================================================================
 
 class SyntheticPeakDialog(QDialog):
     def __init__(self, node: 'SyntheticPeakNode', parent=None):
@@ -170,125 +309,6 @@ class SyntheticPeakDialog(QDialog):
         self.accept()
 
 
-class McParamsDialog(QDialog):
-    def __init__(self, node: 'McParamsNode', parent=None):
-        super().__init__(parent)
-        self.node = node
-        self.step = node.step_data
-        self.setWindowTitle("Parametry Monte Carlo")
-        self.resize(380, 180)
-
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-        layout.addLayout(form)
-
-        self.spin_mc_iter = QSpinBox()
-        self.spin_mc_iter.setRange(100, 50000)
-        self.spin_mc_iter.setSingleStep(500)
-        self.spin_mc_iter.setValue(int(self.step.get('n_iter', 3000)))
-        form.addRow("Liczba wariantów MC:", self.spin_mc_iter)
-
-        self.spin_mc_pen = QDoubleSpinBox()
-        self.spin_mc_pen.setRange(0.0, 500.0)
-        self.spin_mc_pen.setValue(float(self.step.get('penalty_weight', 10.0)))
-        form.addRow("Współczynnik asymetrycznej kary:", self.spin_mc_pen)
-
-        self.chk_bl = QCheckBox("Linia bazowa (kwadratowa ax² + bx + c)")
-        self.chk_bl.setChecked(bool(self.step.get('baseline_active', False)))
-        form.addRow("Linia bazowa:", self.chk_bl)
-
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self._save_and_accept)
-        btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
-
-    def _save_and_accept(self):
-        it = int(self.spin_mc_iter.value())
-        self.step['n_iter'] = it
-        self.step['penalty_weight'] = float(self.spin_mc_pen.value())
-        self.step['baseline_active'] = bool(self.chk_bl.isChecked())
-        self.step['name'] = f"MC Params (iter={it})"
-        self.accept()
-
-
-class HdoDecompositionDialog(QDialog):
-    def __init__(self, node: 'HdoDecompositionNode', parent=None):
-        super().__init__(parent)
-        self.node = node
-        self.step = node.step_data
-        self.setWindowTitle("Solwer dekompozycji HDO / Monte Carlo")
-        self.resize(440, 220)
-
-        layout = QVBoxLayout(self)
-        form = QFormLayout()
-        layout.addLayout(form)
-
-        self.spin_mult_n = QDoubleSpinBox()
-        self.spin_mult_n.setRange(0.01, 100.0)
-        self.spin_mult_n.setValue(float(self.step.get('n_multiplier', 1.0)))
-        form.addRow("Mnożnik widma badanego N:", self.spin_mult_n)
-
-        lbl_info = QLabel(
-            "🎲 Parametry optymalizacji Monte Carlo pobierane są\n"
-            "z podłączonego węzła 'Parametry MC'.\n\n"
-            "• W₀: Widmo badane\n"
-            "• Wₖ: Widma składowe z wagami (multi-cable)\n"
-            "• Pik: Piki syntetyczne GxL (multi-cable)\n"
-            "• MC: Parametry Monte Carlo"
-        )
-        lbl_info.setStyleSheet("color: #a8dadc; font-size: 11px; padding: 6px;")
-        form.addRow(lbl_info)
-
-        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        btns.accepted.connect(self._save_and_accept)
-        btns.rejected.connect(self.reject)
-        layout.addWidget(btns)
-
-    def _save_and_accept(self):
-        n_mult = float(self.spin_mult_n.value())
-        self.step['n_multiplier'] = n_mult
-        self.step['name'] = f"HDO Fit (N={n_mult:.2f})"
-        self.accept()
-
-
-@register_node
-class HdoSpectrumScaledNode(BaseNode):
-    node_type = "hdo_spectrum_scaled"
-    title = "📈 Widmo Składowe (Wk · c)"
-    category = "Dekompozycja HDO & Pasma Syntetyczne"
-    header_gradient = ("#1d3557", "#457b9d")
-
-    @classmethod
-    def default_step_data(cls) -> Dict[str, Any]:
-        return {
-            "type": cls.node_type, "name": "Widmo Skalowane", "selected_spectrum": "",
-            "scale": 1.0, "w_min": 0.0, "w_max": 1.5
-        }
-
-    def get_ports(self) -> List[PortDef]:
-        return [
-            PortDef(port_id="out", label="Out", is_output=True, color=QColor("#457b9d"), pos_y=90)
-        ]
-
-    def create_config_dialog(self, parent=None):
-        return HdoSpectrumScaledDialog(self, parent=parent)
-
-    def compute(self, inputs, input_names, is_execution=False, progress_callback=None):
-        sel_name = self.step_data.get('selected_spectrum', '')
-        scale = float(self.step_data.get('scale', 1.0))
-        spec = session.get_spectrum(sel_name)
-        def_x = np.linspace(4000, 400, 1000)
-
-        if spec:
-            sx = spec.wavenumbers
-            sy = spec.intensities * scale
-            sx_s, sy_s = (sx[::-1], sy[::-1]) if sx[0] > sx[-1] else (sx, sy)
-            y_interp = np.interp(def_x, sx_s, sy_s)
-            return {"out": (def_x.copy(), y_interp)}, {"out": [sel_name]}
-
-        return {"out": (def_x.copy(), np.zeros_like(def_x))}, {"out": ["Widmo Skalowane"]}
-
-
 @register_node
 class SyntheticPeakNode(BaseNode):
     node_type = "synthetic_peak"
@@ -312,48 +332,124 @@ class SyntheticPeakNode(BaseNode):
         return SyntheticPeakDialog(self, parent=parent)
 
     def compute(self, inputs, input_names, is_execution=False, progress_callback=None):
-        def_x = np.linspace(4000, 400, 1000)
         sh = self.step_data.get('shape', 'gxl')
         c = float(self.step_data.get('center', 1650.0))
         a = float(self.step_data.get('amp', 0.5))
         w = float(self.step_data.get('width', 30.0))
         f = float(self.step_data.get('shape_param', 0.5))
-        y_peak = _generate_synthetic_peak(def_x, shape=sh, center=c, amp=a, width=w, shape_param=f)
-        return {"out": (def_x.copy(), y_peak)}, {"out": [self.step_data.get('name', f"Pik {sh.upper()}")]}
+
+        # W podglądzie rysujemy pasmo w jego własnym, naturalnym oknie (rozciągnięty dzwon)
+        span = max(w * 3.5, 25.0)
+        local_x = np.linspace(c + span, c - span, 200)
+        y_peak = _generate_synthetic_peak(local_x, shape=sh, center=c, amp=a, width=w, shape_param=f)
+        return {"out": (local_x, y_peak)}, {"out": [self.step_data.get('name', f"Pik {sh.upper()}")]}
+
+
+# =============================================================================
+# 4. KONFIGURACJA HDO
+# =============================================================================
+
+class HdoConfigDialog(QDialog):
+    def __init__(self, node: 'HdoConfigNode', parent=None):
+        super().__init__(parent)
+        self.node = node
+        self.step = node.step_data
+        self.setWindowTitle("Konfiguracja HDO")
+        self.resize(440, 260)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.ent_base_name = QLineEdit(self.step.get('base_name', ''))
+        self.ent_base_name.setPlaceholderText("Pozostaw puste dla nazwy widma źródłowego")
+        form.addRow("Nazwa bazowa:", self.ent_base_name)
+
+        self.ent_prefix = QLineEdit(self.step.get('prefix', ''))
+        self.ent_prefix.setPlaceholderText("np. HDO_ (opcjonalnie)")
+        form.addRow("Prefiks:", self.ent_prefix)
+
+        self.ent_suffix = QLineEdit(self.step.get('suffix', ''))
+        self.ent_suffix.setPlaceholderText("np. _MC (opcjonalnie)")
+        form.addRow("Sufiks:", self.ent_suffix)
+
+        self.spin_mc_iter = QSpinBox()
+        self.spin_mc_iter.setRange(100, 50000)
+        self.spin_mc_iter.setSingleStep(500)
+        self.spin_mc_iter.setValue(int(self.step.get('n_iter', 3000)))
+        form.addRow("Liczba wariantów MC:", self.spin_mc_iter)
+
+        self.spin_mc_pen = QDoubleSpinBox()
+        self.spin_mc_pen.setRange(0.0, 500.0)
+        self.spin_mc_pen.setValue(float(self.step.get('penalty_weight', 10.0)))
+        form.addRow("Współczynnik asymetrycznej kary:", self.spin_mc_pen)
+
+        self.chk_bl = QCheckBox("Linia bazowa (kwadratowa ax² + bx + c)")
+        self.chk_bl.setChecked(bool(self.step.get('baseline_active', False)))
+        form.addRow("Linia bazowa:", self.chk_bl)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._save_and_accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _save_and_accept(self):
+        b_name = self.ent_base_name.text().strip()
+        self.step['base_name'] = b_name
+        self.step['prefix'] = self.ent_prefix.text().strip()
+        self.step['suffix'] = self.ent_suffix.text().strip()
+        self.step['n_iter'] = int(self.spin_mc_iter.value())
+        self.step['penalty_weight'] = float(self.spin_mc_pen.value())
+        self.step['baseline_active'] = bool(self.chk_bl.isChecked())
+        lbl_b = b_name if b_name else "Auto"
+        self.step['name'] = f"Cfg: {lbl_b} (iter={self.step['n_iter']})"
+        self.accept()
 
 
 @register_node
-class McParamsNode(BaseNode):
-    node_type = "mc_params"
-    title = "🎲 Parametry Monte Carlo"
+class HdoConfigNode(BaseNode):
+    node_type = "hdo_config"
+    title = "⚙️ Konfiguracja HDO"
     category = "Dekompozycja HDO & Pasma Syntetyczne"
     header_gradient = ("#4f000b", "#ff9f1c")
+    has_preview = False  # Blokuje sparkline i napis "Brak sygnału"
 
     @classmethod
     def default_step_data(cls) -> Dict[str, Any]:
         return {
-            "type": cls.node_type, "name": "MC Params (iter=3000)",
-            "n_iter": 3000, "penalty_weight": 10.0, "baseline_active": False
+            "type": cls.node_type,
+            "name": "Cfg: Auto (iter=3000)",
+            "base_name": "",
+            "prefix": "",
+            "suffix": "",
+            "n_iter": 3000,
+            "penalty_weight": 10.0,
+            "baseline_active": False
         }
 
     def get_ports(self) -> List[PortDef]:
         return [
-            PortDef(port_id="out_mc", label="MC", is_output=True, color=QColor("#ff9f1c"), pos_y=90)
+            PortDef(port_id="out_cfg", label="Cfg", is_output=True, color=QColor("#ff9f1c"), pos_y=90)
         ]
 
     def create_config_dialog(self, parent=None):
-        return McParamsDialog(self, parent=parent)
+        return HdoConfigDialog(self, parent=parent)
 
     def compute(self, inputs, input_names, is_execution=False, progress_callback=None):
-        return {"out_mc": (np.array([1.0]), np.array([1.0]))}, {"out_mc": ["MC"]}
+        return {"out_cfg": (np.array([1.0]), np.array([1.0]))}, {"out_cfg": ["Cfg"]}
 
     def draw_custom_overlay(self, painter, box_rect):
         painter.setFont(QFont("Arial", 8))
         painter.setPen(QColor("#ff9f1c"))
+        b_name = self.step_data.get('base_name', '') or 'Auto'
         it = self.step_data.get('n_iter', 3000)
         pen = self.step_data.get('penalty_weight', 10.0)
-        painter.drawText(box_rect, Qt.AlignCenter, f"MC Config\nIter: {it}\nPenalty: {pen:.1f}")
+        painter.drawText(box_rect, Qt.AlignCenter, f"HDO Config\nBaza: {b_name}\nIter: {it} | Kara: {pen:.1f}")
 
+
+# =============================================================================
+# 5. GŁÓWNY SOLWER HDO (Z 3 WYJŚCIAMI METOD: OUT_X, OUT_Y, OUT_Z)
+# =============================================================================
 
 @register_node
 class HdoDecompositionNode(BaseNode):
@@ -361,27 +457,41 @@ class HdoDecompositionNode(BaseNode):
     title = "🧪 Solwer Dekompozycji HDO / MC"
     category = "Dekompozycja HDO & Pasma Syntetyczne"
     header_gradient = ("#14213d", "#2a9d8f")
+    preview_port_id = "out_x"  # Miniaturka i Live Preview pobierają dane z Metody X
 
     @classmethod
     def default_step_data(cls) -> Dict[str, Any]:
-        return {"type": cls.node_type, "name": "HDO Fit (N=1.0)", "n_multiplier": 1.0}
+        return {"type": cls.node_type, "name": "Solwer HDO"}
 
     def get_ports(self) -> List[PortDef]:
         return [
-            PortDef(port_id="in_target", label="W₀", is_output=False, color=QColor("#ffb703"), pos_y=44),
-            PortDef(port_id="in_bases", label="Wₖ", is_output=False, color=QColor("#fb8500"), allow_multiple=True, pos_y=68),
-            PortDef(port_id="in_peaks", label="Pik", is_output=False, color=QColor("#ff006e"), allow_multiple=True, pos_y=94),
-            PortDef(port_id="in_mc", label="MC", is_output=False, color=QColor("#ff9f1c"), pos_y=120),
-            PortDef(port_id="out_fit", label="Ź+Fit", is_output=True, color=QColor("#f4a261"), pos_y=34),
-            PortDef(port_id="out_res", label="Res", is_output=True, color=QColor("#e63946"), pos_y=54),
-            PortDef(port_id="out_fit_res", label="ΔFit", is_output=True, color=QColor("#ffd166"), pos_y=74),
-            PortDef(port_id="out_comps", label="W_k", is_output=True, color=QColor("#06d6a0"), pos_y=94),
-            PortDef(port_id="out_peaks", label="Pks", is_output=True, color=QColor("#ff006e"), pos_y=114),
-            PortDef(port_id="out_params", label="Tab", is_output=True, color=QColor("#52b788"), pos_y=134)
+            PortDef(port_id="in_target", label="W₀", is_output=False, color=QColor("#52b788"), pos_y=46),
+            PortDef(port_id="in_bases", label="Wₖ", is_output=False, color=QColor("#fb8500"), allow_multiple=True, pos_y=76),
+            PortDef(port_id="in_peaks", label="Pik", is_output=False, color=QColor("#ff006e"), allow_multiple=True, pos_y=104),
+            PortDef(port_id="in_cfg", label="Cfg", is_output=False, color=QColor("#ff9f1c"), pos_y=130),
+
+            PortDef(port_id="out_x", label="Met. X", is_output=True, color=QColor("#2a9d8f"), pos_y=50),
+            PortDef(port_id="out_y", label="Met. Y", is_output=True, color=QColor("#48cae4"), pos_y=90),
+            PortDef(port_id="out_z", label="Met. Z", is_output=True, color=QColor("#f4a261"), pos_y=130)
         ]
 
     def create_config_dialog(self, parent=None):
-        return HdoDecompositionDialog(self, parent=parent)
+        dlg = QDialog(parent)
+        dlg.setWindowTitle("Solwer Dekompozycji HDO")
+        lay = QVBoxLayout(dlg)
+        lbl = QLabel(
+            "<b>🧪 Solwer Dekompozycji HDO / MC</b><br><br>"
+            "• Parametry mnożnika <i>N</i> ustawiasz w bloczku <b>Widmo Źródłowe</b>.<br>"
+            "• Nazwę bazową, iteracje MC i kary ustawiasz w bloczku <b>Konfiguracja HDO</b>.<br>"
+            "• Wyjścia <b>Met. X</b>, <b>Met. Y</b> oraz <b>Met. Z</b> połącz kablem<br>"
+            "  z węzłem <b>📁 Zapis do Folderu</b>, który utworzy folder i wszystkie obiekty w drzewie."
+        )
+        lbl.setStyleSheet("color: #e0e0e0; font-size: 11px; padding: 10px;")
+        lay.addWidget(lbl)
+        btns = QDialogButtonBox(QDialogButtonBox.Ok)
+        btns.accepted.connect(dlg.accept)
+        lay.addWidget(btns)
+        return dlg
 
     def compute(self, inputs, input_names, is_execution=False, progress_callback=None):
         data_tar = inputs.get("in_target", (None, None))
@@ -391,11 +501,18 @@ class HdoDecompositionNode(BaseNode):
         def_x = np.linspace(4000, 400, 1000)
         target_x = data_tar[0] if data_tar[0] is not None else def_x
         target_y = data_tar[1] if data_tar[1] is not None else np.zeros_like(target_x)
-        target_y_1d = target_y[:, 0] if target_y.ndim == 2 else target_y
+        w0_target = target_y[:, 0] if target_y.ndim == 2 else target_y
 
-        n_multiplier = float(self.step_data.get('n_multiplier', 1.0))
-        w0_target = target_y_1d * n_multiplier
+        # Konfiguracja
+        cfg = inputs.get("in_cfg_config", {})
+        base_name = cfg.get("base_name", "").strip() or target_name
+        prefix = cfg.get("prefix", "")
+        suffix = cfg.get("suffix", "")
+        n_iterations = int(cfg.get("n_iter", 3000))
+        penalty_weight = float(cfg.get("penalty_weight", 10.0))
+        baseline_active = bool(cfg.get("baseline_active", False))
 
+        # Składowe
         bases_sources = inputs.get("in_bases_multi", [])
         base_names_in = input_names.get("in_bases_multi", [])
         bounds_list = inputs.get("in_bases_bounds", [])
@@ -413,14 +530,18 @@ class HdoDecompositionNode(BaseNode):
         if not bounds_list or len(bounds_list) != len(bases_list):
             bounds_list = [(0.0, 1.5)] * len(bases_list)
 
+        # Piki
         peaks_sources = inputs.get("in_peaks_multi", [])
         peak_params_nodes = inputs.get("in_peaks_params", [])
         n_peaks = len(peaks_sources)
 
-        mc_cfg = inputs.get("in_mc_config", {})
-        n_iterations = int(mc_cfg.get('n_iter', self.step_data.get('n_iter', 3000)))
-        penalty_weight = float(mc_cfg.get('penalty_weight', self.step_data.get('penalty_weight', 10.0)))
-        baseline_active = bool(mc_cfg.get('baseline_active', self.step_data.get('baseline_active', False)))
+        # Nazwa bazowa folderu: {prefix}{base_name}{suffix}_{n_peaks}p_{method}
+        def _build_folder_name(method_tag: str) -> str:
+            return f"{prefix}{base_name}{suffix}_{n_peaks}p_{method_tag}"
+
+        folder_name_x = _build_folder_name("x")
+        folder_name_y = _build_folder_name("y")
+        folder_name_z = _build_folder_name("z")
 
         if len(bases_list) > 0 or n_peaks > 0:
             try:
@@ -437,13 +558,12 @@ class HdoDecompositionNode(BaseNode):
                     peaks_y = np.column_stack(results['peaks_curves']) if results['peaks_curves'] else np.zeros_like(target_x)
 
                     full_metrics = {
-                        'n_multiplier': n_multiplier, 'coefficients': results['coefficients'], 'base_names': base_names,
+                        'coefficients': results['coefficients'], 'base_names': base_names,
                         'comp_areas': results.get('comp_areas', []), 'peaks_params': results.get('peaks_params', []),
                         'peaks_area': results.get('peaks_area', 0.0), 'r2': results['r2'], 'rmse': results['rmse'],
                         'rss': results.get('rss', 0.0), 'mc_iterations': n_iterations, 'mc_penalty': penalty_weight,
                         'baseline_active': baseline_active
                     }
-                    self.step_data['fit_metrics'] = full_metrics
                 else:
                     k_comps = len(bases_list)
                     base_mat = np.vstack(bases_list) if k_comps > 0 else np.empty((0, len(target_x)))
@@ -522,19 +642,20 @@ class HdoDecompositionNode(BaseNode):
                     peaks_area = abs(float(integrate.simpson(sum_pks, target_x))) if p_curves else 0.0
 
                     full_metrics = {
-                        'n_multiplier': n_multiplier, 'coefficients': extracted_c, 'base_names': base_names,
+                        'coefficients': extracted_c, 'base_names': base_names,
                         'comp_areas': comp_areas, 'peaks_params': p_params, 'peaks_area': peaks_area,
                         'r2': r2_val, 'rmse': rmse_val, 'rss': ss_res, 'mc_iterations': n_iterations,
                         'mc_penalty': penalty_weight, 'baseline_active': baseline_active
                     }
-                    self.step_data['fit_metrics'] = full_metrics
 
-                combined_fit_y = np.column_stack([w0_target, fit_y])
+                self.step_data['fit_metrics'] = full_metrics
+                fit_res = w0_target - fit_y
 
-                p_labels = ['MC_Iterations', 'MC_Penalty', 'Baseline_Active', 'N_multiplier', 'R2', 'RMSE', 'RSS', 'Peaks_Area']
+                # Tabela parametrów
+                p_labels = ['MC_Iterations', 'MC_Penalty', 'Baseline_Active', 'R2', 'RMSE', 'RSS', 'Peaks_Area']
                 p_values = [
                     float(full_metrics.get('mc_iterations', n_iterations)), float(full_metrics.get('mc_penalty', penalty_weight)),
-                    1.0 if full_metrics.get('baseline_active', False) else 0.0, float(full_metrics.get('n_multiplier', 1.0)),
+                    1.0 if full_metrics.get('baseline_active', False) else 0.0,
                     float(full_metrics.get('r2', 0.0)), float(full_metrics.get('rmse', 0.0)), float(full_metrics.get('rss', 0.0)),
                     float(full_metrics.get('peaks_area', 0.0))
                 ]
@@ -553,41 +674,60 @@ class HdoDecompositionNode(BaseNode):
                 tbl_x = np.arange(1, len(p_values) + 1, dtype=np.float64)
                 tbl_y = np.array(p_values, dtype=np.float64)
 
-                self.step_data['param_labels'] = p_labels
+                # Pakujemy kompletny bundle wyników dla każdej metody
+                def _create_bundle(method_key, f_name):
+                    return {
+                        'method': method_key,
+                        'folder_name': f_name,
+                        'target_name': target_name,
+                        'wavenumbers': target_x.copy(),
+                        'w0_target': w0_target.copy(),
+                        'fit_y': fit_y.copy(),
+                        'excess_res': excess_res.copy(),
+                        'fit_res': fit_res.copy(),
+                        'comps_y': comps_y.copy(),
+                        'base_names': list(base_names),
+                        'coeffs': list(full_metrics.get('coefficients', [])),
+                        'peaks_y': peaks_y.copy(),
+                        'n_peaks': n_peaks,
+                        'metrics': full_metrics,
+                        'table_x': tbl_x.copy(),
+                        'table_y': tbl_y.copy(),
+                        'param_labels': list(p_labels)
+                    }
 
+                bundle_x = _create_bundle("x", folder_name_x)
+                bundle_y = _create_bundle("y", folder_name_y)
+                bundle_z = _create_bundle("z", folder_name_z)
+
+                self.runtime_bundles = {
+                    "out_x": bundle_x,
+                    "out_y": bundle_y,
+                    "out_z": bundle_z
+                }
+
+                spark_y = np.column_stack([w0_target, fit_y])
                 return {
-                    "out_fit": (target_x.copy(), combined_fit_y),
-                    "out_res": (target_x.copy(), excess_res),
-                    "out_fit_res": (target_x.copy(), w0_target - fit_y),
-                    "out_comps": (target_x.copy(), comps_y),
-                    "out_peaks": (target_x.copy(), peaks_y),
-                    "out_params": (tbl_x, tbl_y)
+                    "out_x": (target_x.copy(), spark_y),
+                    "out_y": (target_x.copy(), spark_y),
+                    "out_z": (target_x.copy(), spark_y)
                 }, {
-                    "out_fit": [f"N_{target_name}", f"Fit_{target_name}"],
-                    "out_res": [f"Res_{target_name}"],
-                    "out_fit_res": [f"ΔFit_{target_name}"],
-                    "out_comps": base_names if base_names else [f"Comp_{i + 1}" for i in range(len(bases_list))],
-                    "out_peaks": [f"Pik_{i + 1}" for i in range(n_peaks)],
-                    "out_params": ["Wartosc"]
+                    "out_x": [f"{folder_name_x} (W0)", f"{folder_name_x} (Fit)"],
+                    "out_y": [f"{folder_name_y} (W0)", f"{folder_name_y} (Fit)"],
+                    "out_z": [f"{folder_name_z} (W0)", f"{folder_name_z} (Fit)"]
                 }
             except Exception:
                 pass
 
         comb_zero = np.column_stack([w0_target, w0_target])
         return {
-            "out_fit": (target_x.copy(), comb_zero),
-            "out_res": (target_x.copy(), np.zeros_like(target_x)),
-            "out_fit_res": (target_x.copy(), np.zeros_like(target_x)),
-            "out_comps": (target_x.copy(), np.zeros_like(target_x)),
-            "out_peaks": (target_x.copy(), np.zeros_like(target_x)),
-            "out_params": (np.array([1.0]), np.array([0.0]))
+            "out_x": (target_x.copy(), comb_zero),
+            "out_y": (target_x.copy(), comb_zero),
+            "out_z": (target_x.copy(), comb_zero)
         }, {
-            "out_fit": [f"N_{target_name}", f"Fit_{target_name}"],
-            "out_res": [f"Res_{target_name}"],
-            "out_fit_res": [f"ΔFit_{target_name}"],
-            "out_comps": ["Comp_1"],
-            "out_peaks": ["Pik_1"],
-            "out_params": ["Param"]
+            "out_x": [f"{folder_name_x}"],
+            "out_y": [f"{folder_name_y}"],
+            "out_z": [f"{folder_name_z}"]
         }
 
     def draw_custom_overlay(self, painter, box_rect):

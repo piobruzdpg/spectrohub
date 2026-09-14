@@ -166,6 +166,7 @@ class OutputNode(BaseNode):
     title = "💾 Zapis Wyniku"
     category = "Węzły Końcowe (Terminale)"
     header_gradient = ("#6a040f", "#9d0208")
+    preview_port_id = "in"
 
     @classmethod
     def default_step_data(cls) -> Dict[str, Any]:
@@ -198,6 +199,7 @@ class OutputWindowNode(BaseNode):
     title = "🗂️ Kopiuj do okna roboczego"
     category = "Węzły Końcowe (Terminale)"
     header_gradient = ("#7209b7", "#b5179e")
+    preview_port_id = "in"
 
     @classmethod
     def default_step_data(cls) -> Dict[str, Any]:
@@ -267,6 +269,7 @@ class OutputTableNode(BaseNode):
     title = "📊 Zapisz jako Tabelę / Profil"
     category = "Węzły Końcowe (Terminale)"
     header_gradient = ("#0077b6", "#0096c7")
+    preview_port_id = "in"
 
     @classmethod
     def default_step_data(cls) -> Dict[str, Any]:
@@ -286,6 +289,79 @@ class OutputTableNode(BaseNode):
 
     def create_config_dialog(self, parent=None):
         return OutputTableDialog(self, parent=parent)
+
+    def compute(self, inputs, input_names, is_execution=False, progress_callback=None):
+        data_in = inputs.get("in", (None, None))
+        names_in = input_names.get("in", [])
+        return {"in": data_in}, {"in": names_in}
+
+
+class OutputFolderDialog(QDialog):
+    def __init__(self, node: 'OutputFolderNode', parent=None):
+        super().__init__(parent)
+        self.node = node
+        self.step = node.step_data
+        self.setWindowTitle("Zapis do Folderu Roboczego")
+        self.resize(440, 180)
+
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        layout.addLayout(form)
+
+        self.combo_parent = QComboBox()
+        self.combo_parent.addItem("📁 (Poziom główny / bez folderu nadrzędnego)", None)
+        for fid, f in session.folders.items():
+            self.combo_parent.addItem(f"📁 {f.name}", fid)
+
+        cur_fid = self.step.get('parent_folder_id')
+        idx = self.combo_parent.findData(cur_fid)
+        if idx >= 0:
+            self.combo_parent.setCurrentIndex(idx)
+        form.addRow("Folder nadrzędny:", self.combo_parent)
+
+        lbl = QLabel(
+            "Węzeł ten tworzy dedykowany folder z nazwą przekazaną przez solwer\n"
+            "(np. 'NazwaBazowa_2p_x').\n"
+            "W folderze zostaną umieszczone:\n"
+            "  • Okno robocze 🪟 z kompletem widm składowych i residuów\n"
+            "  • Tabela danych 📊 z parametrami dopasowania"
+        )
+        lbl.setStyleSheet("color: #a8dadc; font-size: 11px; padding: 6px;")
+        form.addRow(lbl)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._save_and_accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _save_and_accept(self):
+        self.step['parent_folder_id'] = self.combo_parent.currentData()
+        self.accept()
+
+
+@register_node
+class OutputFolderNode(BaseNode):
+    node_type = "output_folder"
+    title = "📁 Zapis do Folderu"
+    category = "Węzły Końcowe (Terminale)"
+    header_gradient = ("#1d3557", "#457b9d")
+    preview_port_id = "in"
+
+    @classmethod
+    def default_step_data(cls) -> Dict[str, Any]:
+        return {
+            "type": cls.node_type,
+            "name": "📁 Zapis do Folderu",
+            "parent_folder_id": None
+        }
+
+    def get_ports(self) -> List[PortDef]:
+        return [
+            PortDef(port_id="in", label="In", is_output=False, color=QColor("#ffb703"), pos_y=90)
+        ]
+
+    def create_config_dialog(self, parent=None):
+        return OutputFolderDialog(self, parent=parent)
 
     def compute(self, inputs, input_names, is_execution=False, progress_callback=None):
         data_in = inputs.get("in", (None, None))

@@ -317,7 +317,8 @@ class ProjectTreeWidget(QTreeWidget):
             if found_folder:
                 parent_item = found_folder
 
-        win_item = QTreeWidgetItem(parent_item, [f"🗂️ {name}"])
+        # Nowa, czytelna ikonka okna roboczego: 🖼️
+        win_item = QTreeWidgetItem(parent_item, [f"🖼️ {name}"])
         win_item.setFlags(
             Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable
@@ -785,7 +786,9 @@ class ProjectTreeWidget(QTreeWidget):
         suggested_name = "Eksport_Widm"
         if len(items_to_process) == 1:
             it = items_to_process[0]
-            suggested_name = it.data(0, Qt.UserRole) or it.text(0).replace("📁 ", "").replace("🗂️ ", "").replace("📈 ", "")
+            suggested_name = it.data(0, Qt.UserRole) or it.text(0).replace("📁 ", "").replace("🖼️ ", "").replace("🗂️ ",
+                                                                                                               "").replace(
+                "📈 ", "")
 
         def add_spec(spec: Optional[SpectrumData], rel_dir: str):
             if spec is None:
@@ -1070,7 +1073,8 @@ class ProjectTreeWidget(QTreeWidget):
             sub_move.addSeparator()
             for fid, f in session.folders.items():
                 act_f = sub_move.addAction(f"📁 {f.name}")
-                act_f.triggered.connect(lambda checked=False, target_fid=fid: session.move_window_to_folder(win_id, target_fid))
+                act_f.triggered.connect(
+                    lambda checked=False, target_fid=fid: session.move_window_to_folder(win_id, target_fid))
 
             menu.addSeparator()
             act_chk_all = menu.addAction("☑ Zaznacz wszystkie w tym oknie")
@@ -1078,10 +1082,10 @@ class ProjectTreeWidget(QTreeWidget):
             act_unchk_all = menu.addAction("☐ Odznacz wszystkie w tym oknie")
             act_unchk_all.triggered.connect(lambda: self._set_category_check_state(item, Qt.CheckState.Unchecked))
 
-            if len(session.windows) > 1:
-                menu.addSeparator()
-                act_del = menu.addAction("🗑 Usuń okno")
-                act_del.triggered.connect(lambda: session.remove_window(win_id))
+            # Zawsze pozwalamy usunąć okno robocze
+            menu.addSeparator()
+            act_del = menu.addAction("🗑 Usuń okno")
+            act_del.triggered.connect(lambda: session.remove_window(win_id))
 
             self._populate_export_menu(menu, item, selected_items)
             menu.exec(self.viewport().mapToGlobal(pos))
@@ -1215,7 +1219,7 @@ class ProjectTreeWidget(QTreeWidget):
                 session.windows[win_id].name = name.strip()
                 win_item = self._find_window_item(win_id)
                 if win_item:
-                    win_item.setText(0, f"🗂️ {name.strip()}")
+                    win_item.setText(0, f"🖼️ {name.strip()}")
 
     def _find_table_item(self, table_id: str, parent: Optional[QTreeWidgetItem] = None) -> Optional[QTreeWidgetItem]:
         if parent is None:

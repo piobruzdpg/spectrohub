@@ -41,6 +41,10 @@ class BaseNode:
     # Domyślne wymiary kafelka
     width: int = 220
     height: int = 150
+    # Czy węzeł renderuje mini-wykres sparkline (dla węzłów czysto konfiguracyjnych: False)
+    has_preview: bool = True
+    # Wskazanie portu dla podglądu (np. 'out_x' dla HDO lub 'in' dla terminali)
+    preview_port_id: Optional[str] = None
 
     def __init__(self, step_data: Optional[Dict[str, Any]] = None):
         self.step_data: Dict[str, Any] = step_data or self.default_step_data()
