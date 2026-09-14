@@ -270,6 +270,34 @@ class DAGEvaluator:
             ntype = node.node_type
 
             # =================================================================
+            # NOWY SYSTEM MODULARNY: Jeśli węzeł posiada instancję BaseNode
+            # =================================================================
+            if getattr(node, 'node_obj', None) is not None:
+                # Zbieramy dane wejściowe ze wszystkich portów wejściowych węzła
+                node_inputs = {}
+                node_names = {}
+                for port_id, in_port in node.in_ports.items():
+                    node_inputs[port_id] = get_source_data(in_port)
+                    node_names[port_id] = get_source_names(in_port)
+
+                # Wywołanie czystej metody compute() z klasy węzła
+                out_results, out_names = node.node_obj.compute(
+                    inputs=node_inputs,
+                    input_names=node_names,
+                    is_execution=is_execution,
+                    progress_callback=progress_callback
+                )
+
+                # Zapisujemy wyniki do globalnych map port_results i port_names
+                for p_id, data_tuple in out_results.items():
+                    port_results[(node, p_id)] = data_tuple
+                for p_id, names_list in out_names.items():
+                    port_names[(node, p_id)] = names_list
+
+                continue  # Pomiń stary blok if...elif dla tego węzła!
+
+
+            # =================================================================
             # 1. ŹRÓDŁO DANYCH (WĘZEŁ WEJŚCIOWY)
             # =================================================================
             if ntype == "input":
