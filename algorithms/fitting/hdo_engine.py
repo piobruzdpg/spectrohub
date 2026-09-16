@@ -1,6 +1,6 @@
 """
 algorithms/fitting/hdo_engine.py
-Wieloprocesowy, uogólniony silnik dekompozycji widmowej i HDO Fit.
+Wieloprocesowy, uogólniony silnik curve fitting.
 Czysta matematyka (NumPy / SciPy) – zero zależności od GUI.
 Obsługuje k widm bazowych, m pasm syntetycznych i asymetryczną funkcję kary.
 """

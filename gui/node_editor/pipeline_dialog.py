@@ -55,21 +55,202 @@ def _ensure_factory_templates(templates_dir: str):
 
     factory_presets = {
         "01_Dekompozycja_HDO.json": {
-            "title": "🧪 Dekompozycja HDO / Monte Carlo",
+            "title": "🧪 Dopasowywanie widm (HDO/MC)",
             "nodes": [
-                {"id": "n0", "type": "hdo_source_spectrum", "title": "📥 Widmo Źródłowe (W₀ · N)", "pos_x": 40.0, "pos_y": 60.0, "step_data": {"type": "hdo_source_spectrum", "name": "Widmo Źródłowe W₀", "n_multiplier": 1.0, "selected_spectrum": ""}},
-                {"id": "n1", "type": "hdo_spectrum_scaled", "title": "Widmo Składowe (W₁ · c)", "pos_x": 40.0, "pos_y": 210.0, "step_data": {"type": "hdo_spectrum_scaled", "name": "Widmo Skalowane", "scale": 1.0, "w_min": 0.0, "w_max": 1.5, "selected_spectrum": ""}},
-                {"id": "n2", "type": "synthetic_peak", "title": "Pik Syntetyczny (GxL)", "pos_x": 40.0, "pos_y": 360.0, "step_data": {"type": "synthetic_peak", "name": "Pik GxL @ 1650", "shape": "gxl", "center": 1650.0, "amp": 0.4, "width": 35.0, "shape_param": 0.5}},
-                {"id": "n3", "type": "hdo_config", "title": "⚙️ Konfiguracja HDO", "pos_x": 40.0, "pos_y": 510.0, "step_data": {"type": "hdo_config", "name": "Cfg: Auto (iter=3000)", "base_name": "", "prefix": "", "suffix": "", "n_iter": 3000, "penalty_weight": 10.0, "baseline_active": False}},
-                {"id": "n4", "type": "hdo_decomposition", "title": "Dekompozycja HDO / MC", "pos_x": 380.0, "pos_y": 210.0, "step_data": {"type": "hdo_decomposition", "name": "Solwer HDO"}},
-                {"id": "n5", "type": "output_folder", "title": "📁 Zapis do Folderu", "pos_x": 720.0, "pos_y": 210.0, "step_data": {"type": "output_folder", "name": "📁 Zapis do Folderu", "parent_folder_id": None}}
+                {
+                    "id": "node_0",
+                    "type": "output_folder",
+                    "title": "📁 Zapis do Folderu",
+                    "pos_x": 1183.372921615202,
+                    "pos_y": -15.946159936658752,
+                    "step_data": {
+                        "name": "📁 Zapis do Folderu",
+                        "parent_folder_id": None,
+                        "type": "output_folder"
+                    }
+                },
+                {
+                    "id": "node_1",
+                    "type": "hdo_decomposition",
+                    "title": "🧪 Solwer Dekompozycji HDO / MC",
+                    "pos_x": 893.8242280285036,
+                    "pos_y": 136.8012668250198,
+                    "step_data": {
+                        "name": "Solwer HDO",
+                        "type": "hdo_decomposition",
+                        "fit_metrics": {
+                            "coefficients": [
+                                5.694373060881834,
+                                5.518963385462457
+                            ],
+                            "base_names": [
+                                "DIG10'9",
+                                "TAU10'6"
+                            ],
+                            "comp_areas": [
+                                470.72027964968265,
+                                394.75217806561125
+                            ],
+                            "peaks_params": [
+                                {
+                                    "amp": 2.8774573517706563,
+                                    "center": 2499.9956894961183,
+                                    "shape": 0.49718869880082733,
+                                    "width": 100.15852213539183
+                                },
+                                {
+                                    "amp": 0.09927087092961702,
+                                    "center": 2699.9617552804507,
+                                    "shape": 0.49998368745477745,
+                                    "width": 29.998704967584047
+                                }
+                            ],
+                            "peaks_area": 675.9184619087598,
+                            "r2": 0.9634666589590392,
+                            "rmse": 0.4501707624289811,
+                            "rss": 89.57294218288342,
+                            "mc_iterations": 3000,
+                            "mc_penalty": 10.0,
+                            "baseline_active": 0
+                        }
+                    }
+                },
+                {
+                    "id": "node_2",
+                    "type": "hdo_config",
+                    "title": "⚙️ Konfiguracja HDO",
+                    "pos_x": 556.3452593032463,
+                    "pos_y": 673.8132759303248,
+                    "step_data": {
+                        "base_name": "testy",
+                        "baseline_active": 0,
+                        "n_iter": 3000,
+                        "name": "Cfg: testy (iter=3000)",
+                        "penalty_weight": 10.0,
+                        "prefix": "",
+                        "suffix": "",
+                        "type": "hdo_config"
+                    }
+                },
+                {
+                    "id": "node_3",
+                    "type": "synthetic_peak",
+                    "title": "🔔 Pasmo Syntetyczne (GxL)",
+                    "pos_x": 227.4425969912906,
+                    "pos_y": 574.061757719715,
+                    "step_data": {
+                        "amp": 0.1,
+                        "center": 2700.0,
+                        "name": "Pik GXL @ 2700.0",
+                        "shape": "gxl",
+                        "shape_param": 0.5,
+                        "type": "synthetic_peak",
+                        "width": 30.0
+                    }
+                },
+                {
+                    "id": "node_4",
+                    "type": "synthetic_peak",
+                    "title": "🔔 Pasmo Syntetyczne (GxL)",
+                    "pos_x": 217.37133808392718,
+                    "pos_y": 398.65399841646877,
+                    "step_data": {
+                        "amp": 0.5,
+                        "center": 2500.0,
+                        "name": "Pik GXL @ 2500.0",
+                        "shape": "gxl",
+                        "shape_param": 0.5,
+                        "type": "synthetic_peak",
+                        "width": 100.0
+                    }
+                },
+                {
+                    "id": "node_5",
+                    "type": "hdo_spectrum_scaled",
+                    "title": "📈 Widmo Składowe (Wk · c)",
+                    "pos_x": 218.21060965954078,
+                    "pos_y": 182.96120348376883,
+                    "step_data": {
+                        "name": "TAU10'6 · 1.00",
+                        "scale": 1.0,
+                        "selected_spectrum": "TAU10'6",
+                        "type": "hdo_spectrum_scaled",
+                        "w_max": 10.6,
+                        "w_min": 0.0
+                    }
+                },
+                {
+                    "id": "node_6",
+                    "type": "hdo_spectrum_scaled",
+                    "title": "📈 Widmo Składowe (Wk · c)",
+                    "pos_x": 201.4251781472684,
+                    "pos_y": 9.231987331749803,
+                    "step_data": {
+                        "name": "DIG10'9 · 1.00",
+                        "scale": 1.0,
+                        "selected_spectrum": "DIG10'9",
+                        "type": "hdo_spectrum_scaled",
+                        "w_max": 10.9,
+                        "w_min": 0.0
+                    }
+                },
+                {
+                    "id": "node_7",
+                    "type": "hdo_source_spectrum",
+                    "title": "📥 Widmo Źródłowe (W₀ · N)",
+                    "pos_x": 204.7822644497229,
+                    "pos_y": -251.78147268408551,
+                    "step_data": {
+                        "n_multiplier": 25.4,
+                        "name": "W₀: DTAU25'4 · 25.40",
+                        "selected_spectrum": "DTAU25'4",
+                        "type": "hdo_source_spectrum"
+                    }
+                }
             ],
             "connections": [
-                {"from_node": "n0", "from_port": "out", "to_node": "n4", "to_port": "in_target"},
-                {"from_node": "n1", "from_port": "out", "to_node": "n4", "to_port": "in_bases"},
-                {"from_node": "n2", "from_port": "out", "to_node": "n4", "to_port": "in_peaks"},
-                {"from_node": "n3", "from_port": "out_cfg", "to_node": "n4", "to_port": "in_cfg"},
-                {"from_node": "n4", "from_port": "out_x", "to_node": "n5", "to_port": "in"}
+                {
+                    "from_node": "node_1",
+                    "from_port": "out_x",
+                    "to_node": "node_0",
+                    "to_port": "in"
+                },
+                {
+                    "from_node": "node_2",
+                    "from_port": "out_cfg",
+                    "to_node": "node_1",
+                    "to_port": "in_cfg"
+                },
+                {
+                    "from_node": "node_3",
+                    "from_port": "out",
+                    "to_node": "node_1",
+                    "to_port": "in_peaks"
+                },
+                {
+                    "from_node": "node_4",
+                    "from_port": "out",
+                    "to_node": "node_1",
+                    "to_port": "in_peaks"
+                },
+                {
+                    "from_node": "node_5",
+                    "from_port": "out",
+                    "to_node": "node_1",
+                    "to_port": "in_bases"
+                },
+                {
+                    "from_node": "node_6",
+                    "from_port": "out",
+                    "to_node": "node_1",
+                    "to_port": "in_bases"
+                },
+                {
+                    "from_node": "node_7",
+                    "from_port": "out",
+                    "to_node": "node_1",
+                    "to_port": "in_target"
+                }
             ]
         },
         "02_Odszumianie_SVD.json": {
@@ -1495,6 +1676,8 @@ class NodePipelineDialog(QMainWindow):
                 # =============================================================
                 if term_node.node_type == "output_folder":
                     parent_fid = term_node.step_data.get("parent_folder_id")
+                    custom_folder_name = term_node.step_data.get("folder_name", "").strip()
+
                     for conn in incoming_conns:
                         src_node = conn.out_port.node_item
                         src_port = conn.out_port.port_id
@@ -1508,9 +1691,11 @@ class NodePipelineDialog(QMainWindow):
                             bundle = src_node.step_data.get(f"hdo_bundle_{src_port}")
 
                         if bundle:
-                            f_name = bundle['folder_name']
+                            f_name = custom_folder_name if custom_folder_name else bundle['folder_name']
                             folder_id = session.add_folder(name=f_name, parent_folder_id=parent_fid)
+                            QApplication.processEvents()
                             win_id = session.add_window(name=f_name, folder_id=folder_id)
+                            QApplication.processEvents()
 
                             wn = bundle['wavenumbers']
 
@@ -1518,16 +1703,16 @@ class NodePipelineDialog(QMainWindow):
                             s_w0 = SpectrumData(
                                 wavenumbers=wn.copy(), intensities=bundle['w0_target'].copy(),
                                 name=f"{f_name}_W0", file_path="", file_type="processed",
-                                metadata={"source": "HDO W0 Target", **bundle['metrics']}
+                                metadata={"source": "HDO W0 Target", **bundle.get('metrics', {})}
                             )
                             session.add_spectrum_to_window(win_id, s_w0)
 
                             # 2. Fit całkowity
-                            r2_val = bundle['metrics'].get('r2', 0.0)
+                            r2_val = bundle.get('metrics', {}).get('r2', 0.0)
                             s_fit = SpectrumData(
                                 wavenumbers=wn.copy(), intensities=bundle['fit_y'].copy(),
                                 name=f"{f_name}_Fit (R²={r2_val:.4f})", file_path="", file_type="fit",
-                                metadata={"source": "HDO Total Fit", **bundle['metrics']}
+                                metadata={"source": "HDO Total Fit", **bundle.get('metrics', {})}
                             )
                             session.add_spectrum_to_window(win_id, s_fit)
 
@@ -1535,7 +1720,7 @@ class NodePipelineDialog(QMainWindow):
                             s_res = SpectrumData(
                                 wavenumbers=wn.copy(), intensities=bundle['excess_res'].copy(),
                                 name=f"{f_name}_Res_Nadmiarowe", file_path="", file_type="residual",
-                                metadata={"source": "HDO Excess Residual", **bundle['metrics']}
+                                metadata={"source": "HDO Excess Residual", **bundle.get('metrics', {})}
                             )
                             session.add_spectrum_to_window(win_id, s_res)
 
@@ -1543,7 +1728,7 @@ class NodePipelineDialog(QMainWindow):
                             s_fres = SpectrumData(
                                 wavenumbers=wn.copy(), intensities=bundle['fit_res'].copy(),
                                 name=f"{f_name}_ΔFit", file_path="", file_type="residual",
-                                metadata={"source": "HDO Fit Residual", **bundle['metrics']}
+                                metadata={"source": "HDO Fit Residual", **bundle.get('metrics', {})}
                             )
                             session.add_spectrum_to_window(win_id, s_fres)
 
@@ -1553,12 +1738,14 @@ class NodePipelineDialog(QMainWindow):
                             coeffs = bundle['coeffs']
                             if comps_y.ndim == 2:
                                 for col in range(comps_y.shape[1]):
-                                    b_title = base_names[col] if col < len(base_names) else f"Comp_{col+1}"
+                                    b_title = base_names[col] if col < len(base_names) else f"Comp_{col + 1}"
                                     c_val = coeffs[col] if col < len(coeffs) else 1.0
                                     s_comp = SpectrumData(
                                         wavenumbers=wn.copy(), intensities=comps_y[:, col].copy(),
-                                        name=f"{f_name}_{b_title} (c={c_val:.4f})", file_path="", file_type="processed",
-                                        metadata={"source": "HDO Component", "coeff": c_val, **bundle['metrics']}
+                                        name=f"{f_name}_{b_title} (c={c_val:.4f})", file_path="",
+                                        file_type="processed",
+                                        metadata={"source": "HDO Component", "coeff": c_val,
+                                                  **bundle.get('metrics', {})}
                                     )
                                     session.add_spectrum_to_window(win_id, s_comp)
 
@@ -1568,8 +1755,8 @@ class NodePipelineDialog(QMainWindow):
                                 for col in range(peaks_y.shape[1]):
                                     s_pk = SpectrumData(
                                         wavenumbers=wn.copy(), intensities=peaks_y[:, col].copy(),
-                                        name=f"{f_name}_Pik_{col+1}", file_path="", file_type="processed",
-                                        metadata={"source": "HDO Synthetic Peak", **bundle['metrics']}
+                                        name=f"{f_name}_Pik_{col + 1}", file_path="", file_type="processed",
+                                        metadata={"source": "HDO Synthetic Peak", **bundle.get('metrics', {})}
                                     )
                                     session.add_spectrum_to_window(win_id, s_pk)
 
@@ -1582,9 +1769,42 @@ class NodePipelineDialog(QMainWindow):
                                 x_label="Parametr",
                                 y_label="Wartość",
                                 folder_id=folder_id,
-                                metadata={"row_labels": bundle['param_labels'], **bundle['metrics']}
+                                metadata={"row_labels": bundle['param_labels'], **bundle.get('metrics', {})}
                             )
                             session.add_table(new_table, make_active=False)
+
+                        else:
+                            # --- TRYB AWARYJNY / UNIWERSALNY: dowolne widma bez paczki HDO ---
+                            new_x, new_y = res_map.get((src_node, src_port), (None, None))
+                            src_names = names_map.get((src_node, src_port), [])
+                            if new_x is not None and new_y is not None:
+                                if custom_folder_name:
+                                    f_name = custom_folder_name
+                                elif src_names:
+                                    clean_base = src_names[0].split()[0]
+                                    f_name = f"Folder_{clean_base}"
+                                else:
+                                    f_name = f"Nowy_Folder_{session._folder_counter + 1}"
+
+                                folder_id = session.add_folder(name=f_name, parent_folder_id=parent_fid)
+                                QApplication.processEvents()
+                                win_id = session.add_window(name=f_name, folder_id=folder_id)
+                                QApplication.processEvents()
+
+                                if new_y.ndim == 2:
+                                    for col in range(new_y.shape[1]):
+                                        s_n = src_names[col] if col < len(
+                                            src_names) else f"{f_name}_Widmo_{col + 1}"
+                                        session.add_spectrum_to_window(win_id, SpectrumData(
+                                            wavenumbers=new_x.copy(), intensities=new_y[:, col].copy(),
+                                            name=s_n, file_path="", file_type="processed"
+                                        ))
+                                else:
+                                    s_n = src_names[0] if src_names else f"{f_name}_Widmo"
+                                    session.add_spectrum_to_window(win_id, SpectrumData(
+                                        wavenumbers=new_x.copy(), intensities=new_y.copy(),
+                                        name=s_n, file_path="", file_type="processed"
+                                    ))
                     continue
 
                 # =============================================================

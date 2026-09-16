@@ -1,9 +1,11 @@
 """
 gui/node_editor/nodes/node_math.py
-Węzły arytmetyczne, skalarne, IS oraz całkowania z autonomicznymi oknami dialogowymi.
+Węzły arytmetyczne, skalarne, IS oraz całkowania z autonomicznymi oknami dialogowymi,
+dynamiczną aktualizacją etykiet portów i propagacją paczek danych.
 """
 
 from typing import List, Dict, Any, Tuple, Optional
+import copy
 import numpy as np
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
@@ -15,6 +17,20 @@ from gui.node_editor.base import BaseNode, PortDef
 from gui.node_editor.registry import register_node
 
 _trapezoid = getattr(np, "trapezoid", getattr(np, "trapz", None))
+
+
+def _extract_scalar(data_tuple: Any, default_val: float) -> float:
+    if data_tuple is None:
+        return default_val
+    if isinstance(data_tuple, (int, float, np.number)):
+        return float(data_tuple)
+    if isinstance(data_tuple, tuple) and len(data_tuple) >= 2:
+        y = data_tuple[1]
+        if y is not None:
+            arr = np.asarray(y).ravel()
+            if len(arr) > 0 and not np.isnan(arr[0]):
+                return float(arr[0])
+    return default_val
 
 
 class MathOpDialog(QDialog):
@@ -46,7 +62,7 @@ class MathOpDialog(QDialog):
         self.spin_k.setValue(float(self.step.get('k', 1.0)))
 
         form.addRow("Typ operacji:", self.combo_op)
-        form.addRow("Współczynnik skali k:", self.spin_k)
+        form.addRow("Współczynnik skali k (domyślny):", self.spin_k)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self._save_and_accept)
@@ -92,7 +108,7 @@ class ScalarMathDialog(QDialog):
         self.spin_val.setValue(float(self.step.get('val', 1.0)))
 
         form.addRow("Działanie:", self.combo_op)
-        form.addRow("Wartość skalara (c):", self.spin_val)
+        form.addRow("Wartość skalara c (domyślna):", self.spin_val)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self._save_and_accept)
@@ -205,6 +221,7 @@ class MathOpNode(BaseNode):
     title = "Operacja Dwuwidmowa (A ± k·B)"
     category = "Matematyka Spektralna i Skalary"
     header_gradient = ("#5a189a", "#9d4edd")
+    preview_port_id = "out"
 
     @classmethod
     def default_step_data(cls) -> Dict[str, Any]:
@@ -212,9 +229,10 @@ class MathOpNode(BaseNode):
 
     def get_ports(self) -> List[PortDef]:
         return [
-            PortDef(port_id="in_a", label="A", is_output=False, color=QColor("#ffb703"), pos_y=70),
-            PortDef(port_id="in_b", label="B", is_output=False, color=QColor("#fb8500"), pos_y=112),
-            PortDef(port_id="out", label="Out", is_output=True, color=QColor("#ff70a6"), pos_y=90)
+            PortDef(port_id="in_a", label="A", is_output=False, color=QColor("#ffb703"), pos_y=55),
+            PortDef(port_id="in_b", label="B", is_output=False, color=QColor("#fb8500"), pos_y=88),
+            PortDef(port_id="in_k", label="k", is_output=False, color=QColor("#06d6a0"), pos_y=120),
+            PortDef(port_id="out", label="Out", is_output=True, color=QColor("#ff70a6"), pos_y=88)
         ]
 
     def create_config_dialog(self, parent=None):
@@ -223,6 +241,7 @@ class MathOpNode(BaseNode):
     def compute(self, inputs, input_names, is_execution=False, progress_callback=None):
         data_a = inputs.get("in_a", (None, None))
         data_b = inputs.get("in_b", (None, None))
+        data_k = inputs.get("in_k", (None, None))
         names_a = input_names.get("in_a", [])
 
         if data_a[0] is None:
@@ -245,7 +264,15 @@ class MathOpNode(BaseNode):
             yb_interp = np.interp(xa, xb_s, yb_col)
 
         op = self.step_data.get('op', 'sub')
-        k = float(self.step_data.get('k', 1.0))
+        default_k = float(self.step_data.get('k', 1.0))
+        k = _extract_scalar(data_k, default_k)
+
+        # Dynamiczna aktualizacja napisu na węźle
+        op_sym = "-" if op == "sub" else ("+" if op == "add" else ("·" if op == "mul" else "/"))
+        if data_k[0] is not None:
+            self.step_data['name'] = f"A {op_sym} {k:.3f}·B [k={k:.3f}]" if op in ('sub', 'add') else f"A {op_sym} B"
+        else:
+            self.step_data['name'] = f"A {op_sym} {k:.3f}·B" if op in ('sub', 'add') else f"A {op_sym} B"
 
         def _calc(a, b):
             if op == 'sub': return a - k * b
@@ -273,15 +300,21 @@ class ScalarMathNode(BaseNode):
     title = "Działanie ze Skalarem (S · c)"
     category = "Matematyka Spektralna i Skalary"
     header_gradient = ("#4a148c", "#8e24aa")
+    preview_port_id = "out"
+
+    def __init__(self, step_data=None):
+        super().__init__(step_data)
+        self.runtime_bundles: Dict[str, Any] = {}
 
     @classmethod
     def default_step_data(cls) -> Dict[str, Any]:
-        return {"type": cls.node_type, "name": "S · 2", "op": "mul", "val": 2.0}
+        return {"type": cls.node_type, "name": "S · 1.0", "op": "mul", "val": 1.0}
 
     def get_ports(self) -> List[PortDef]:
         return [
-            PortDef(port_id="in", label="In", is_output=False, color=QColor("#ffb703"), pos_y=90),
-            PortDef(port_id="out", label="Out", is_output=True, color=QColor("#b388ff"), pos_y=90)
+            PortDef(port_id="in", label="In", is_output=False, color=QColor("#ffb703"), pos_y=65),
+            PortDef(port_id="in_c", label="c", is_output=False, color=QColor("#06d6a0"), pos_y=105),
+            PortDef(port_id="out", label="Out", is_output=True, color=QColor("#b388ff"), pos_y=85)
         ]
 
     def create_config_dialog(self, parent=None):
@@ -289,19 +322,49 @@ class ScalarMathNode(BaseNode):
 
     def compute(self, inputs, input_names, is_execution=False, progress_callback=None):
         data_in = inputs.get("in", (None, None))
+        data_c = inputs.get("in_c", (None, None))
         names_in = input_names.get("in", [])
         if data_in[0] is None or data_in[1] is None:
+            self.runtime_bundles = {}
             return {"out": (None, None)}, {"out": []}
 
         x, y = data_in
         op = self.step_data.get('op', 'mul')
-        val = float(self.step_data.get('val', 1.0))
-        y_c = y.copy()
+        default_val = float(self.step_data.get('val', 1.0))
+        val = _extract_scalar(data_c, default_val)
 
-        if op == 'mul': y_c *= val
-        elif op == 'div': y_c = np.where(abs(val) > 1e-12, y_c / val, y_c)
-        elif op == 'add': y_c += val
-        elif op == 'sub': y_c -= val
+        # Dynamiczna aktualizacja napisu na węźle
+        op_sym = "·" if op == "mul" else ("/" if op == "div" else ("+" if op == "add" else "-"))
+        if data_c[0] is not None:
+            self.step_data['name'] = f"S {op_sym} {val:.4g} [c={val:.4g}]"
+        else:
+            self.step_data['name'] = f"S {op_sym} {val:.4g}"
+
+        def _apply_op(arr):
+            if arr is None: return None
+            if op == 'mul': return arr * val
+            elif op == 'div': return np.where(abs(val) > 1e-12, arr / val, arr)
+            elif op == 'add': return arr + val
+            elif op == 'sub': return arr - val
+            return arr
+
+        y_c = _apply_op(y.copy())
+
+        # Propagacja i skalowanie paczki HDO jeśli nadeszła z poprzednika
+        in_bundle = inputs.get("in_bundle")
+        if in_bundle:
+            b = copy.deepcopy(in_bundle)
+            b['w0_target'] = _apply_op(b.get('w0_target'))
+            b['fit_y'] = _apply_op(b.get('fit_y'))
+            b['excess_res'] = _apply_op(b.get('excess_res'))
+            b['fit_res'] = _apply_op(b.get('fit_res'))
+            b['comps_y'] = _apply_op(b.get('comps_y'))
+            b['peaks_y'] = _apply_op(b.get('peaks_y'))
+            tag = f"x{val:.3g}" if op == 'mul' else (f"div{val:.3g}" if op == 'div' else f"{op}{val:.3g}")
+            b['folder_name'] = f"{b.get('folder_name', 'HDO')}_{tag}"
+            self.runtime_bundles = {"out": b}
+        else:
+            self.runtime_bundles = {}
 
         return {"out": (x.copy(), y_c)}, {"out": list(names_in)}
 

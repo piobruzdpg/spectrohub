@@ -1,6 +1,6 @@
 """
 gui/node_editor/nodes/node_hdo.py
-Zintegrowana gałąź dekompozycji HDO / Monte Carlo:
+Zintegrowana gałąź spektralnego rozkładu pasm (curve fitting)/ Monte Carlo:
 - HdoSourceSpectrumNode: Widmo źródłowe W₀ z mnożnikiem N
 - HdoSpectrumScaledNode: Widmo składowe Wₖ ze skalarem c i wagami w_min/w_max
 - SyntheticPeakNode: Generator pasma syntetycznego (GxL/Gauss/Lorentz)
@@ -107,6 +107,7 @@ class HdoSourceSpectrumNode(BaseNode):
     title = "📥 Widmo Źródłowe (W₀ · N)"
     category = "Dekompozycja HDO & Pasma Syntetyczne"
     header_gradient = ("#1b4332", "#2d6a4f")
+    preview_port_id = "out"  # Sparkline i canvas rysują widmo, a nie liczbę N
 
     @classmethod
     def default_step_data(cls) -> Dict[str, Any]:
@@ -119,7 +120,8 @@ class HdoSourceSpectrumNode(BaseNode):
 
     def get_ports(self) -> List[PortDef]:
         return [
-            PortDef(port_id="out", label="W₀", is_output=True, color=QColor("#52b788"), pos_y=90)
+            PortDef(port_id="out", label="W₀", is_output=True, color=QColor("#52b788"), pos_y=65),
+            PortDef(port_id="out_n", label="N", is_output=True, color=QColor("#06d6a0"), pos_y=105)
         ]
 
     def create_config_dialog(self, parent=None):
@@ -134,15 +136,27 @@ class HdoSourceSpectrumNode(BaseNode):
             spec = session.active_spectrum
             sel_name = spec.name
 
+        scalar_n = (np.array([n_mult], dtype=np.float64), np.array([n_mult], dtype=np.float64))
+
         if spec:
             sx = spec.wavenumbers.copy()
             sy = spec.intensities.copy() * n_mult
-            return {"out": (sx, sy)}, {"out": [sel_name]}
+            return {
+                "out": (sx, sy),
+                "out_n": scalar_n
+            }, {
+                "out": [sel_name],
+                "out_n": [f"N={n_mult:.4g}"]
+            }
 
         def_x = np.linspace(4000, 400, 1000)
-        return {"out": (def_x, np.zeros_like(def_x))}, {"out": ["W₀"]}
-
-
+        return {
+            "out": (def_x, np.zeros_like(def_x)),
+            "out_n": scalar_n
+        }, {
+            "out": ["W₀"],
+            "out_n": [f"N={n_mult:.4g}"]
+        }
 # =============================================================================
 # 2. WIDMO SKŁADOWE (Wₖ · c)
 # =============================================================================
@@ -172,7 +186,8 @@ class HdoSpectrumScaledDialog(QDialog):
         self.spin_scale.setRange(-1000.0, 1000.0)
         self.spin_scale.setDecimals(4)
         self.spin_scale.setValue(float(self.step.get('scale', 1.0)))
-        form.addRow("Wstępny mnożnik skali (c):", self.spin_scale)
+        self.spin_scale.setEnabled(False)  # <-- Blokuje edycję w oknie dialogowym
+        form.addRow("Mnożnik skali (zamrożony):", self.spin_scale)
 
         self.spin_w_min = QDoubleSpinBox()
         self.spin_w_min.setRange(0.0, 50.0)
@@ -193,7 +208,7 @@ class HdoSpectrumScaledDialog(QDialog):
 
     def _save_and_accept(self):
         sel_s = self.combo_hdo_spec.currentData() or ""
-        scale = float(self.spin_scale.value())
+        scale = 1.0  # <-- Wymuszone 1.0
         w_min = float(self.spin_w_min.value())
         w_max = float(self.spin_w_max.value())
         self.step['selected_spectrum'] = sel_s
@@ -201,7 +216,7 @@ class HdoSpectrumScaledDialog(QDialog):
         self.step['w_min'] = min(w_min, w_max)
         self.step['w_max'] = max(w_min, w_max)
         short_n = sel_s[:16] + "…" if len(sel_s) > 16 else sel_s
-        self.step['name'] = f"{short_n} · {scale:.2f}" if sel_s else "Widmo Skalowane"
+        self.step['name'] = f"{short_n} [0–{self.step['w_max']:.1f}]" if sel_s else "Widmo Skalowane"
         self.accept()
 
 
@@ -211,17 +226,19 @@ class HdoSpectrumScaledNode(BaseNode):
     title = "📈 Widmo Składowe (Wk · c)"
     category = "Dekompozycja HDO & Pasma Syntetyczne"
     header_gradient = ("#1d3557", "#457b9d")
+    preview_port_id = "out"  # Sparkline i canvas rysują widmo, a nie w_max
 
     @classmethod
     def default_step_data(cls) -> Dict[str, Any]:
         return {
             "type": cls.node_type, "name": "Widmo Skalowane", "selected_spectrum": "",
-            "scale": 1.0, "w_min": 0.0, "w_max": 1.5
+            "scale": 1.0, "w_min": 0.0, "w_max": 15.0
         }
 
     def get_ports(self) -> List[PortDef]:
         return [
-            PortDef(port_id="out", label="Out", is_output=True, color=QColor("#457b9d"), pos_y=90)
+            PortDef(port_id="out", label="Wₖ", is_output=True, color=QColor("#457b9d"), pos_y=65),
+            PortDef(port_id="out_w_max", label="w_max", is_output=True, color=QColor("#f4a261"), pos_y=105)
         ]
 
     def create_config_dialog(self, parent=None):
@@ -230,16 +247,30 @@ class HdoSpectrumScaledNode(BaseNode):
     def compute(self, inputs, input_names, is_execution=False, progress_callback=None):
         sel_name = self.step_data.get('selected_spectrum', '')
         scale = float(self.step_data.get('scale', 1.0))
+        w_max = float(self.step_data.get('w_max', 1.5))
         spec = session.get_spectrum(sel_name)
 
-        # Zwracamy WŁASNY zakres X i Y widma bez paddingu zerami (rozciągnięty sparkline)
+        scalar_wmax = (np.array([w_max], dtype=np.float64), np.array([w_max], dtype=np.float64))
+
         if spec:
             sx = spec.wavenumbers.copy()
             sy = spec.intensities.copy() * scale
-            return {"out": (sx, sy)}, {"out": [sel_name]}
+            return {
+                "out": (sx, sy),
+                "out_w_max": scalar_wmax
+            }, {
+                "out": [sel_name],
+                "out_w_max": [f"w_max={w_max:.4g}"]
+            }
 
         def_x = np.linspace(4000, 400, 1000)
-        return {"out": (def_x, np.zeros_like(def_x))}, {"out": ["Widmo Skalowane"]}
+        return {
+            "out": (def_x, np.zeros_like(def_x)),
+            "out_w_max": scalar_wmax
+        }, {
+            "out": ["Widmo Skalowane"],
+            "out_w_max": [f"w_max={w_max:.4g}"]
+        }
 
 
 # =============================================================================

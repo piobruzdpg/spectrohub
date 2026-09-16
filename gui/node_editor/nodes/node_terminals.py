@@ -296,17 +296,23 @@ class OutputTableNode(BaseNode):
         return {"in": data_in}, {"in": names_in}
 
 
+# gui/node_editor/nodes/node_terminals.py (od ok. linii 235)
+
 class OutputFolderDialog(QDialog):
     def __init__(self, node: 'OutputFolderNode', parent=None):
         super().__init__(parent)
         self.node = node
         self.step = node.step_data
         self.setWindowTitle("Zapis do Folderu Roboczego")
-        self.resize(440, 180)
+        self.resize(440, 220)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
         layout.addLayout(form)
+
+        self.ent_folder_name = QLineEdit(self.step.get('folder_name', ''))
+        self.ent_folder_name.setPlaceholderText("Domyślnie z solwera lub auto (np. Folder_1)")
+        form.addRow("Własna nazwa folderu:", self.ent_folder_name)
 
         self.combo_parent = QComboBox()
         self.combo_parent.addItem("📁 (Poziom główny / bez folderu nadrzędnego)", None)
@@ -320,11 +326,9 @@ class OutputFolderDialog(QDialog):
         form.addRow("Folder nadrzędny:", self.combo_parent)
 
         lbl = QLabel(
-            "Węzeł ten tworzy dedykowany folder z nazwą przekazaną przez solwer\n"
-            "(np. 'NazwaBazowa_2p_x').\n"
-            "W folderze zostaną umieszczone:\n"
-            "  • Okno robocze 🪟 z kompletem widm składowych i residuów\n"
-            "  • Tabela danych 📊 z parametrami dopasowania"
+            "Węzeł ten tworzy dedykowany folder w drzewie projektu.\n"
+            "• Jeśli podłączony jest solwer HDO (lub skalar po HDO), zapisze komplet widm i tabelę.\n"
+            "• W pozostałych przypadkach utworzy folder i zapisze wszystkie przekazane widma."
         )
         lbl.setStyleSheet("color: #a8dadc; font-size: 11px; padding: 6px;")
         form.addRow(lbl)
@@ -335,6 +339,7 @@ class OutputFolderDialog(QDialog):
         layout.addWidget(btns)
 
     def _save_and_accept(self):
+        self.step['folder_name'] = self.ent_folder_name.text().strip()
         self.step['parent_folder_id'] = self.combo_parent.currentData()
         self.accept()
 
@@ -352,12 +357,13 @@ class OutputFolderNode(BaseNode):
         return {
             "type": cls.node_type,
             "name": "📁 Zapis do Folderu",
+            "folder_name": "",
             "parent_folder_id": None
         }
 
     def get_ports(self) -> List[PortDef]:
         return [
-            PortDef(port_id="in", label="In", is_output=False, color=QColor("#ffb703"), pos_y=90)
+            PortDef(port_id="in", label="In", is_output=False, color=QColor("#ffb703"), allow_multiple=True, pos_y=90)
         ]
 
     def create_config_dialog(self, parent=None):

@@ -234,57 +234,6 @@ Oto gotowy wpis podsumowujący dzisiejszą sesję do wklejenia na koniec pliku `
 
 ---
 
-### Zaktualizowane drzewo architektury SpectroHub
-
-
-```text
-spectrohub/
-├── main.py                          # Punkt wejścia (Qt logging filter, obsługa SIGINT)
-├── STATE.md                         # Checkpoint stanu projektu i pamięć między sesjami
-├── PRD.md                           # Wymagania i specyfikacja architektury platformy
-│
-├── core/                            # Rdzeń stanu, modeli i infrastruktury
-│   ├── __init__.py
-│   ├── models.py                    # SpectrumData, GaussianData, SpectralSeries, DeconvPeak
-│   ├── session.py                   # ProjectSession (Magazyn, Wzorce Atm, Okna Robocze, sygnały, Undo)
-│   ├── i18n.py                      # System wielojęzyczności (PL / EN)
-│   └── logger.py                    # Konfiguracja logowania systemowego
-│
-├── algorithms/                      # Czyste moduły matematyczne i analityczne
-│   ├── __init__.py
-│   ├── preprocessing.py             # AsLS, airPLS, FSD, SavGol, SNV, Min-Max, L1, L2, Pareto, MSC
-│   ├── spectral_math.py             # Arytmetyka widm, skalary, fotometria (A/T/%T/KM)
-│   ├── atmospheric.py               # VaporFit Core (analityczny OLS, SDV, SSI, okna SG)
-│   ├── deconvolution/               # Silnik dopasowania pasm (Amide I, Custom, HDO Monte Carlo)
-│   ├── quantum/                     # Chemia obliczeniowa (PED, parsery Gaussian / ORCA)
-│   └── chemometrics/                # SVD, PCA, PFA, AUTOWFA, SPEXFA, MCR-ALS, HELP, PARAFAC, 2D-COS
-│
-├── io_hub/                          # Warstwa Wejścia / Wyjścia (I/O)
-│   ├── __init__.py
-│   ├── dispatcher.py                # SpectrumImportDispatcher (automatyczne trasowanie formatów)
-│   ├── readers/                     # Czytniki (OPUS, OMNIC, SPC, CSV/DPT, JCAMP-DX)
-│   └── exporters/                   # Eksporterzy (Excel wieloarkuszowy, ASCII, SPC, JCAMP-DX)
-│
-├── gui/                             # Warstwa prezentacji PySide6
-│   ├── __init__.py
-│   ├── main_window.py               # Główne okno, doki, toolbar perspektyw (1-5), menu główne
-│   ├── canvas.py                    # SpectroCanvas (Matplotlib, Smart Zoom, LineCollection, kinetyka)
-│   ├── project_tree.py              # ProjectTreeWidget (Magazyn, Wzorce Atm, Okna Robocze)
-│   ├── node_editor.py               # Wizualny edytor potoku DAG (Bézier, sparklines, multi-input, Undo)
-│   ├── vibration_dialog.py          # Pływające okno 3D animacji modów drgań (PyVista)
-│   ├── tensor_builder_dialog.py     # Kreator serii kinetycznych 2D i tensora 3D
-│   └── workspaces/                  # Dedykowane panele robocze
-│       ├── ws_preprocessing.py      # Workspace 1: Pipeline Manager, przycisk DAG Beta, Batch VaporFit
-│       ├── ws_spectral_math.py      # Workspace 2: Equalizer k, operacje arytmetyczne, fotometria
-│       ├── ws_deconvolution.py      # Workspace 3: Fitowanie Amidu I, tryb Custom, dekompozycja HDO
-│       ├── ws_chemometrics.py       # Workspace 4: MCR-ALS, SPEXFA, SVD/PCA, rekonstrukcje D_k
-│       └── ws_quantum.py            # Workspace 5: Inspekcja DFT, PED, splot pasm i podgląd 3D
-│
-└── locales/                         # Słowniki językowe
-    ├── pl.py
-    └── en.py
-
-```
 
 ---
 
@@ -385,65 +334,7 @@ spectrohub/
 
 ---
 
-### Zaktualizowane drzewo architektury SpectroHub
 
-```text
-spectrohub/
-├── main.py                          # Punkt wejścia (Qt logging filter, obsługa SIGINT, wyciszenie dostępności macOS)
-├── STATE.md                         # Checkpoint stanu projektu i pamięć między sesjami
-├── PRD.md                           # Wymagania i specyfikacja architektury platformy[cite: 1]
-│
-├── core/                            # Rdzeń stanu, modeli i infrastruktury[cite: 1]
-│   ├── __init__.py[cite: 1]
-│   ├── models.py                    # SpectrumData, GaussianData, SpectralSeries, DeconvPeak, ProjectMetadata[cite: 1]
-│   ├── session.py                   # ProjectSession (Magazyn, Izolacja Gałęzi, Okna, dag_state, Undo)[cite: 1, 7]
-│   ├── i18n.py                      # System wielojęzyczności (PL / EN)[cite: 1]
-│   └── logger.py                    # Konfiguracja logowania systemowego[cite: 1]
-│
-├── algorithms/                      # Czyste moduły matematyczne i analityczne[cite: 1]
-│   ├── __init__.py[cite: 1]
-│   ├── preprocessing.py             # AsLS, airPLS, FSD, SavGol, SNV, Min-Max, L1, L2, Pareto, MSC[cite: 1, 4]
-│   ├── spectral_math.py             # Arytmetyka widm, skalary, fotometria (A/T/%T/KM)[cite: 1]
-│   ├── atmospheric.py               # VaporFit Core (analityczny OLS, SDV, SSI, okna SG)[cite: 1, 3, 4]
-│   ├── deconvolution/               # Silnik dopasowania pasm (Amide I, Custom, HDO Monte Carlo)[cite: 1]
-│   ├── quantum/                     # Chemia obliczeniowa (PED, parsery Gaussian / ORCA)[cite: 1]
-│   └── chemometrics/                # multivariate.py (PCA, SVD, PFA, SPEXFA, AUTOWFA, FSMWEFA, HELP, MCR-ALS, PARAFAC, 2D-COS)[cite: 1, 3, 4]
-│
-├── io_hub/                          # Warstwa Wejścia / Wyjścia (I/O)[cite: 1]
-│   ├── __init__.py[cite: 1]
-│   ├── dispatcher.py                # SpectrumImportDispatcher (automatyczne trasowanie formatów)[cite: 1]
-│   ├── project_io.py                # ProjectBundleIO (Silnik zapisu i odczytu kontenerów .shub / ZIP)[cite: 1]
-│   ├── readers/                     # Czytniki (OPUS, OMNIC, SPC, CSV/DPT, JCAMP-DX)[cite: 1]
-│   └── exporters/                   # Eksporterzy (Excel wieloarkuszowy, ASCII, SPC, JCAMP-DX)[cite: 1]
-│
-├── gui/                             # Warstwa prezentacji PySide6[cite: 1]
-│   ├── __init__.py[cite: 1]
-│   ├── main_window.py               # Główne okno, doki ze splitterem, toolbar perspektyw (1-5), obsługa .shub[cite: 1]
-│   ├── canvas.py                    # SpectroCanvas (Matplotlib, Smart Zoom, LineCollection, kinetyka)[cite: 1]
-│   ├── project_tree.py              # ProjectTreeWidget (Gałęzie Magazynu, Wzorce Atm, Okna Robocze)[cite: 1]
-│   ├── project_metadata_widget.py   # ProjectMetadataWidget (Inspektor metadanych, autor, daty, notatki)[cite: 1]
-│   ├── vibration_dialog.py          # Pływające okno 3D animacji modów drgań (PyVista)[cite: 1]
-│   ├── tensor_builder_dialog.py     # Kreator serii kinetycznych 2D i tensora 3D[cite: 1]
-│   │
-│   ├── node_editor/                 # Pakiet Wizualnego Silnika Potoku Węzłowego (DAG)[cite: 1]
-│   │   ├── __init__.py              # Re-eksport NodePipelineDialog[cite: 1, 2]
-│   │   ├── palette.py               # NodeLibraryWidget, NodeLibraryTree, filtrowanie, Drag & Drop
-│   │   ├── items.py                 # Grafika Qt: PortItem, ConnectionItem, NodeItem (Sparklines, Hit-box)[cite: 1, 5]
-│   │   ├── dialogs.py               # NodeParamDialog (Fotometria, DFT, Chemometria, Okna, VaporFit, Math)[cite: 1, 3]
-│   │   ├── evaluator.py             # DAGEvaluator (Ewaluacja DAG 1D/2D, routing wieloportowy, SVD, MCR)[cite: 1, 4]
-│   │   └── pipeline_dialog.py       # NodePipelineDialog (QMainWindow, doki, QSettings, Fit-to-Content, Presety)[cite: 1, 6]
-│   │
-│   └── workspaces/                  # Dedykowane panele robocze[cite: 1]
-│       ├── ws_preprocessing.py      # Workspace 1: Pipeline Manager, wywołanie edytora DAG, Batch VaporFit[cite: 1]
-│       ├── ws_spectral_math.py      # Workspace 2: Equalizer k, operacje arytmetyczne, fotometria[cite: 1]
-│       ├── ws_deconvolution.py      # Workspace 3: Fitowanie Amidu I, tryb Custom, dekompozycja HDO[cite: 1]
-│       ├── ws_chemometrics.py       # Workspace 4: MCR-ALS, SPEXFA, SVD/PCA, rekonstrukcje D_k[cite: 1]
-│       └── ws_quantum.py            # Workspace 5: Inspekcja DFT, PED, splot pasm i podgląd 3D[cite: 1]
-│
-└── locales/                         # Słowniki językowe[cite: 1]
-    ├── pl.py[cite: 1]
-    └── en.py[cite: 1]
-```
 
 ### 09.09.2026 — Checkpoint: Determinizm VaporFit, Wieloźródłowy Węzeł Odniesienia i Wielozakładkowy Silnik DAG (Multi-Tab & Floating)
 
@@ -647,4 +538,112 @@ spectrohub/
 * **Swoboda edycji grafu:** Odblokowano usuwanie i duplikowanie węzła startowego `input` (klawisz `Delete`, menu kontekstowe, `⌘D` / `Ctrl+D`).
 
 ---
+Najbardziej aktualne drzewko projektu (16.09.2026):
 
+```text
+spectrohub/
+├── main.py                          # Punkt wejścia (Qt logging filter, obsługa SIGINT, inicjalizacja UI)
+├── STATE.md                         # Checkpoint stanu projektu i pamięć między sesjami[cite: 1]
+├── PRD.md                           # Wymagania i specyfikacja architektury platformy[cite: 1]
+├── README.md                        # Opis projektu i instrukcja uruchomienia
+├── requirements.txt                 # Zależności biblioteczne środowiska Python
+├── pyproject.toml                   # Konfiguracja środowiska i metadane pakietu
+│
+├── Graph_Templates/                 # Dynamiczne repozytorium szablonów potoków węzłowych (.json)
+│   ├── 01_Dekompozycja_HDO.json     [cite: 8]
+│   ├── 02_Odszumianie_SVD.json     [cite: 8]
+│   ├── 03_MCR_ALS.json             [cite: 8]
+│   ├── 04_Kompensacja_ATM_AsLS.json[cite: 8]
+│   ├── 05_Amid_I.json              [cite: 8]
+│   ├── 06_Druga_Pochodna.json      [cite: 8]
+│   ├── 07_Spektroskopia_Roznicowa.json[cite: 8]
+│   └── 08_Porownanie_DFT.json      [cite: 8]
+│
+├── algorithms/                      # Czyste moduły matematyczne i algorytmiczne (zero GUI)[cite: 1, 3]
+│   ├── __init__.py                  [cite: 1]
+│   ├── atmospheric.py               # VaporFit Core (analityczny OLS, SDV, SSI, okna SG)[cite: 1]
+│   ├── preprocessing.py             # Filtry (AsLS, airPLS, FSD, SG, SNV, Min-Max, normy L1/L2)[cite: 1]
+│   ├── spectral_math.py             # Arytmetyka widm, skalary, fotometria (A/T/%T/KM)[cite: 1]
+│   ├── chemometrics/                # Chemometria wielowymiarowa
+│   │   ├── __init__.py
+│   │   └── multivariate.py          # SVD, PCA, PFA, MCR-ALS, HELP, AUTOWFA, FSMWEFA[cite: 1]
+│   ├── fitting/                     # Silniki dopasowywania krzywych i dekonwolucji
+│   │   ├── __init__.py
+│   │   ├── deconv_engine.py         # Dekonwolucja pasm białkowych (Amide I) i tryb Custom
+│   │   └── hdo_engine.py            # Wieloprocesowy solwer Monte Carlo dla dekompozycji HDO[cite: 2, 3]
+│   └── quantum/                     # Chemia kwantowa i analiza oscylacyjna
+│       ├── __init__.py
+│       └── ped_engine.py            # Analiza PED (Potential Energy Distribution)
+│
+├── core/                            # Stan sesji, modele danych i infrastruktura[cite: 1]
+│   ├── __init__.py                 [cite: 1]
+│   ├── models.py                    # SpectrumData, GaussianData, SpectralSeries, DataTable, Metadata[cite: 1, 5, 6]
+│   ├── session.py                   # ProjectSession (Magazyn, Wzorce Atm, Okna, Foldery, Tabele, Undo)[cite: 1, 6]
+│   ├── i18n.py                      # System lokalizacji wielojęzycznej (PL / EN)[cite: 1]
+│   └── logger.py                    # Konfiguracja logera systemowego[cite: 1]
+│
+├── io_hub/                          # Warstwa Wejścia / Wyjścia (I/O) i parsery[cite: 1]
+│   ├── __init__.py                 [cite: 1]
+│   ├── dispatcher.py                # SpectrumImportDispatcher (auto-routing formatów)[cite: 1, 5]
+│   ├── export_manager.py            # Zarządzanie eksportem wsadowym, zipowaniem i strukturą katalogów[cite: 5]
+│   ├── project_io.py                # ProjectBundleIO (zapis i odczyt kontenerów .shub / ZIP)[cite: 1]
+│   ├── readers/                     # Czytniki formatów spektralnych[cite: 1]
+│   │   ├── __init__.py
+│   │   ├── ascii_reader.py          # CSV, DPT, TXT, TSV
+│   │   ├── base_reader.py           # Klasa bazowa BaseSpectrumReader
+│   │   ├── gaussian_reader.py       # Logi Gaussian 16 / ORCA 6 (.out, .log)
+│   │   ├── jcamp_reader.py          # JCAMP-DX (.dx, .jdx)
+│   │   ├── omnic_reader.py          # Nicolet / Thermo OMNIC (.spa)
+│   │   ├── opus_reader.py           # Bruker OPUS (binarny)
+│   │   └── spc_reader.py            # Thermo Galactic Grams SPC (.spc)
+│   └── exporters/                   # Eksporterzy danych spektralnych[cite: 1]
+│       ├── __init__.py
+│       ├── ascii_exporter.py        # Dwukolumnowe ASCII/CSV/DPT bez nagłówków
+│       ├── excel_exporter.py        # Wieloarkuszowy Excel (.xlsx)
+│       ├── jcamp_exporter.py        # Format JCAMP-DX
+│       └── spc_exporter.py          # Standard Galactic New SPC (0x4B)
+│
+├── gui/                             # Prezentacja PySide6 i interfejs użytkownika[cite: 1]
+│   ├── __init__.py                 [cite: 1]
+│   ├── canvas.py                    # SpectroCanvas (Matplotlib, Smart Zoom, LineCollection, tabele)[cite: 1, 8]
+│   ├── main_window.py               # Główne okno aplikacji, doki ze splitterem, toolbar[cite: 1]
+│   ├── project_metadata_widget.py   # Dedykowany inspektor metadanych projektu pod drzewem[cite: 1]
+│   ├── project_tree.py              # ProjectTreeWidget (Magazyn, foldery, okna, tabele, Drag&Drop)[cite: 1, 5]
+│   ├── tensor_builder_dialog.py     # Kreator serii ewolucyjnych 2D i tensorów 3D[cite: 1]
+│   ├── vibration_dialog.py          # Pływające okno 3D animacji modów drgań (PyVista)[cite: 1]
+│   │
+│   ├── node_editor/                 # Pakiet Silnika Potoku Węzłowego (DAG)[cite: 1]
+│   │   ├── __init__.py              # Re-eksport NodePipelineDialog[cite: 1]
+│   │   ├── base.py                  # Klasa bazowa BaseNode oraz definicja PortDef[cite: 2, 4]
+│   │   ├── evaluator.py             # DAGEvaluator (sortowanie Kahna, routing danych i wag)[cite: 7, 8]
+│   │   ├── items.py                 # NodeItem, PortItem, ConnectionItem (grafika Qt, sparklines)[cite: 8]
+│   │   ├── palette.py               # NodeLibraryWidget, NodeLibraryTree (katalog węzłów, Drag&Drop)[cite: 8]
+│   │   ├── pipeline_dialog.py       # NodePipelineDialog (QMainWindow, Multi-Tab, presety)[cite: 8]
+│   │   ├── registry.py              # Rejestr węzłów (@register_node, Auto-Discovery)[cite: 2, 4]
+│   │   └── nodes/                   # Autonomiczne moduły domenowe węzłów
+│   │       ├── __init__.py
+│   │       ├── node_atmospheric.py  # Węzeł VaporFit Suite
+│   │       ├── node_baseline.py     # Węzły linii bazowej (AsLS, airPLS, wielomianowa, krańcowa)
+│   │       ├── node_chemometrics.py # Odszumiacz SVD, dekompozycja MCR-ALS, skalowania
+│   │       ├── node_filters.py      # Filtry SG, pochodne, Crop, FSD Kauppinena, normy L1/L2
+│   │       ├── node_hdo.py          # Solwer HDO/MC, W0, Wk skalowane, piki GxL, konfiguracja[cite: 2]
+│   │       ├── node_io.py           # Źródła danych (1D/2D/Seria), selekcja z projektu, Mux
+│   │       ├── node_math.py         # Arytmetyka dwuwidmowa, skalary, IS, całkowanie pasm
+│   │       ├── node_photometry.py   # Konwersje A/T/%T oraz formalizm Kubelki-Munka
+│   │       ├── node_quantum.py      # Splot drgań DFT z regulacją FWHM i kształtu
+│   │       └── node_terminals.py    # Terminale: Zapis, Nowe Okno, Tabela, Zapis do Folderu[cite: 4]
+│   │
+│   └── workspaces/                  # Dedykowane panele robocze (Workspaces 1–5)[cite: 1]
+│       ├── __init__.py
+│       ├── ws_preprocessing.py      # Workspace 1: Pipeline Manager, Batch Preprocessing[cite: 1]
+│       ├── ws_spectral_math.py      # Workspace 2: Equalizer parametryczny k, fotometria[cite: 1]
+│       ├── ws_deconvolution.py      # Workspace 3: Fitowanie Amidu I, tryb Custom[cite: 1]
+│       ├── ws_chemometrics.py       # Workspace 4: MCR-ALS, PCA/SVD, rekonstrukcje Dk[cite: 1]
+│       └── ws_quantum.py            # Workspace 5: Inspekcja DFT, PED i animacja 3D[cite: 1]
+│
+└── locales/                         # Słowniki wielojęzyczności[cite: 1]
+    ├── __init__.py
+    ├── en.py                        # Tłumaczenie angielskie[cite: 1]
+    └── pl.py                        # Tłumaczenie polskie[cite: 1]
+
+```

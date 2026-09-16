@@ -89,9 +89,17 @@ class DAGEvaluator:
                     else:
                         conn = in_port.connections[0]
                         if conn.out_port and conn.out_port.node_item:
-                            k = (conn.out_port.node_item, conn.out_port.port_id)
+                            src_item = conn.out_port.node_item
+                            src_p_id = conn.out_port.port_id
+                            k = (src_item, src_p_id)
                             node_inputs[port_id] = port_results.get(k, (None, None))
                             node_input_names[port_id] = port_names.get(k, [])
+
+                            # --- NOWOŚĆ: automatyczne przekazanie paczki danych HDO ---
+                            src_obj = getattr(src_item, 'node_obj', src_item)
+                            bundles = getattr(src_obj, 'runtime_bundles', {})
+                            if src_p_id in bundles:
+                                node_inputs[f"{port_id}_bundle"] = bundles[src_p_id]
                 else:
                     node_inputs[port_id] = (None, None)
                     node_input_names[port_id] = []
@@ -105,7 +113,7 @@ class DAGEvaluator:
                         if conn.out_port and conn.out_port.node_item:
                             sn = conn.out_port.node_item
                             w_min = float(sn.step_data.get('w_min', 0.0))
-                            w_max = float(sn.step_data.get('w_max', 1.5))
+                            w_max = float(sn.step_data.get('w_max', 100.0))
                             b_list.append((w_min, w_max))
                 node_inputs["in_bases_bounds"] = b_list
 
