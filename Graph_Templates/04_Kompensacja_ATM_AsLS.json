@@ -1,0 +1,93 @@
+{
+  "title": "☁️ Kompensacja Atmosferyczna + AsLS",
+  "nodes": [
+    {
+      "id": "n0",
+      "type": "input",
+      "title": "📥 ŹRÓDŁO DANYCH",
+      "pos_x": 40.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "input",
+        "name": "Źródło: Wszystkie widoczne",
+        "source_mode": "visible"
+      }
+    },
+    {
+      "id": "n1",
+      "type": "vaporfit",
+      "title": "VaporFit (Para wodna i CO₂)",
+      "pos_x": 280.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "vaporfit",
+        "name": "VaporFit (SG=11)",
+        "sg_points": 11,
+        "sg_poly": 3
+      }
+    },
+    {
+      "id": "n2",
+      "type": "crop",
+      "title": "Przycięcie (Crop)",
+      "pos_x": 520.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "crop",
+        "name": "Przycięcie [1000–1800]",
+        "min_w": 1000.0,
+        "max_w": 1800.0
+      }
+    },
+    {
+      "id": "n3",
+      "type": "asls",
+      "title": "Linia Bazowa AsLS",
+      "pos_x": 760.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "asls",
+        "name": "AsLS (λ=1e5, p=0.001)",
+        "lam": 100000.0,
+        "p": 0.001
+      }
+    },
+    {
+      "id": "n4",
+      "type": "output",
+      "title": "💾 ZAPIS WYNIKU",
+      "pos_x": 1000.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "output",
+        "name": "Zapis"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from_node": "n0",
+      "from_port": "out",
+      "to_node": "n1",
+      "to_port": "in_signal"
+    },
+    {
+      "from_node": "n1",
+      "from_port": "out",
+      "to_node": "n2",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n2",
+      "from_port": "out",
+      "to_node": "n3",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n3",
+      "from_port": "out",
+      "to_node": "n4",
+      "to_port": "in"
+    }
+  ]
+}

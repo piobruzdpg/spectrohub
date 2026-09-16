@@ -1,0 +1,252 @@
+{
+  "title": "🧪 Dopasowywanie widm (HDO/MC)",
+  "nodes": [
+    {
+      "id": "node_0",
+      "type": "synthetic_peak",
+      "title": "🔔 Pasmo Syntetyczne (GxL)",
+      "pos_x": 26.058690029255672,
+      "pos_y": 707.0142399859124,
+      "step_data": {
+        "amp": 0.0002,
+        "center": 2220.0,
+        "name": "Pik GXL @ 2220.0",
+        "shape": "gxl",
+        "shape_param": 0.5,
+        "type": "synthetic_peak",
+        "width": 150.0
+      }
+    },
+    {
+      "id": "node_1",
+      "type": "scalar_math",
+      "title": "Działanie ze Skalarem (S · c)",
+      "pos_x": 1020.6058197493414,
+      "pos_y": -129.04211514072122,
+      "step_data": {
+        "name": "S / 15.5 [c=15.5]",
+        "op": "div",
+        "type": "scalar_math",
+        "val": 1.0
+      }
+    },
+    {
+      "id": "node_2",
+      "type": "hdo_source_spectrum",
+      "title": "📥 Widmo Źródłowe (W₀ · N)",
+      "pos_x": 489.2614728281313,
+      "pos_y": -130.56009179431703,
+      "step_data": {
+        "n_multiplier": 15.5,
+        "name": "W₀: NTAU15'5 · 15.50",
+        "selected_spectrum": "NTAU15'5",
+        "type": "hdo_source_spectrum"
+      }
+    },
+    {
+      "id": "node_3",
+      "type": "hdo_spectrum_scaled",
+      "title": "📈 Widmo Składowe (Wk · c)",
+      "pos_x": 18.615515031246588,
+      "pos_y": -130.5636374040316,
+      "step_data": {
+        "name": "NAGMA7'2 [0–7.2]",
+        "scale": 1.0,
+        "selected_spectrum": "NAGMA7'2",
+        "type": "hdo_spectrum_scaled",
+        "w_max": 7.2,
+        "w_min": 0.0
+      }
+    },
+    {
+      "id": "node_4",
+      "type": "hdo_spectrum_scaled",
+      "title": "📈 Widmo Składowe (Wk · c)",
+      "pos_x": 17.804294478875164,
+      "pos_y": 50.00872121757118,
+      "step_data": {
+        "name": "TAU10'6 [0–10.6]",
+        "scale": 1.0,
+        "selected_spectrum": "TAU10'6",
+        "type": "hdo_spectrum_scaled",
+        "w_max": 10.6,
+        "w_min": 0.0
+      }
+    },
+    {
+      "id": "node_5",
+      "type": "synthetic_peak",
+      "title": "🔔 Pasmo Syntetyczne (GxL)",
+      "pos_x": 14.032247559154143,
+      "pos_y": 367.3710614126574,
+      "step_data": {
+        "amp": 0.01,
+        "center": 2563.0,
+        "name": "Pik GXL @ 2563.0",
+        "shape": "gxl",
+        "shape_param": 0.5,
+        "type": "synthetic_peak",
+        "width": 100.0
+      }
+    },
+    {
+      "id": "node_6",
+      "type": "synthetic_peak",
+      "title": "🔔 Pasmo Syntetyczne (GxL)",
+      "pos_x": 12.37240509008825,
+      "pos_y": 542.7788207159035,
+      "step_data": {
+        "amp": 0.005,
+        "center": 2414.0,
+        "name": "Pik GXL @ 2414.0",
+        "shape": "gxl",
+        "shape_param": 0.5,
+        "type": "synthetic_peak",
+        "width": 50.0
+      }
+    },
+    {
+      "id": "node_7",
+      "type": "hdo_config",
+      "title": "⚙️ Konfiguracja HDO",
+      "pos_x": 465.42922363592015,
+      "pos_y": 710.9617636223503,
+      "step_data": {
+        "base_name": "NTAU_15.5",
+        "baseline_active": 0,
+        "n_iter": 3000,
+        "name": "Cfg: NTAU_15.5 (iter=3000)",
+        "penalty_weight": 10.0,
+        "prefix": "",
+        "suffix": "",
+        "type": "hdo_config"
+      }
+    },
+    {
+      "id": "node_8",
+      "type": "hdo_decomposition",
+      "title": "🧪 Solwer Dekompozycji HDO / MC",
+      "pos_x": 743.275093697662,
+      "pos_y": 231.62766961782262,
+      "step_data": {
+        "name": "Solwer HDO",
+        "type": "hdo_decomposition",
+        "fit_metrics": {
+          "coefficients": [
+            5.3,
+            3.6
+          ],
+          "base_names": [
+            "TAU10'6",
+            "NAGMA7'2"
+          ],
+          "comp_areas": [
+            379.0904917504588,
+            268.35060140220503
+          ],
+          "peaks_params": [
+            {
+              "amp": 0.01,
+              "center": 2563.0,
+              "shape": 0.5,
+              "width": 100.0
+            },
+            {
+              "amp": 0.005,
+              "center": 2414.0,
+              "shape": 0.5,
+              "width": 50.0
+            },
+            {
+              "amp": 0.0002,
+              "center": 2220.0,
+              "shape": 0.5,
+              "width": 150.0
+            }
+          ],
+          "peaks_area": 2.958706470246028,
+          "r2": 0.7871044526995197,
+          "rmse": 0.7068142060183253,
+          "rss": 220.8171542485575,
+          "mc_iterations": 3000,
+          "mc_penalty": 10.0,
+          "baseline_active": 0
+        }
+      }
+    },
+    {
+      "id": "node_9",
+      "type": "output_folder",
+      "title": "📁 Zapis do Folderu",
+      "pos_x": 1284.0648750962193,
+      "pos_y": 240.18288678204567,
+      "step_data": {
+        "name": "📁 Zapis do Folderu",
+        "parent_folder_id": null,
+        "type": "output_folder"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from_node": "node_0",
+      "from_port": "out",
+      "to_node": "node_8",
+      "to_port": "in_peaks"
+    },
+    {
+      "from_node": "node_1",
+      "from_port": "out",
+      "to_node": "node_9",
+      "to_port": "in"
+    },
+    {
+      "from_node": "node_2",
+      "from_port": "out",
+      "to_node": "node_8",
+      "to_port": "in_target"
+    },
+    {
+      "from_node": "node_2",
+      "from_port": "out_n",
+      "to_node": "node_1",
+      "to_port": "in_c"
+    },
+    {
+      "from_node": "node_3",
+      "from_port": "out",
+      "to_node": "node_8",
+      "to_port": "in_bases"
+    },
+    {
+      "from_node": "node_4",
+      "from_port": "out",
+      "to_node": "node_8",
+      "to_port": "in_bases"
+    },
+    {
+      "from_node": "node_5",
+      "from_port": "out",
+      "to_node": "node_8",
+      "to_port": "in_peaks"
+    },
+    {
+      "from_node": "node_6",
+      "from_port": "out",
+      "to_node": "node_8",
+      "to_port": "in_peaks"
+    },
+    {
+      "from_node": "node_7",
+      "from_port": "out_cfg",
+      "to_node": "node_8",
+      "to_port": "in_cfg"
+    },
+    {
+      "from_node": "node_8",
+      "from_port": "out_x",
+      "to_node": "node_1",
+      "to_port": "in"
+    }
+  ]
+}

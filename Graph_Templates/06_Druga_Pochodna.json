@@ -1,0 +1,110 @@
+{
+  "title": "🔍 Detekcja Składowych (2. Pochodna SG + Offset)",
+  "nodes": [
+    {
+      "id": "n0",
+      "type": "input",
+      "title": "📥 ŹRÓDŁO DANYCH",
+      "pos_x": 40.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "input",
+        "name": "Źródło: Aktywne widmo",
+        "source_mode": "active"
+      }
+    },
+    {
+      "id": "n1",
+      "type": "crop",
+      "title": "Przycięcie Pasma",
+      "pos_x": 280.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "crop",
+        "name": "Przycięcie [1500–1750]",
+        "min_w": 1500.0,
+        "max_w": 1750.0
+      }
+    },
+    {
+      "id": "n2",
+      "type": "sg_smooth",
+      "title": "Wygładzanie SG",
+      "pos_x": 520.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "sg_smooth",
+        "name": "SG (okno=13, st=3)",
+        "win": 13,
+        "poly": 3
+      }
+    },
+    {
+      "id": "n3",
+      "type": "deriv2",
+      "title": "2. Pochodna (-) SG",
+      "pos_x": 760.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "deriv2",
+        "name": "2. Pochodna SG (-) (okno=13)",
+        "win": 13,
+        "poly": 3
+      }
+    },
+    {
+      "id": "n4",
+      "type": "offset_min",
+      "title": "Offset (Min ➔ 0.0)",
+      "pos_x": 1000.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "offset_min",
+        "name": "Offset Min"
+      }
+    },
+    {
+      "id": "n5",
+      "type": "output",
+      "title": "💾 ZAPIS WYNIKU",
+      "pos_x": 1240.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "output",
+        "name": "Zapis"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from_node": "n0",
+      "from_port": "out",
+      "to_node": "n1",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n1",
+      "from_port": "out",
+      "to_node": "n2",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n2",
+      "from_port": "out",
+      "to_node": "n3",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n3",
+      "from_port": "out",
+      "to_node": "n4",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n4",
+      "from_port": "out",
+      "to_node": "n5",
+      "to_port": "in"
+    }
+  ]
+}

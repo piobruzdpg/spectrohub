@@ -1,0 +1,90 @@
+{
+  "title": "🧪 Spektroskopia Różnicowa (A - k·B)",
+  "nodes": [
+    {
+      "id": "n0",
+      "type": "input",
+      "title": "📈 Próbka Badana (A)",
+      "pos_x": 40.0,
+      "pos_y": 80.0,
+      "step_data": {
+        "type": "input",
+        "name": "Źródło: Aktywne widmo",
+        "source_mode": "active"
+      }
+    },
+    {
+      "id": "n1",
+      "type": "spectrum_select",
+      "title": "Widmo Odniesienia (B)",
+      "pos_x": 40.0,
+      "pos_y": 240.0,
+      "step_data": {
+        "type": "spectrum_select",
+        "name": "Ref: (wybierz)",
+        "selected_spectrum": ""
+      }
+    },
+    {
+      "id": "n2",
+      "type": "math_op",
+      "title": "Operacja Dwuwidmowa",
+      "pos_x": 340.0,
+      "pos_y": 160.0,
+      "step_data": {
+        "type": "math_op",
+        "name": "A - 1.000·B",
+        "op": "sub",
+        "k": 1.0
+      }
+    },
+    {
+      "id": "n3",
+      "type": "linear_bl",
+      "title": "Korekcja Linii Krańcowej",
+      "pos_x": 580.0,
+      "pos_y": 160.0,
+      "step_data": {
+        "type": "linear_bl",
+        "name": "Linia krańcowa"
+      }
+    },
+    {
+      "id": "n4",
+      "type": "output",
+      "title": "💾 ZAPIS WYNIKU",
+      "pos_x": 820.0,
+      "pos_y": 160.0,
+      "step_data": {
+        "type": "output",
+        "name": "Zapis"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from_node": "n0",
+      "from_port": "out",
+      "to_node": "n2",
+      "to_port": "in_a"
+    },
+    {
+      "from_node": "n1",
+      "from_port": "out",
+      "to_node": "n2",
+      "to_port": "in_b"
+    },
+    {
+      "from_node": "n2",
+      "from_port": "out",
+      "to_node": "n3",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n3",
+      "from_port": "out",
+      "to_node": "n4",
+      "to_port": "in"
+    }
+  ]
+}

@@ -1,0 +1,89 @@
+{
+  "title": "🧬 Analiza Amidu I (Białka 1720–1580 cm⁻¹)",
+  "nodes": [
+    {
+      "id": "n0",
+      "type": "input",
+      "title": "📥 ŹRÓDŁO DANYCH",
+      "pos_x": 40.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "input",
+        "name": "Źródło: Aktywne widmo",
+        "source_mode": "active"
+      }
+    },
+    {
+      "id": "n1",
+      "type": "crop",
+      "title": "Przycięcie Amidu I",
+      "pos_x": 280.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "crop",
+        "name": "Przycięcie [1580–1720]",
+        "min_w": 1580.0,
+        "max_w": 1720.0
+      }
+    },
+    {
+      "id": "n2",
+      "type": "linear_bl",
+      "title": "Linia bazowa (krańce)",
+      "pos_x": 520.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "linear_bl",
+        "name": "Linia krańcowa"
+      }
+    },
+    {
+      "id": "n3",
+      "type": "minmax",
+      "title": "Normalizacja Min-Max",
+      "pos_x": 760.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "minmax",
+        "name": "Min-Max [0, 1]"
+      }
+    },
+    {
+      "id": "n4",
+      "type": "output",
+      "title": "💾 ZAPIS WYNIKU",
+      "pos_x": 1000.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "output",
+        "name": "Zapis"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from_node": "n0",
+      "from_port": "out",
+      "to_node": "n1",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n1",
+      "from_port": "out",
+      "to_node": "n2",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n2",
+      "from_port": "out",
+      "to_node": "n3",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n3",
+      "from_port": "out",
+      "to_node": "n4",
+      "to_port": "in"
+    }
+  ]
+}

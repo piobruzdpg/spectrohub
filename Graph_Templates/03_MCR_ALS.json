@@ -1,0 +1,80 @@
+{
+  "title": "🔬 Rozdział MCR-ALS",
+  "nodes": [
+    {
+      "id": "n0",
+      "type": "input",
+      "title": "📥 ŹRÓDŁO DANYCH",
+      "pos_x": 40.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "input",
+        "name": "Źródło: Wszystkie widoczne",
+        "source_mode": "visible"
+      }
+    },
+    {
+      "id": "n1",
+      "type": "asls",
+      "title": "Linia Bazowa AsLS",
+      "pos_x": 280.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "asls",
+        "name": "AsLS (λ=1e5, p=0.001)",
+        "lam": 100000.0,
+        "p": 0.001
+      }
+    },
+    {
+      "id": "n2",
+      "type": "mcr_decompose",
+      "title": "Dekompozycja MCR-ALS",
+      "pos_x": 540.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "mcr_decompose",
+        "name": "MCR-ALS (k=2)",
+        "method": "mcr_als",
+        "k": 2,
+        "non_negative": true,
+        "closure": false,
+        "unimodal": false,
+        "max_iter": 500
+      }
+    },
+    {
+      "id": "n3",
+      "type": "output_window",
+      "title": "🗂️ Nowe Okno: Czyste Widma",
+      "pos_x": 800.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "output_window",
+        "name": "🗂️ Okno: MCR Składniki",
+        "window_name": "MCR Składniki",
+        "mode": "create_new"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from_node": "n0",
+      "from_port": "out",
+      "to_node": "n1",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n1",
+      "from_port": "out",
+      "to_node": "n2",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n2",
+      "from_port": "out",
+      "to_node": "n3",
+      "to_port": "in"
+    }
+  ]
+}

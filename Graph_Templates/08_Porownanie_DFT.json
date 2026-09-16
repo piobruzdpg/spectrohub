@@ -1,0 +1,77 @@
+{
+  "title": "⚛️ Porównanie DFT z Eksperymentem",
+  "nodes": [
+    {
+      "id": "n0",
+      "type": "input",
+      "title": "📈 Pomiary (A)",
+      "pos_x": 40.0,
+      "pos_y": 80.0,
+      "step_data": {
+        "type": "input",
+        "name": "Źródło: Aktywne widmo",
+        "source_mode": "active"
+      }
+    },
+    {
+      "id": "n1",
+      "type": "dft_broadener",
+      "title": "⚛️ Splot DFT (B)",
+      "pos_x": 40.0,
+      "pos_y": 240.0,
+      "step_data": {
+        "type": "dft_broadener",
+        "name": "DFT Broadener",
+        "scale_factor": 0.965,
+        "fwhm": 12.0,
+        "shape": "lorentzian"
+      }
+    },
+    {
+      "id": "n2",
+      "type": "math_op",
+      "title": "Różnica A - k·B",
+      "pos_x": 340.0,
+      "pos_y": 160.0,
+      "step_data": {
+        "type": "math_op",
+        "name": "A - 1.000·B",
+        "op": "sub",
+        "k": 1.0
+      }
+    },
+    {
+      "id": "n3",
+      "type": "output_window",
+      "title": "🗂️ Nowe Okno: Residua DFT",
+      "pos_x": 620.0,
+      "pos_y": 160.0,
+      "step_data": {
+        "type": "output_window",
+        "name": "🗂️ Okno: Residua DFT",
+        "window_name": "Residua DFT",
+        "mode": "create_new"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from_node": "n0",
+      "from_port": "out",
+      "to_node": "n2",
+      "to_port": "in_a"
+    },
+    {
+      "from_node": "n1",
+      "from_port": "out",
+      "to_node": "n2",
+      "to_port": "in_b"
+    },
+    {
+      "from_node": "n2",
+      "from_port": "out",
+      "to_node": "n3",
+      "to_port": "in"
+    }
+  ]
+}

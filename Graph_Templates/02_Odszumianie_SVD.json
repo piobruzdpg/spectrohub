@@ -1,0 +1,76 @@
+{
+  "title": "📊 Odszumianie SVD Rank-k + AsLS",
+  "nodes": [
+    {
+      "id": "n0",
+      "type": "input",
+      "title": "📥 ŹRÓDŁO DANYCH",
+      "pos_x": 40.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "input",
+        "name": "Źródło: Aktywne widmo",
+        "source_mode": "active"
+      }
+    },
+    {
+      "id": "n1",
+      "type": "svd_denoise",
+      "title": "Odszumiacz SVD (k=3)",
+      "pos_x": 280.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "svd_denoise",
+        "name": "SVD Denoise (k=3)",
+        "k": 3,
+        "center": false
+      }
+    },
+    {
+      "id": "n2",
+      "type": "asls",
+      "title": "Linia Bazowa AsLS",
+      "pos_x": 540.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "asls",
+        "name": "AsLS (λ=1e5, p=0.001)",
+        "lam": 100000.0,
+        "p": 0.001
+      }
+    },
+    {
+      "id": "n3",
+      "type": "output_window",
+      "title": "🗂️ Nowe Okno: Odszumione",
+      "pos_x": 800.0,
+      "pos_y": 140.0,
+      "step_data": {
+        "type": "output_window",
+        "name": "🗂️ Okno: Odszumione SVD",
+        "window_name": "Odszumione SVD",
+        "mode": "create_new"
+      }
+    }
+  ],
+  "connections": [
+    {
+      "from_node": "n0",
+      "from_port": "out",
+      "to_node": "n1",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n1",
+      "from_port": "out",
+      "to_node": "n2",
+      "to_port": "in"
+    },
+    {
+      "from_node": "n2",
+      "from_port": "out",
+      "to_node": "n3",
+      "to_port": "in"
+    }
+  ]
+}
