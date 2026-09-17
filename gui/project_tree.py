@@ -232,6 +232,7 @@ class ProjectTreeWidget(QTreeWidget):
         session.window_added.connect(self._on_window_added)
         session.window_removed.connect(self._on_window_removed)
         session.window_spectrum_added.connect(self._on_window_spectrum_added)
+        session.window_spectra_batch_added.connect(self._on_window_spectra_batch_added)  # <---
         session.window_spectrum_removed.connect(self._on_window_spectrum_removed)
 
         session.table_added.connect(self._on_table_added)
@@ -406,6 +407,35 @@ class ProjectTreeWidget(QTreeWidget):
                     win_node.removeChild(s_item)
                     self._refresh_parent_indicator(win_node)
                     return
+
+    def _on_window_spectra_batch_added(self, window_id: str, spectra_list: list):
+        win_node = self._find_window_item(window_id)
+        if not win_node:
+            return
+
+        self._is_internal_update = True
+        self.setUpdatesEnabled(False)
+        items_to_add = []
+        for spec in spectra_list:
+            item = QTreeWidgetItem([f"📈 {spec.name}"])
+            item.setFlags(
+                Qt.ItemFlag.ItemIsEnabled
+                | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsUserCheckable
+                | Qt.ItemFlag.ItemIsDragEnabled
+            )
+            item.setCheckState(0, Qt.CheckState.Checked)
+            item.setData(0, Qt.UserRole, spec.name)
+            item.setData(0, Qt.UserRole + 1, "window_spectrum")
+            item.setData(0, Qt.UserRole + 2, window_id)
+            items_to_add.append(item)
+
+        win_node.addChildren(items_to_add)
+        win_node.setExpanded(True)
+        self._refresh_parent_indicator(win_node)
+        self.setUpdatesEnabled(True)
+        self._is_internal_update = False
+
 
     # --- DRAG & DROP ---
     def dragEnterEvent(self, event):

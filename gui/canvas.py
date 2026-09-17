@@ -48,8 +48,8 @@ class SpectroCanvas(QWidget):
 
         self.ax_main = self.fig.add_subplot(4, 1, (1, 3))
         self.ax_sub = self.fig.add_subplot(4, 1, 4)
+        # Bliźniacza górna podziałka dla numerów widm serii (bez dzielenia obiektu XAxis)
         self.ax_sub_top = self.ax_sub.twiny()
-        self.ax_sub_top.sharex(self.ax_sub)
 
         self.fig.subplots_adjust(left=0.08, right=0.96, top=0.92, bottom=0.09, hspace=0.28)
 
@@ -84,11 +84,37 @@ class SpectroCanvas(QWidget):
 
         session.active_window_changed.connect(self.redraw_all)
         session.window_spectrum_added.connect(self.redraw_all)
+        session.window_spectra_batch_added.connect(self.redraw_all)  # <---
         session.window_spectrum_removed.connect(self.redraw_all)
         session.window_visibility_changed.connect(self.redraw_all)
         session.context_changed.connect(self.redraw_all)
 
         session.active_table_changed.connect(self._on_active_table_changed)
+
+    def _apply_sub_top_styling(self):
+        """Konfiguruje ax_sub_top jako czystą oś pomocniczą na górze dolnego panelu."""
+        if self.ax_sub_top is None:
+            return
+        self.ax_sub_top.xaxis.tick_top()
+        self.ax_sub_top.xaxis.set_label_position('top')
+        self.ax_sub_top.tick_params(
+            axis='x', which='both',
+            top=True, labeltop=True,
+            bottom=False, labelbottom=False,
+            colors='#a0a0a0', labelsize=8
+        )
+        self.ax_sub_top.tick_params(
+            axis='y', which='both',
+            left=False, labelleft=False,
+            right=False, labelright=False
+        )
+        for spine_name, spine in self.ax_sub_top.spines.items():
+            if spine_name == 'top':
+                spine.set_visible(True)
+                spine.set_color('#4a4a5a')
+            else:
+                spine.set_visible(False)
+        self.ax_sub_top.set_facecolor('none')
 
     def _apply_styling(self):
         for ax in (self.ax_main, self.ax_sub):
@@ -98,9 +124,7 @@ class SpectroCanvas(QWidget):
                 spine.set_color('#4a4a5a')
             ax.grid(True, linestyle='--', alpha=0.3, color='#888888')
 
-        self.ax_sub_top.tick_params(colors='#a0a0a0', which='both', labelsize=8)
-        for spine in self.ax_sub_top.spines.values():
-            spine.set_color('#4a4a5a')
+        self._apply_sub_top_styling()
 
         self.ax_main.set_ylabel("Absorbancja", color="#dcdcdc", fontsize=10)
         self.ax_sub.set_ylabel("Residuum / Profil", color="#dcdcdc", fontsize=9)
@@ -117,7 +141,6 @@ class SpectroCanvas(QWidget):
         self.ax_main.cla()
         self.ax_sub.cla()
         self.ax_sub_top.cla()
-        self.ax_sub_top.set_visible(False)
         self._apply_styling()
 
     def redraw_all(self, *args):
@@ -127,7 +150,6 @@ class SpectroCanvas(QWidget):
         self.ax_main.cla()
         self.ax_sub.cla()
         self.ax_sub_top.cla()
-        self.ax_sub_top.set_visible(False)
         self._apply_styling()
 
         visible_spectra = session.get_display_spectra()
@@ -149,7 +171,20 @@ class SpectroCanvas(QWidget):
             colors = []
             cmap = matplotlib.colormaps['viridis']
 
-            for idx, spec in enumerate(visible_spectra):
+            # Inteligentny kompromis renderowania: decymacja linii dla dużych zbiorów
+            if n_spectra > 200:
+                stride = 4
+            elif n_spectra > 50:
+                stride = 2
+            else:
+                stride = 1
+
+            indices_to_draw = list(range(0, n_spectra, stride))
+            if (n_spectra - 1) not in indices_to_draw:
+                indices_to_draw.append(n_spectra - 1)
+
+            for idx in indices_to_draw:
+                spec = visible_spectra[idx]
                 x = spec.wavenumbers
                 y = spec.intensities
                 segments.append(np.column_stack([x, y]))
@@ -259,7 +294,17 @@ class SpectroCanvas(QWidget):
             if active_series.axis_n_values is not None and len(active_series.axis_n_values) == n_points:
                 x_vals = np.asarray(active_series.axis_n_values, dtype=np.float64)
                 unit_label = getattr(active_series, 'axis_n_name', 'Czas')
-                x_label = f"{unit_label} [min]" if "czas" in unit_label.lower() and "[" not in unit_label else unit_label
+                lower_lbl = unit_label.lower()
+                if "[" in unit_label:
+                    x_label = unit_label
+                elif "minut" in lower_lbl:
+                    x_label = f"{unit_label} [min]"
+                elif "sekund" in lower_lbl:
+                    x_label = f"{unit_label} [s]"
+                elif "czas" in lower_lbl:
+                    x_label = f"{unit_label} [min]"
+                else:
+                    x_label = unit_label
                 is_time_series = True
             else:
                 x_vals = np.arange(1, n_points + 1, dtype=np.float64)
@@ -323,7 +368,8 @@ class SpectroCanvas(QWidget):
             self.ax_sub.plot(x_vals, trace['profile'], 'o-', color=trace['color'],
                              markersize=3.5, lw=1.4, label=lbl)
 
-        self.ax_sub.set_xlabel(x_label, color='#dcdcdc', fontsize=9)
+        # Właściwa, czytelna etykieta osi dolnej
+        self.ax_sub.set_xlabel(x_label, color='#dcdcdc', fontsize=10)
         self.ax_sub.set_ylabel("Absorbancja", color='#dcdcdc', fontsize=9)
         self.ax_sub.grid(True, linestyle='--', alpha=0.3, color='#888888')
 
@@ -332,17 +378,22 @@ class SpectroCanvas(QWidget):
         self.ax_sub.set_xlim(x_min - dx, x_max + dx)
 
         if is_time_series:
+            # 1. Dolna oś: rzeczywisty czas w jednostkach fizycznych
             self.ax_sub.xaxis.set_major_locator(ticker.MaxNLocator(nbins=8))
+            self.ax_sub.xaxis.set_major_formatter(ticker.ScalarFormatter(useOffset=False))
+
+            # 2. Górna oś pomocnicza: dyskretne indeksy widm w serii bez zbędnego napisu tekstowego
             self.ax_sub_top.set_visible(True)
             self.ax_sub_top.set_xlim(self.ax_sub.get_xlim())
 
-            num_ticks = min(8, n_points)
-            idx_ticks = np.linspace(0, n_points - 1, num=num_ticks, dtype=int)
+            num_ticks = min(10, n_points)
+            idx_ticks = np.unique(np.linspace(0, n_points - 1, num=num_ticks, dtype=int))
             self.ax_sub_top.set_xticks(x_vals[idx_ticks])
             self.ax_sub_top.set_xticklabels([str(i + 1) for i in idx_ticks], fontsize=8, color='#a0a0a0')
-            self.ax_sub_top.set_xlabel("Numer widma w serii", fontsize=8, color='#a0a0a0')
+            self.ax_sub_top.set_xlabel("")
         else:
             self.ax_sub.xaxis.set_major_locator(ticker.MaxNLocator(integer=True, nbins=8))
+            self.ax_sub.xaxis.set_major_formatter(ticker.ScalarFormatter(useOffset=False))
             self.ax_sub_top.set_visible(False)
 
         self.ax_sub.legend(loc='upper right', facecolor='#2b2b36', edgecolor='#4a4a5a',
@@ -481,7 +532,6 @@ class SpectroCanvas(QWidget):
         self.last_kinetic_export_data = None
         self.ax_sub.cla()
         self.ax_sub_top.cla()
-        self.ax_sub_top.set_visible(False)
         self._apply_styling()
         self.canvas.draw_idle()
 
@@ -578,7 +628,10 @@ class SpectroCanvas(QWidget):
         dy = abs(y1 - y0)
 
         if target_ax == self.ax_sub:
-            if dx > 0.5 or dy > 0.005:
+            span_x = abs(self.ax_sub.get_xlim()[1] - self.ax_sub.get_xlim()[0])
+            span_y = abs(self.ax_sub.get_ylim()[1] - self.ax_sub.get_ylim()[0])
+            # Inteligentny próg zoomu reagujący nawet na małe sygnały absorbancji (np. ΔA ~ 0.001)
+            if dx > (span_x * 0.02) or dy > (span_y * 0.02):
                 self.ax_sub.set_xlim(min(x0, x1), max(x0, x1))
                 self.ax_sub.set_ylim(min(y0, y1), max(y0, y1))
                 if self.ax_sub_top.get_visible():
@@ -639,7 +692,6 @@ class SpectroCanvas(QWidget):
         self.ax_main.cla()
         self.ax_sub.cla()
         self.ax_sub_top.cla()
-        self.ax_sub_top.set_visible(False)
         self._apply_styling()
 
         if active_spec is None:
@@ -732,7 +784,6 @@ class SpectroCanvas(QWidget):
         self.ax_main.cla()
         self.ax_sub.cla()
         self.ax_sub_top.cla()
-        self.ax_sub_top.set_visible(False)
         self._apply_styling()
 
         if target_spec is None:
@@ -794,7 +845,6 @@ class SpectroCanvas(QWidget):
         self.ax_main.cla()
         self.ax_sub.cla()
         self.ax_sub_top.cla()
-        self.ax_sub_top.set_visible(False)
         self._apply_styling()
 
         clean_name = table.name.replace("📊", "").strip()
@@ -804,7 +854,6 @@ class SpectroCanvas(QWidget):
             row_labels = table.metadata.get("row_labels", [])
             val_col = next(iter(table.y_columns.values())) if table.y_columns else []
 
-            # Wyciągnięcie kluczowych parametrów do podsumowania
             summary_lines = [
                 f"TABELA PARAMETRÓW: {clean_name.upper()}",
                 "─" * 45

@@ -2,6 +2,7 @@
 algorithms/atmospheric.py
 Silnik numeryczny kompensacji pasm atmosferycznych (para wodna i CO2) metodą VaporFit.
 Analityczne OLS na składowych wysokoczęstotliwościowych + Auto-Walidator znaku SDV.
+Wsparcie dla natychmiastowej wektoryzacji macierzowej BLAS/LAPACK.
 """
 
 import numpy as np
@@ -45,12 +46,9 @@ class AtmosphericCorrectionEngine:
             atm_spectra: np.ndarray,
             sg_points: int = 11,
             sg_poly: int = 3,
-            sign_mode: Optional[str] = None  # zachowane dla wstecznej kompatybilności API
+            sign_mode: Optional[str] = None
     ) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
-        """
-        Analityczne dopasowanie wag widm atmosfery za pomocą liniowej regresji składowych ostrych (High-Pass)
-        oraz bezpośrednia kompensacja S_corr = S - sum(c_i * A_i).
-        """
+        """Dopasowanie analityczne pojedynczego widma z pełnymi metrykami gładkości."""
         wavenb = np.asarray(wavenumbers, dtype=np.float64)
         sample = np.asarray(sample_spectrum, dtype=np.float64)
         atm = np.asarray(atm_spectra, dtype=np.float64)
@@ -66,21 +64,13 @@ class AtmosphericCorrectionEngine:
         w = sg_points if sg_points % 2 != 0 else sg_points + 1
         poly = sg_poly if w > sg_poly else max(1, w - 2)
 
-        # 1. Wyodrębnienie ostrych struktur (High-Pass: Sygnał surowy minus SG)
         y_sharp = sample - savgol_filter(sample, window_length=w, polyorder=poly)
 
         X_sharp = np.empty_like(atm)
         for col in range(atm.shape[1]):
             X_sharp[:, col] = atm[:, col] - savgol_filter(atm[:, col], window_length=w, polyorder=poly)
 
-        # 2. Analityczne rozwiązanie OLS: minimalizacja ||X_sharp * c - y_sharp||^2
-        # Dokładny odpowiednik dopasowania z oryginalnego VaporFit
         coeffs, _, _, _ = np.linalg.lstsq(X_sharp, y_sharp, rcond=None)
-
-        # 3. Bezpośrednia kompensacja widma: S_corr = S - (A @ c)
-        # Znak c_i wynika wprost z algebry liniowej:
-        # - nadmiar pasm w próbce -> c > 0 -> piki są odejmowane
-        # - deficyt pasm (dołki) w próbce -> c < 0 -> dołki są kompensowane (odejmowanie wartości ujemnej = dodawanie)
         atm_total = atm @ coeffs
         corrected_spectrum = sample - atm_total
 
@@ -96,6 +86,44 @@ class AtmosphericCorrectionEngine:
         return corrected_spectrum, coeffs, metrics
 
     @classmethod
+    def fit_and_subtract_batch(
+            cls,
+            wavenumbers: np.ndarray,
+            samples_matrix: np.ndarray,
+            atm_matrix: np.ndarray,
+            sg_points: int = 11,
+            sg_poly: int = 3
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Zwektoryzowana kompensacja OLS dla macierzy widm (W x N) w czystym BLAS/LAPACK.
+        Rozwiązuje wszystkie kolumny symultanicznie w ułamku sekundy.
+        Zwraca: (corrected_matrix, atm_fitted_matrix, coeffs_matrix)
+        """
+        w = sg_points if sg_points % 2 != 0 else sg_points + 1
+        poly = sg_poly if w > sg_poly else max(1, w - 2)
+
+        Y = samples_matrix if samples_matrix.ndim == 2 else samples_matrix[:, np.newaxis]
+        A = atm_matrix if atm_matrix.ndim == 2 else atm_matrix[:, np.newaxis]
+
+        # 1. Filtrowanie SG wzdłuż osi liczb falowych (axis=0) dla wszystkich kolumn naraz w C
+        A_sg = savgol_filter(A, window_length=w, polyorder=poly, axis=0)
+        X_sharp = A - A_sg
+
+        Y_sg = savgol_filter(Y, window_length=w, polyorder=poly, axis=0)
+        Y_sharp = Y - Y_sg
+
+        # 2. Jedno wielowątkowe wywołanie LAPACK lstsq dla wszystkich N próbek
+        coeffs, _, _, _ = np.linalg.lstsq(X_sharp, Y_sharp, rcond=None)
+
+        # 3. Zrekonstruowana atmosfera i kompensacja: (W x K) @ (K x N) -> (W x N)
+        atm_total = A @ coeffs
+        corrected = Y - atm_total
+
+        if samples_matrix.ndim == 1:
+            return corrected.ravel(), atm_total.ravel(), coeffs.ravel()
+        return corrected, atm_total, coeffs
+
+    @classmethod
     def find_optimal_sg_window(
         cls,
         wavenumbers: np.ndarray,
@@ -104,7 +132,6 @@ class AtmosphericCorrectionEngine:
         sg_poly: int = 3,
         window_candidates: Optional[List[int]] = None
     ) -> Dict[str, Any]:
-        """Przeszukuje okna Savitzky-Golay w poszukiwaniu minimum wskaźników gładkości."""
         if window_candidates is None:
             window_candidates = [7, 9, 11, 13, 15, 17, 19, 21, 25, 29]
 

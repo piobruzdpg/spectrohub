@@ -1,6 +1,7 @@
 """
 gui/node_editor/nodes/node_atmospheric.py
 Węzeł kompensacji atmosferycznej (VaporFit) z autonomicznym dialogiem i autotuningiem SG.
+Obsługa wielowątkowego przetwarzania macierzowego (Batch 2D).
 """
 
 from typing import List, Dict, Any, Tuple, Optional
@@ -157,16 +158,13 @@ class VaporFitNode(BaseNode):
 
         try:
             if ys.ndim == 2:
-                corr_cols, atm_fit_cols = [], []
-                for c in range(ys.shape[1]):
-                    cy, coeffs, _ = AtmosphericCorrectionEngine.fit_and_subtract(
-                        xs, ys[:, c], atm_matrix, sg_points=sg_pts, sg_poly=sg_poly
-                    )
-                    corr_cols.append(cy)
-                    atm_fit_cols.append(atm_matrix @ coeffs)
+                # Wektorowy batch na całej macierzy próbek w BLAS
+                corr_matrix, atm_matrix_fit, _ = AtmosphericCorrectionEngine.fit_and_subtract_batch(
+                    xs, ys, atm_matrix, sg_points=sg_pts, sg_poly=sg_poly
+                )
                 return {
-                    "out": (xs.copy(), np.column_stack(corr_cols)),
-                    "out_atm": (xs.copy(), np.column_stack(atm_fit_cols))
+                    "out": (xs.copy(), corr_matrix),
+                    "out_atm": (xs.copy(), atm_matrix_fit)
                 }, {"out": in_names, "out_atm": in_names}
             else:
                 corr_y, coeffs, metrics = AtmosphericCorrectionEngine.fit_and_subtract(
@@ -178,7 +176,8 @@ class VaporFitNode(BaseNode):
                     "out": (xs.copy(), corr_y),
                     "out_atm": (xs.copy(), atm_matrix @ coeffs)
                 }, {"out": in_names, "out_atm": in_names}
-        except Exception:
+        except Exception as e:
+            logger.error(f"Błąd kompensacji VaporFit: {e}")
             return {"out": (xs.copy(), ys.copy()), "out_atm": (xs.copy(), np.zeros_like(ys))}, {
                 "out": in_names, "out_atm": in_names
             }

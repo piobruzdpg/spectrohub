@@ -1693,44 +1693,39 @@ class NodePipelineDialog(QMainWindow):
                         if bundle:
                             f_name = custom_folder_name if custom_folder_name else bundle['folder_name']
                             folder_id = session.add_folder(name=f_name, parent_folder_id=parent_fid)
-                            QApplication.processEvents()
                             win_id = session.add_window(name=f_name, folder_id=folder_id)
-                            QApplication.processEvents()
 
                             wn = bundle['wavenumbers']
+                            hdo_batch = []
 
                             # 1. Widmo badane W0
-                            s_w0 = SpectrumData(
+                            hdo_batch.append(SpectrumData(
                                 wavenumbers=wn.copy(), intensities=bundle['w0_target'].copy(),
                                 name=f"{f_name}_W0", file_path="", file_type="processed",
                                 metadata={"source": "HDO W0 Target", **bundle.get('metrics', {})}
-                            )
-                            session.add_spectrum_to_window(win_id, s_w0)
+                            ))
 
                             # 2. Fit całkowity
                             r2_val = bundle.get('metrics', {}).get('r2', 0.0)
-                            s_fit = SpectrumData(
+                            hdo_batch.append(SpectrumData(
                                 wavenumbers=wn.copy(), intensities=bundle['fit_y'].copy(),
                                 name=f"{f_name}_Fit (R²={r2_val:.4f})", file_path="", file_type="fit",
                                 metadata={"source": "HDO Total Fit", **bundle.get('metrics', {})}
-                            )
-                            session.add_spectrum_to_window(win_id, s_fit)
+                            ))
 
                             # 3. Residuum nadmiarowe
-                            s_res = SpectrumData(
+                            hdo_batch.append(SpectrumData(
                                 wavenumbers=wn.copy(), intensities=bundle['excess_res'].copy(),
                                 name=f"{f_name}_Res_Nadmiarowe", file_path="", file_type="residual",
                                 metadata={"source": "HDO Excess Residual", **bundle.get('metrics', {})}
-                            )
-                            session.add_spectrum_to_window(win_id, s_res)
+                            ))
 
                             # 4. Residuum dopasowania (ΔFit)
-                            s_fres = SpectrumData(
+                            hdo_batch.append(SpectrumData(
                                 wavenumbers=wn.copy(), intensities=bundle['fit_res'].copy(),
                                 name=f"{f_name}_ΔFit", file_path="", file_type="residual",
                                 metadata={"source": "HDO Fit Residual", **bundle.get('metrics', {})}
-                            )
-                            session.add_spectrum_to_window(win_id, s_fres)
+                            ))
 
                             # 5. Składowe Wk
                             comps_y = bundle['comps_y']
@@ -1740,25 +1735,25 @@ class NodePipelineDialog(QMainWindow):
                                 for col in range(comps_y.shape[1]):
                                     b_title = base_names[col] if col < len(base_names) else f"Comp_{col + 1}"
                                     c_val = coeffs[col] if col < len(coeffs) else 1.0
-                                    s_comp = SpectrumData(
+                                    hdo_batch.append(SpectrumData(
                                         wavenumbers=wn.copy(), intensities=comps_y[:, col].copy(),
                                         name=f"{f_name}_{b_title} (c={c_val:.4f})", file_path="",
                                         file_type="processed",
                                         metadata={"source": "HDO Component", "coeff": c_val,
                                                   **bundle.get('metrics', {})}
-                                    )
-                                    session.add_spectrum_to_window(win_id, s_comp)
+                                    ))
 
                             # 6. Piki syntetyczne
                             peaks_y = bundle['peaks_y']
                             if peaks_y.ndim == 2:
                                 for col in range(peaks_y.shape[1]):
-                                    s_pk = SpectrumData(
+                                    hdo_batch.append(SpectrumData(
                                         wavenumbers=wn.copy(), intensities=peaks_y[:, col].copy(),
                                         name=f"{f_name}_Pik_{col + 1}", file_path="", file_type="processed",
                                         metadata={"source": "HDO Synthetic Peak", **bundle.get('metrics', {})}
-                                    )
-                                    session.add_spectrum_to_window(win_id, s_pk)
+                                    ))
+
+                            session.add_spectra_batch_to_window(win_id, hdo_batch)
 
                             # 7. Tabela parametrów
                             new_table = DataTable(
@@ -1774,7 +1769,7 @@ class NodePipelineDialog(QMainWindow):
                             session.add_table(new_table, make_active=False)
 
                         else:
-                            # --- TRYB AWARYJNY / UNIWERSALNY: dowolne widma bez paczki HDO ---
+                            # --- TRYB UNIWERSALNY: serie ewolucyjne i batch (np. 600 widm z VaporFit) ---
                             new_x, new_y = res_map.get((src_node, src_port), (None, None))
                             src_names = names_map.get((src_node, src_port), [])
                             if new_x is not None and new_y is not None:
@@ -1787,24 +1782,26 @@ class NodePipelineDialog(QMainWindow):
                                     f_name = f"Nowy_Folder_{session._folder_counter + 1}"
 
                                 folder_id = session.add_folder(name=f_name, parent_folder_id=parent_fid)
-                                QApplication.processEvents()
                                 win_id = session.add_window(name=f_name, folder_id=folder_id)
-                                QApplication.processEvents()
 
+                                batch_spectra = []
                                 if new_y.ndim == 2:
                                     for col in range(new_y.shape[1]):
                                         s_n = src_names[col] if col < len(
                                             src_names) else f"{f_name}_Widmo_{col + 1}"
-                                        session.add_spectrum_to_window(win_id, SpectrumData(
+                                        batch_spectra.append(SpectrumData(
                                             wavenumbers=new_x.copy(), intensities=new_y[:, col].copy(),
                                             name=s_n, file_path="", file_type="processed"
                                         ))
                                 else:
                                     s_n = src_names[0] if src_names else f"{f_name}_Widmo"
-                                    session.add_spectrum_to_window(win_id, SpectrumData(
+                                    batch_spectra.append(SpectrumData(
                                         wavenumbers=new_x.copy(), intensities=new_y.copy(),
                                         name=s_n, file_path="", file_type="processed"
                                     ))
+
+                                # Jeden strzał w sesji, jedno odrysowanie na canvasie!
+                                session.add_spectra_batch_to_window(win_id, batch_spectra)
                     continue
 
                 # =============================================================
@@ -1911,6 +1908,9 @@ class NodePipelineDialog(QMainWindow):
                         f"DAG do okna '{term_node.step_data.get('window_name')}' ({len(new_created)} widm)",
                         canvas=canvas, window_id=target_window_id
                     ))
+
+            import gc
+            gc.collect()
 
             QMessageBox.information(self, "Sukces", f"Pomyślnie wykonano potok z zakładki '{tab.title}'!")
             self.recalculate_graph_preview(target_scene=scene)

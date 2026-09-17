@@ -54,6 +54,7 @@ class ProjectSession(QObject):
     window_removed = Signal(str)
     active_window_changed = Signal(str)
     window_spectrum_added = Signal(str, object)
+    window_spectra_batch_added = Signal(str, list)  # <--- NOWY SYGNAŁ HURTOWY
     window_spectrum_removed = Signal(str, str)
     window_visibility_changed = Signal(str, str, bool)
     context_changed = Signal(str)            # 'storage' | 'window' | 'table'
@@ -91,6 +92,7 @@ class ProjectSession(QObject):
 
         self._active_spectrum_name: Optional[str] = None
         self.undo_stack = QUndoStack(self)
+        self.undo_stack.setUndoLimit(15)  # <--- Bezpieczny bufor zapobiegający wyciekom pamięci
 
         self._series: Dict[str, SpectralSeries] = {}
         self._series_visibility: Dict[str, bool] = {}
@@ -252,6 +254,36 @@ class ProjectSession(QObject):
         self.active_table_changed.emit(self.active_table)
 
     # --- ZARZĄDZANIE OKNAMI ROBOCZYMI ---
+    def add_spectra_batch_to_window(self, window_id: str, spectra_list: List[SpectrumData]) -> List[SpectrumData]:
+        """Hurtowo dodaje całą listę widm do okna roboczego z pojedynczą emisją sygnału."""
+        if window_id not in self._windows or not spectra_list:
+            return []
+
+        win = self._windows[window_id]
+        added = []
+        existing_names = set(win.spectra.keys())
+
+        for spectrum in spectra_list:
+            cloned_spec = spectrum.clone()
+            base_name = cloned_spec.name
+            unique_name = base_name
+            counter = 1
+            while unique_name in existing_names:
+                unique_name = f"{base_name}_{counter}"
+                counter += 1
+
+            existing_names.add(unique_name)
+            cloned_spec.name = unique_name
+            win.spectra[unique_name] = cloned_spec
+            win.visibility[unique_name] = True
+            added.append(cloned_spec)
+
+        if added:
+            win.active_spectrum_name = added[-1].name
+            self.window_spectra_batch_added.emit(window_id, added)
+
+        return added
+
     @property
     def windows(self) -> Dict[str, WorkspaceWindow]:
         return self._windows

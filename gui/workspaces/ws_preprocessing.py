@@ -290,10 +290,8 @@ class AddBatchSpectraCommand(QUndoCommand):
 
     def redo(self):
         if self.window_id and self.window_id in session.windows:
-            self.registered_names = []
-            for spec in self.spectra_list:
-                added = session.add_spectrum_to_window(self.window_id, spec)
-                self.registered_names.append(added.name)
+            added = session.add_spectra_batch_to_window(self.window_id, self.spectra_list)
+            self.registered_names = [s.name for s in added]
         else:
             session.add_spectra_batch(self.spectra_list)
             self.registered_names = [s.name for s in self.spectra_list]
