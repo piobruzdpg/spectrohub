@@ -664,9 +664,7 @@ class PreprocessingPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.pipeline_steps: List[Dict[str, Any]] = []
-
         self._vaporfit_dialog: Optional[VaporFitDialog] = None
-        self._node_dialog: Optional[QWidget] = None
 
         self._init_ui()
         i18n.language_changed.connect(self.retranslate_ui)
@@ -685,11 +683,12 @@ class PreprocessingPanel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
 
         container = QWidget()
         layout = QVBoxLayout(container)
-        layout.setSpacing(10)
-        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(8)
+        layout.setContentsMargins(2, 2, 2, 2)
 
         # SEKCJA 1: PIPELINE MANAGER
         box_pipeline = QGroupBox("⚙️ Potok Przetwarzania (Pipeline Manager)")
@@ -697,30 +696,16 @@ class PreprocessingPanel(QWidget):
         l_pipe = QVBoxLayout(box_pipeline)
         l_pipe.setSpacing(6)
 
-        row_pipe_mode = QHBoxLayout()
-        self.btn_open_node_graph = QPushButton("☊ Otwórz Potok Węzłowy (Beta)...")
-        self.btn_open_node_graph.setStyleSheet("""
-            QPushButton {
-                background-color: #3a0ca3; 
-                color: #ffffff; 
-                font-weight: bold; 
-                padding: 6px; 
-                border: 1px solid #7209b7;
-                border-radius: 4px;
-            }
-            QPushButton:hover { background-color: #4361ee; }
-        """)
-        self.btn_open_node_graph.clicked.connect(self._open_node_pipeline_dialog)
-        row_pipe_mode.addWidget(self.btn_open_node_graph)
-        l_pipe.addLayout(row_pipe_mode)
-
+        # Lista kroków potoku
         self.list_pipeline = QListWidget()
-        self.list_pipeline.setFixedHeight(120)
+        self.list_pipeline.setFixedHeight(115)
         self.list_pipeline.setStyleSheet("background-color: #1e1e24; border: 1px solid #383848;")
         self.list_pipeline.itemDoubleClicked.connect(self._on_edit_pipeline_step)
         l_pipe.addWidget(self.list_pipeline)
 
-        row_pipe_tools = QHBoxLayout()
+        # Wiersz 1 narzędzi potoku: Typ kroku + Przycisk Dodaj
+        row_add_step = QHBoxLayout()
+        row_add_step.setSpacing(4)
         self.combo_step_type = QComboBox()
         self.combo_step_type.addItems([
             "✂ Przycięcie (Crop)",
@@ -745,6 +730,13 @@ class PreprocessingPanel(QWidget):
         ])
         btn_add_step = QPushButton("➕ Dodaj")
         btn_add_step.clicked.connect(self._on_add_pipeline_step)
+        row_add_step.addWidget(self.combo_step_type, 1)
+        row_add_step.addWidget(btn_add_step)
+        l_pipe.addLayout(row_add_step)
+
+        # Wiersz 2 narzędzi potoku: Edycja, kolejność, usuwanie, czyszczenie
+        row_step_actions = QHBoxLayout()
+        row_step_actions.setSpacing(4)
 
         btn_edit_step = QPushButton("✏️ Edytuj")
         btn_edit_step.setToolTip("Edytuj parametry zaznaczonego kroku")
@@ -752,33 +744,36 @@ class PreprocessingPanel(QWidget):
 
         btn_up = QPushButton("▲")
         btn_up.setFixedWidth(26)
+        btn_up.setToolTip("Przesuń krok w górę")
         btn_up.clicked.connect(self._on_move_step_up)
 
         btn_down = QPushButton("▼")
         btn_down.setFixedWidth(26)
+        btn_down.setToolTip("Przesuń krok w dół")
         btn_down.clicked.connect(self._on_move_step_down)
 
         btn_del_step = QPushButton("✕")
         btn_del_step.setFixedWidth(26)
+        btn_del_step.setToolTip("Usuń zaznaczony krok")
         btn_del_step.clicked.connect(self._on_remove_pipeline_step)
 
         btn_clear_pipe = QPushButton("Wyczyść")
         btn_clear_pipe.clicked.connect(self._on_clear_pipeline)
 
-        row_pipe_tools.addWidget(self.combo_step_type, 1)
-        row_pipe_tools.addWidget(btn_add_step)
-        row_pipe_tools.addWidget(btn_edit_step)
-        row_pipe_tools.addWidget(btn_up)
-        row_pipe_tools.addWidget(btn_down)
-        row_pipe_tools.addWidget(btn_del_step)
-        row_pipe_tools.addWidget(btn_clear_pipe)
-        l_pipe.addLayout(row_pipe_tools)
+        row_step_actions.addWidget(btn_edit_step)
+        row_step_actions.addWidget(btn_up)
+        row_step_actions.addWidget(btn_down)
+        row_step_actions.addWidget(btn_del_step)
+        row_step_actions.addStretch()
+        row_step_actions.addWidget(btn_clear_pipe)
+        l_pipe.addLayout(row_step_actions)
 
+        # Zakres docelowy
         row_target = QHBoxLayout()
         row_target.addWidget(QLabel("Cel:"))
         self.combo_target_scope = QComboBox()
         self.combo_target_scope.addItems([
-            "Wszystkie widoczne w aktywnym oknie / gałęzi",  # Domyślny cel
+            "Wszystkie widoczne w aktywnym oknie / gałęzi",
             "Tylko aktywne widmo",
             "Aktywna seria 2D / Tensor"
         ])
@@ -797,7 +792,7 @@ class PreprocessingPanel(QWidget):
         l_pipe.addWidget(self.pipe_progress)
 
         self.btn_run_pipeline = QPushButton("⚡ Uruchom Potok na Wybranych Danych")
-        self.btn_run_pipeline.setStyleSheet("background-color: #2a9d8f; font-weight: bold; padding: 8px;")
+        self.btn_run_pipeline.setStyleSheet("background-color: #2a9d8f; font-weight: bold; padding: 7px;")
         self.btn_run_pipeline.clicked.connect(self._on_run_pipeline)
         l_pipe.addWidget(self.btn_run_pipeline)
 
@@ -823,7 +818,7 @@ class PreprocessingPanel(QWidget):
         row_crop.addWidget(self.ent_crop_max)
         l_crop.addLayout(row_crop)
 
-        self.btn_crop = QPushButton("Przytnij aktywne widmo teraz")
+        self.btn_crop = QPushButton("Przytnij aktywne widmo")
         self.btn_crop.clicked.connect(self._apply_crop)
         l_crop.addWidget(self.btn_crop)
         layout.addWidget(box_crop)
@@ -835,7 +830,7 @@ class PreprocessingPanel(QWidget):
         row_asls.addWidget(QLabel("λ:"))
         self.ent_asls_lam = QLineEdit("100000")
         row_asls.addWidget(self.ent_asls_lam)
-        row_asls.addWidget(QLabel("p (AsLS):"))
+        row_asls.addWidget(QLabel("p:"))
         self.ent_asls_p = QLineEdit("0.001")
         row_asls.addWidget(self.ent_asls_p)
         l_baseline.addLayout(row_asls)
@@ -872,7 +867,7 @@ class PreprocessingPanel(QWidget):
         row_sg.addWidget(self.ent_sg_poly)
         l_filters.addLayout(row_sg)
 
-        self.btn_sg_smooth = QPushButton("Wygładź teraz (SG)")
+        self.btn_sg_smooth = QPushButton("Wygładź (SG)")
         self.btn_sg_smooth.clicked.connect(self._apply_sg_smoothing)
         l_filters.addWidget(self.btn_sg_smooth)
 
@@ -886,7 +881,7 @@ class PreprocessingPanel(QWidget):
         l_filters.addLayout(row_derivs)
         layout.addWidget(box_filters)
 
-        self.btn_fsd = QPushButton("Dekonwolucja Fouriera (FSD Kauppinena)")
+        self.btn_fsd = QPushButton("Dekonwolucja Fouriera (FSD)")
         self.btn_fsd.clicked.connect(self._apply_fsd)
         l_filters.addWidget(self.btn_fsd)
 
@@ -905,16 +900,16 @@ class PreprocessingPanel(QWidget):
         row_norm2 = QHBoxLayout()
         self.btn_l2 = QPushButton("Norma L₂")
         self.btn_l2.clicked.connect(self._apply_l2)
-        self.btn_offset_zero = QPushButton("Offset (Min ➔ 0.0)")
+        self.btn_offset_zero = QPushButton("Offset (Min ➔ 0)")
         self.btn_offset_zero.clicked.connect(self._apply_offset_min)
         row_norm2.addWidget(self.btn_l2)
         row_norm2.addWidget(self.btn_offset_zero)
         l_norm.addLayout(row_norm2)
 
         row_offset_pt = QHBoxLayout()
-        row_offset_pt.addWidget(QLabel("Offset przy ν:"))
+        row_offset_pt.addWidget(QLabel("Offset przy:"))
         self.ent_offset_wn = QLineEdit("2000")
-        self.ent_offset_wn.setFixedWidth(55)
+        self.ent_offset_wn.setFixedWidth(50)
         row_offset_pt.addWidget(self.ent_offset_wn)
         row_offset_pt.addWidget(QLabel("cm⁻¹"))
 
@@ -925,14 +920,17 @@ class PreprocessingPanel(QWidget):
 
         layout.addWidget(box_norm)
 
+        # Historia
         box_history = QGroupBox("↺ Historia Operacji")
         l_hist = QHBoxLayout(box_history)
-        self.btn_undo = QPushButton("↶ Cofnij (⌘Z / Ctrl+Z)")
+        self.btn_undo = QPushButton("↶ Cofnij")
+        self.btn_undo.setToolTip("Cofnij operację (⌘Z / Ctrl+Z)")
         self.btn_undo.clicked.connect(session.undo_stack.undo)
         session.undo_stack.canUndoChanged.connect(self.btn_undo.setEnabled)
         self.btn_undo.setEnabled(session.undo_stack.canUndo())
 
-        self.btn_redo = QPushButton("↷ Ponów (⌘⇧Z / Ctrl+Y)")
+        self.btn_redo = QPushButton("↷ Ponów")
+        self.btn_redo.setToolTip("Ponów operację (⌘⇧Z / Ctrl+Y)")
         self.btn_redo.clicked.connect(session.undo_stack.redo)
         session.undo_stack.canRedoChanged.connect(self.btn_redo.setEnabled)
         self.btn_redo.setEnabled(session.undo_stack.canRedo())
@@ -955,18 +953,6 @@ class PreprocessingPanel(QWidget):
         self._vaporfit_dialog.show()
         self._vaporfit_dialog.raise_()
         self._vaporfit_dialog.activateWindow()
-
-    def _open_node_pipeline_dialog(self):
-        main_win = self.window()
-        if self._node_dialog is None:
-            from gui.node_editor import NodePipelineDialog
-            self._node_dialog = NodePipelineDialog(parent=main_win)
-            if hasattr(main_win, 'cached_dag_state') and main_win.cached_dag_state:
-                self._node_dialog.import_graph_state(main_win.cached_dag_state)
-
-        self._node_dialog.show()
-        self._node_dialog.raise_()
-        self._node_dialog.activateWindow()
 
     def _on_add_pipeline_step(self):
         choice = self.combo_step_type.currentText()
@@ -999,8 +985,7 @@ class PreprocessingPanel(QWidget):
             elif "Wygładzanie" in choice:
                 win = int(self.ent_sg_win.text())
                 poly = int(self.ent_sg_poly.text())
-                step = {'type': 'sg_smooth', 'name': f"SG Wygładzanie (okno={win}, st={poly})", 'win': win,
-                        'poly': poly}
+                step = {'type': 'sg_smooth', 'name': f"SG Wygładzanie (okno={win}, st={poly})", 'win': win, 'poly': poly}
 
             elif "1. Pochodna" in choice:
                 win = int(self.ent_sg_win.text())
@@ -1024,7 +1009,7 @@ class PreprocessingPanel(QWidget):
             elif "Norma L₂" in choice:
                 step = {'type': 'l2', 'name': "Normalizacja L₂"}
 
-            elif "Min ➔ 0.0" in choice:
+            elif "Min ➔ 0" in choice:
                 step = {'type': 'offset_min', 'name': "Offset (Min ➔ 0.0)"}
 
             elif "punkcie ν" in choice:

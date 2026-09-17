@@ -8,7 +8,7 @@ Pełna integracja z Magazynem Danych, Oknami Roboczymi oraz Seriami 2D/3D.
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QGroupBox,
-    QMessageBox, QScrollArea, QFrame
+    QMessageBox, QScrollArea, QFrame, QSizePolicy
 )
 from PySide6.QtCore import Qt
 import numpy as np
@@ -41,21 +41,26 @@ class ChemometricsPanel(QWidget):
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(6, 6, 6, 6)
-        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(4, 4, 4, 4)
+        main_layout.setSpacing(4)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
         content = QWidget()
         layout = QVBoxLayout(content)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(6)
 
         # 1. Źródło danych
         grp_source = QGroupBox("1. Źródło Danych do Analizy")
+        grp_source.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.grp_source = grp_source
         l_src = QVBoxLayout(grp_source)
+        l_src.setContentsMargins(6, 6, 6, 6)
+        l_src.setSpacing(4)
 
         row_src = QHBoxLayout()
         self.lbl_source = QLabel("Wybierz zestaw:")
@@ -72,8 +77,11 @@ class ChemometricsPanel(QWidget):
 
         # 2. Wybór metody
         grp_method = QGroupBox("2. Metoda Chemometryczna")
+        grp_method.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.grp_method = grp_method
         l_meth = QVBoxLayout(grp_method)
+        l_meth.setContentsMargins(6, 6, 6, 6)
+        l_meth.setSpacing(4)
 
         self.combo_method = QComboBox()
         self.combo_method.addItems([
@@ -94,8 +102,11 @@ class ChemometricsPanel(QWidget):
 
         # 3. Parametry algorytmu
         grp_params = QGroupBox("3. Parametry i Opcje")
+        grp_params.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.grp_params = grp_params
         l_params = QVBoxLayout(grp_params)
+        l_params.setContentsMargins(6, 6, 6, 6)
+        l_params.setSpacing(4)
 
         # Liczba składowych k
         self.row_k = QHBoxLayout()
@@ -196,14 +207,17 @@ class ChemometricsPanel(QWidget):
 
         # 4. Przycisk obliczeniowy
         self.btn_run = QPushButton("⚡ Uruchom Analizę")
-        self.btn_run.setStyleSheet("background-color: #3d5a80; font-weight: bold; padding: 8px;")
+        self.btn_run.setStyleSheet("background-color: #3d5a80; font-weight: bold; padding: 7px;")
         self.btn_run.clicked.connect(self._on_run_analysis)
         layout.addWidget(self.btn_run)
 
         # 5. Wyniki & Integracja z Projektem
         grp_results = QGroupBox("4. Wyniki & Integracja z Projektem")
+        grp_results.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         self.grp_results = grp_results
         l_res = QVBoxLayout(grp_results)
+        l_res.setContentsMargins(6, 6, 6, 6)
+        l_res.setSpacing(4)
 
         self.lbl_res_summary = QLabel("Brak obliczonych wyników.")
         self.lbl_res_summary.setStyleSheet("color: #a0a0a0; font-size: 11px;")
@@ -211,18 +225,22 @@ class ChemometricsPanel(QWidget):
         l_res.addWidget(self.lbl_res_summary)
 
         self.btn_inject_spectra = QPushButton("📥 Dodaj Wyizolowane Widma do Projektu")
-        self.btn_inject_spectra.setStyleSheet("background-color: #2a9d8f; font-weight: bold;")
+        self.btn_inject_spectra.setStyleSheet("background-color: #2a9d8f; font-weight: bold; padding: 5px;")
         self.btn_inject_spectra.setEnabled(False)
         self.btn_inject_spectra.clicked.connect(self._on_inject_spectra_to_session)
         l_res.addWidget(self.btn_inject_spectra)
 
         self.btn_inject_recon = QPushButton("📥 Dodaj Odszumioną Serię (D_k) do Projektu")
-        self.btn_inject_recon.setStyleSheet("background-color: #457b9d; font-weight: bold;")
+        self.btn_inject_recon.setStyleSheet("background-color: #457b9d; font-weight: bold; padding: 5px;")
         self.btn_inject_recon.setEnabled(False)
         self.btn_inject_recon.clicked.connect(self._on_inject_reconstruction_to_session)
         l_res.addWidget(self.btn_inject_recon)
 
         layout.addWidget(grp_results)
+
+        # Ściągacz – cała nadmiarowa przestrzeń ląduje na dole, elementy pozostają zwarte
+        layout.addStretch()
+
         scroll.setWidget(content)
         main_layout.addWidget(scroll)
 

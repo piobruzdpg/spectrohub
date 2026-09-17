@@ -8,7 +8,7 @@ import os
 from PySide6.QtWidgets import (
     QMainWindow, QWidget, QDockWidget, QStackedWidget,
     QToolBar, QButtonGroup, QPushButton, QLabel, QFileDialog,
-    QMessageBox, QStatusBar, QSplitter, QVBoxLayout
+    QMessageBox, QStatusBar, QSplitter, QVBoxLayout, QSizePolicy
 )
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QFont, QKeySequence
@@ -66,6 +66,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(DARK_STYLE)
 
         self.cached_dag_state = {}
+        self._node_dialog = None
 
         self._setup_ui()
         i18n.language_changed.connect(self.retranslate_ui)
@@ -126,6 +127,9 @@ class MainWindow(QMainWindow):
 
         self.dock_inspector.setWidget(self.inspector_stack)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_inspector)
+
+        # Zoptymalizowany podział przestrzeni na start
+        self.resizeDocks([self.dock_tree, self.dock_inspector], [260, 360], Qt.Horizontal)
 
         self.status_bar = QStatusBar(self)
         self.setStatusBar(self.status_bar)
@@ -231,14 +235,45 @@ class MainWindow(QMainWindow):
 
         self.ws_group.idClicked.connect(self._on_workspace_selected)
 
+        # Rozciągający się spacer dociągający prawe elementy do prawej krawędzi
         spacer = QWidget()
-        spacer.setSizePolicy(spacer.sizePolicy().horizontalPolicy(), spacer.sizePolicy().verticalPolicy())
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         toolbar.addWidget(spacer)
 
+        # Przycisk Okna Grafów (Potoku Węzłowego)
+        self.btn_node_graph = QPushButton("⑂ Okno grafów")
+        self.btn_node_graph.setToolTip("Otwórz wizualny potok węzłowy (DAG)")
+        self.btn_node_graph.setStyleSheet("""
+            QPushButton {
+                background-color: #3a0ca3; 
+                color: #ffffff; 
+                font-weight: bold; 
+                padding: 5px 12px; 
+                border: 1px solid #7209b7;
+                border-radius: 4px;
+            }
+            QPushButton:hover { background-color: #4361ee; }
+        """)
+        self.btn_node_graph.clicked.connect(self.open_node_pipeline_dialog)
+        toolbar.addWidget(self.btn_node_graph)
+
+        # Przycisk zmiany języka (zawsze skrajnie po prawej)
         self.btn_lang = QPushButton("🇵🇱 PL / 🇬🇧 EN")
         self.btn_lang.setToolTip("Zmień język interfejsu (Language)")
         self.btn_lang.clicked.connect(self._toggle_language)
         toolbar.addWidget(self.btn_lang)
+
+    def open_node_pipeline_dialog(self):
+        """Niemodalne otwarcie okna potoku węzłowego."""
+        if self._node_dialog is None:
+            from gui.node_editor import NodePipelineDialog
+            self._node_dialog = NodePipelineDialog(parent=self)
+            if self.cached_dag_state:
+                self._node_dialog.import_graph_state(self.cached_dag_state)
+
+        self._node_dialog.show()
+        self._node_dialog.raise_()
+        self._node_dialog.activateWindow()
 
     def _on_workspace_selected(self, idx: int):
         self.inspector_stack.setCurrentIndex(idx)
