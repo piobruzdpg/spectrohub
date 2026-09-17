@@ -1,6 +1,7 @@
 """
 gui/node_editor/nodes/node_chemometrics.py
 Węzły chemometrii (SVD/PCA, MCR-ALS, Skalowania) z dedykowanymi dialogami.
+MCR-ALS z obsługą portu widm referencyjnych (Ref) i blokowaniem składowych (Fixed Components).
 """
 
 from typing import List, Dict, Any, Tuple, Optional
@@ -8,7 +9,7 @@ import numpy as np
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QDialogButtonBox,
-    QSpinBox, QCheckBox, QComboBox
+    QSpinBox, QCheckBox, QComboBox, QLabel
 )
 
 from gui.node_editor.base import BaseNode, PortDef
@@ -60,7 +61,7 @@ class McrDecomposeDialog(QDialog):
         self.node = node
         self.step = node.step_data
         self.setWindowTitle("Dekompozycja MCR-ALS / SPEXFA")
-        self.resize(420, 260)
+        self.resize(440, 310)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -75,13 +76,22 @@ class McrDecomposeDialog(QDialog):
         form.addRow("Algorytm dekompozycji:", self.combo_mcr_method)
 
         self.spin_mcr_k = QSpinBox()
-        self.spin_mcr_k.setRange(1, 20)
+        self.spin_mcr_k.setRange(1, 30)
         self.spin_mcr_k.setValue(int(self.step.get('k', 2)))
-        form.addRow("Liczba czystych składników (k):", self.spin_mcr_k)
+        form.addRow("Całkowita liczba składników (k):", self.spin_mcr_k)
 
         self.chk_nnls = QCheckBox("Wymuś nieujemność widm i stężeń (NNLS)")
         self.chk_nnls.setChecked(bool(self.step.get('non_negative', True)))
         form.addRow("Więzy nieujemności:", self.chk_nnls)
+
+        self.chk_fix_ref = QCheckBox("Zablokuj kształt widm referencyjnych (Fixed Component)")
+        self.chk_fix_ref.setToolTip(
+            "Zaznaczone: widma podłączone pod port 'Ref' nie zmieniają się w trakcie iteracji "
+            "(optymalizowane są tylko ich profile stężeń i pozostałe składowe).\n"
+            "Odznaczone: widma z portu 'Ref' służą wyłącznie jako punkt startowy (Initial Guess)."
+        )
+        self.chk_fix_ref.setChecked(bool(self.step.get('fix_ref', True)))
+        form.addRow("Widma z portu Ref:", self.chk_fix_ref)
 
         self.chk_closure = QCheckBox("Domknięcie bilansu (Suma stężeń = 1.0)")
         self.chk_closure.setChecked(bool(self.step.get('closure', False)))
@@ -92,9 +102,13 @@ class McrDecomposeDialog(QDialog):
         form.addRow("Kształt profilu:", self.chk_unimodal)
 
         self.spin_max_iter = QSpinBox()
-        self.spin_max_iter.setRange(20, 2000)
+        self.spin_max_iter.setRange(20, 3000)
         self.spin_max_iter.setValue(int(self.step.get('max_iter', 500)))
         form.addRow("Maksymalna liczba iteracji:", self.spin_max_iter)
+
+        lbl_hint = QLabel("💡 Wskazówka: podłącz widma wzorcowe (np. rozpuszczalnik) do wejścia 'Ref'.")
+        lbl_hint.setStyleSheet("color: #48cae4; font-size: 11px;")
+        form.addRow(lbl_hint)
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self._save_and_accept)
@@ -107,6 +121,7 @@ class McrDecomposeDialog(QDialog):
         self.step['method'] = method
         self.step['k'] = k
         self.step['non_negative'] = bool(self.chk_nnls.isChecked())
+        self.step['fix_ref'] = bool(self.chk_fix_ref.isChecked())
         self.step['closure'] = bool(self.chk_closure.isChecked())
         self.step['unimodal'] = bool(self.chk_unimodal.isChecked())
         self.step['max_iter'] = int(self.spin_max_iter.value())
@@ -145,7 +160,12 @@ class MatrixScalingDialog(QDialog):
     def _save_and_accept(self):
         st = self.combo_scale.currentData()
         self.step['scale_type'] = st
-        names = {'mean_center': "Mean-center", 'autoscaling': "Autoscaling (UV)", 'pareto': "Skalowanie Pareto", 'msc': "Korekcja MSC"}
+        names = {
+            'mean_center': "Mean-center",
+            'autoscaling': "Autoscaling (UV)",
+            'pareto': "Skalowanie Pareto",
+            'msc': "Korekcja MSC"
+        }
         self.step['name'] = f"Skalowanie: {names.get(st, st)}"
         self.accept()
 
@@ -207,8 +227,11 @@ class SvdDenoiseNode(BaseNode):
                 vis = session.get_pipeline_target_spectra()
                 if len(vis) >= 2:
                     ref_mat = np.column_stack([
-                        np.interp(curr_x, s.wavenumbers[::-1] if s.wavenumbers[0] > s.wavenumbers[-1] else s.wavenumbers,
-                                  s.intensities[::-1] if s.wavenumbers[0] > s.wavenumbers[-1] else s.intensities)
+                        np.interp(
+                            curr_x,
+                            s.wavenumbers[::-1] if s.wavenumbers[0] > s.wavenumbers[-1] else s.wavenumbers,
+                            s.intensities[::-1] if s.wavenumbers[0] > s.wavenumbers[-1] else s.intensities
+                        )
                         for s in vis
                     ])
 
@@ -241,12 +264,14 @@ class McrDecomposeNode(BaseNode):
     def default_step_data(cls) -> Dict[str, Any]:
         return {
             "type": cls.node_type, "name": "MCR-ALS (k=2)", "method": "mcr_als",
-            "k": 2, "non_negative": True, "closure": False, "unimodal": False, "max_iter": 500
+            "k": 2, "non_negative": True, "fix_ref": True, "closure": False,
+            "unimodal": False, "max_iter": 500
         }
 
     def get_ports(self) -> List[PortDef]:
         return [
-            PortDef(port_id="in", label="In", is_output=False, color=QColor("#ffb703"), pos_y=90),
+            PortDef(port_id="in", label="In", is_output=False, color=QColor("#ffb703"), pos_y=65),
+            PortDef(port_id="in_ref", label="Ref", is_output=False, color=QColor("#fb8500"), allow_multiple=True, pos_y=105),
             PortDef(port_id="out", label="S^T", is_output=True, color=QColor("#48cae4"), pos_y=44),
             PortDef(port_id="out_conc", label="C", is_output=True, color=QColor("#52b788"), pos_y=68),
             PortDef(port_id="out_recon", label="Rec", is_output=True, color=QColor("#f4a261"), pos_y=94),
@@ -267,6 +292,7 @@ class McrDecomposeNode(BaseNode):
         curr_x, curr_y = data_in
         k = int(self.step_data.get('k', 2))
         method = self.step_data.get('method', 'mcr_als')
+        fix_ref = bool(self.step_data.get('fix_ref', True))
 
         target_mat = curr_y if (curr_y.ndim == 2 and curr_y.shape[1] >= 2) else (
             session.active_series.get_matrix_2d() if session.active_series else None
@@ -276,10 +302,49 @@ class McrDecomposeNode(BaseNode):
             vis = session.get_pipeline_target_spectra()
             if len(vis) >= 2:
                 target_mat = np.column_stack([
-                    np.interp(curr_x, s.wavenumbers[::-1] if s.wavenumbers[0] > s.wavenumbers[-1] else s.wavenumbers,
-                              s.intensities[::-1] if s.wavenumbers[0] > s.wavenumbers[-1] else s.intensities)
+                    np.interp(
+                        curr_x,
+                        s.wavenumbers[::-1] if s.wavenumbers[0] > s.wavenumbers[-1] else s.wavenumbers,
+                        s.intensities[::-1] if s.wavenumbers[0] > s.wavenumbers[-1] else s.intensities
+                    )
                     for s in vis
                 ])
+
+        # 1. Ekstrakcja i interpolacja widm referencyjnych z portu 'in_ref'
+        ref_sources = inputs.get("in_ref_multi", [])
+        ref_source_names = input_names.get("in_ref_multi", [])
+        if not ref_sources and inputs.get("in_ref", (None, None))[0] is not None:
+            ref_sources = [inputs["in_ref"]]
+            ref_source_names = [input_names.get("in_ref", [])]
+
+        ref_cols, ref_names = [], []
+        if ref_sources:
+            for s_idx, (rx, ry) in enumerate(ref_sources):
+                if rx is None or ry is None:
+                    continue
+                rx_s = rx[::-1] if rx[0] > rx[-1] else rx
+                names = ref_source_names[s_idx] if s_idx < len(ref_source_names) else []
+
+                if ry.ndim == 2:
+                    for c in range(ry.shape[1]):
+                        ry_col = ry[::-1, c] if rx[0] > rx[-1] else ry[:, c]
+                        ref_cols.append(np.interp(curr_x, rx_s, ry_col))
+                        ref_names.append(names[c] if c < len(names) else f"Ref_{len(ref_names) + 1}")
+                else:
+                    ry_s = ry[::-1] if rx[0] > rx[-1] else ry
+                    ref_cols.append(np.interp(curr_x, rx_s, ry_s))
+                    ref_names.append(names[0] if names else f"Ref_{len(ref_names) + 1}")
+
+        st_init = None
+        st_fix_indices = None
+        m_ref = len(ref_cols)
+
+        if m_ref > 0:
+            ref_matrix = np.column_stack(ref_cols)
+            st_init = ref_matrix.T  # (m_ref x Liczby falowe)[cite: 13]
+            k = max(k, m_ref)       # Składników nie może być mniej niż podanych wzorców
+            if fix_ref and method == 'mcr_als':
+                st_fix_indices = list(range(m_ref))
 
         if target_mat is not None and target_mat.shape[1] >= 2:
             k_eff = min(k, target_mat.shape[0], target_mat.shape[1])
@@ -292,7 +357,9 @@ class McrDecomposeNode(BaseNode):
                         non_negative=self.step_data.get('non_negative', True),
                         closure=self.step_data.get('closure', False),
                         unimodal=self.step_data.get('unimodal', False),
-                        max_iter=self.step_data.get('max_iter', 500)
+                        max_iter=self.step_data.get('max_iter', 500),
+                        st_init=st_init,
+                        st_fix_indices=st_fix_indices
                     )
                 pure_spec = res['pure_spectra']
                 pure_conc = res['pure_concentrations']
@@ -300,14 +367,27 @@ class McrDecomposeNode(BaseNode):
                 residuals = res['residuals']
                 x_samples = np.arange(1, pure_conc.shape[0] + 1, dtype=np.float64)
 
+                # Eleganckie etykiety dla wyjściowych składowych
+                out_spec_labels = []
+                out_conc_labels = []
+                for i in range(k_eff):
+                    if i < m_ref:
+                        base = ref_names[i]
+                        tag = " (Fixed)" if (fix_ref and method == 'mcr_als') else " (Ref)"
+                        out_spec_labels.append(f"{base}{tag}")
+                        out_conc_labels.append(f"C_{base}")
+                    else:
+                        out_spec_labels.append(f"MCR_Składnik_{i + 1}")
+                        out_conc_labels.append(f"C_Składnik_{i + 1}")
+
                 return {
                     "out": (curr_x.copy(), pure_spec),
                     "out_conc": (x_samples, pure_conc),
                     "out_recon": (curr_x.copy(), dr),
                     "out_res": (curr_x.copy(), residuals)
                 }, {
-                    "out": [f"MCR_Składnik_{i + 1}" for i in range(k_eff)],
-                    "out_conc": [f"Stężenie_C{i + 1}" for i in range(k_eff)],
+                    "out": out_spec_labels,
+                    "out_conc": out_conc_labels,
                     "out_recon": in_names,
                     "out_res": in_names
                 }

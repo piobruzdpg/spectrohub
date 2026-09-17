@@ -8,10 +8,10 @@ Czysty rdzeń numeryczny (NumPy / SciPy / scikit-learn / pyMCR / TensorLy) — z
 import numpy as np
 from numpy.linalg import svd, pinv, det
 from scipy.stats import f as f_dist
-from typing import Dict, Any, List, Tuple, Optional
 from pymcr.mcr import McrAR
 from pymcr.regressors import NNLS, OLS
-from pymcr.constraints import Constraint, ConstraintNorm
+from pymcr.constraints import Constraint, ConstraintNorm, ConstraintNonneg
+from typing import Dict, Any, List, Optional, Tuple
 
 # Opcjonalne biblioteki
 try:
@@ -488,6 +488,7 @@ def run_mcr_als(d: np.ndarray, rank: int, non_negative: bool = True,
                 st_fix_indices: Optional[List[int]] = None) -> Dict[str, Any]:
     """
     MCR-ALS ze szczegółową diagnostyką GoF: Lack of Fit (%LOF) oraz R².
+    Obsługuje twarde więzy nieujemności oraz widma referencyjne (st_init, st_fix_indices).
     d: Macierz (Liczby falowe x Próbki).
     """
     D_samples = d.T  # (Próbki x Liczby falowe)
@@ -497,35 +498,55 @@ def run_mcr_als(d: np.ndarray, rank: int, non_negative: bool = True,
     st_regr = NNLS() if non_negative else OLS()
 
     c_constraints = []
+    st_constraints = []
+
+    # 1. Twarde więzy nieujemności na oba kanały
+    if non_negative:
+        c_constraints.append(ConstraintNonneg())
+        st_constraints.append(ConstraintNonneg())
+
     if norm:
-        c_constraints.append(ConstraintNorm())
+        st_constraints.append(ConstraintNorm())
     if closure:
         c_constraints.append(ConstraintClosure(axis=1))
     if unimodal:
         c_constraints.append(ConstraintUnimodal())
 
-    # Inicjalizacja
-    if st_init is not None:
-        final_st_init = st_init.copy()
-    else:
-        final_st_init = np.random.rand(rank, n_features)
-        if use_spexfa_init:
-            try:
-                spex_res = run_spexfa(d, rank)
-                final_st_init = spex_res['pure_spectra'].T
-            except Exception:
-                pass
+    # 2. Konstrukcja macierzy startowej ST_init (rank x Liczby falowe)
+    final_st_init = np.random.rand(rank, n_features)
+    if use_spexfa_init:
+        try:
+            spex_res = run_spexfa(d, rank)
+            final_st_init = spex_res['pure_spectra'].T.copy()
+        except Exception:
+            pass
 
+    # Jeśli użytkownik przekazał znane widma referencyjne (1 lub więcej)
+    if st_init is not None:
+        st_arr = np.asarray(st_init, dtype=np.float64)
+        if st_arr.ndim == 1:
+            st_arr = st_arr[np.newaxis, :]
+        m_ref = min(st_arr.shape[0], rank)
+        final_st_init[:m_ref, :] = st_arr[:m_ref, :]
+
+    if non_negative:
+        final_st_init = np.clip(final_st_init, 0.0, None)
+
+    # 3. Dopasowanie pyMCR z opcjonalnym blokowaniem kształtu widm
     mcr = McrAR(max_iter=max_iter, tol_err_change=tol_err_change,
                 c_regr=c_regr, st_regr=st_regr,
-                c_constraints=c_constraints, st_constraints=[])
+                c_constraints=c_constraints, st_constraints=st_constraints)
 
     mcr.fit(D_samples, ST=final_st_init, st_fix=st_fix_indices)
 
     C_opt = mcr.C_opt_          # (Próbki x rank)
     ST_opt = mcr.ST_opt_        # (rank x Liczby falowe)
 
-    # Rekonstrukcja i GoF
+    if non_negative:
+        C_opt = np.clip(C_opt, 0.0, None)
+        ST_opt = np.clip(ST_opt, 0.0, None)
+
+    # 4. Rekonstrukcja i statystyki jakości
     D_recon = C_opt @ ST_opt
     residuals = D_samples - D_recon
 
