@@ -3,6 +3,7 @@ gui/canvas.py
 Wysokowydajny dwupanelowy wykres Matplotlib (Góra: Widma i Serie 2D, Dół: Residua/Kinetyka).
 Podwójny klik LPM = Reset zoomu, PPM = Menu kontekstowe, drag LPM = Zoom na obu panelach.
 Inteligentna obsługa tabel profili i raportów parametrów (HDO Fit).
+Deterministyczna paleta barw z pełną synchronizacją z próbnikiem w drzewie projektu.
 """
 
 import logging
@@ -26,6 +27,22 @@ from core.models import SpectrumData, SpectralSeries, DataTable
 from core.i18n import tr
 
 logger = logging.getLogger("SpectroHub")
+
+# Laboratoryjna paleta wysokiego kontrastu dopasowana do ciemnego tła SpectroHub
+SPECTRAL_PALETTE = [
+    "#4cc9f0",  # 1. Jasny cyjan
+    "#f72585",  # 2. Karmazyn / neon magenta
+    "#4ade80",  # 3. Jasna mięta / zieleń
+    "#fb8500",  # 4. Ciepły pomarańcz
+    "#d946ef",  # 5. Fuksja / jasny fiolet
+    "#ffb703",  # 6. Bursztynowy złoty
+    "#06d6a0",  # 7. Szmaragdowy turkus
+    "#ff4d6d",  # 8. Koralowa czerwień
+    "#70d6ff",  # 9. Błękit nieba
+    "#ffd166",  # 10. Ciepły żółty
+    "#a78bfa",  # 11. Lawendowy
+    "#80ed99",  # 12. Jasna limonka
+]
 
 TRACE_PALETTE = ['#ee6c4d', '#00e5ff', '#2a9d8f', '#f4a261', '#e0aaff']
 
@@ -84,7 +101,7 @@ class SpectroCanvas(QWidget):
 
         session.active_window_changed.connect(self.redraw_all)
         session.window_spectrum_added.connect(self.redraw_all)
-        session.window_spectra_batch_added.connect(self.redraw_all)  # <---
+        session.window_spectra_batch_added.connect(self.redraw_all)
         session.window_spectrum_removed.connect(self.redraw_all)
         session.window_visibility_changed.connect(self.redraw_all)
         session.context_changed.connect(self.redraw_all)
@@ -163,18 +180,16 @@ class SpectroCanvas(QWidget):
 
         min_x, max_x = float('inf'), float('-inf')
         min_y, max_y = float('inf'), float('-inf')
-        palette = ['#ee6c4d', '#98c1d9', '#3d5a80', '#2a9d8f', '#e76f51', '#f4a261']
 
         n_spectra = len(visible_spectra)
-        if n_spectra > 15:
+        if n_spectra > 25:
+            # Akceleracja dla dużych zestawów danych
             segments = []
             colors = []
-            cmap = matplotlib.colormaps['viridis']
 
-            # Inteligentny kompromis renderowania: decymacja linii dla dużych zbiorów
             if n_spectra > 200:
                 stride = 4
-            elif n_spectra > 50:
+            elif n_spectra > 60:
                 stride = 2
             else:
                 stride = 1
@@ -183,36 +198,49 @@ class SpectroCanvas(QWidget):
             if (n_spectra - 1) not in indices_to_draw:
                 indices_to_draw.append(n_spectra - 1)
 
+            use_colormap = n_spectra > 50
+            cmap = matplotlib.colormaps['viridis']
+
             for idx in indices_to_draw:
                 spec = visible_spectra[idx]
                 x = spec.wavenumbers
                 y = spec.intensities
                 segments.append(np.column_stack([x, y]))
-                colors.append(cmap(idx / max(1, n_spectra - 1)))
+
+                if use_colormap:
+                    colors.append(cmap(idx / max(1, n_spectra - 1)))
+                else:
+                    spec_color = spec.metadata.get("custom_color") or spec.metadata.get("display_color") or SPECTRAL_PALETTE[idx % len(SPECTRAL_PALETTE)]
+                    colors.append(spec_color)
+
                 min_x = min(min_x, np.min(x))
                 max_x = max(max_x, np.max(x))
                 min_y = min(min_y, np.min(y))
                 max_y = max(max_y, np.max(y))
 
-            lc = LineCollection(segments, colors=colors, linewidths=0.9, alpha=0.65)
+            lc = LineCollection(segments, colors=colors, linewidths=1.0, alpha=0.75)
             self.ax_main.add_collection(lc)
 
             if active_spec:
+                act_color = active_spec.metadata.get("custom_color") or active_spec.metadata.get("display_color") or "#ffffff"
                 self.ax_main.plot(active_spec.wavenumbers, active_spec.intensities,
-                                  color='#ffffff', lw=1.8, zorder=5, label=f"Aktywne: {active_spec.name}")
+                                  color=act_color, lw=2.4, zorder=5, label=f"Aktywne: {active_spec.name}")
 
         else:
             for idx, spec in enumerate(visible_spectra):
                 is_active = (active_spec and spec.name == active_spec.name)
-                color = "#ffffff" if is_active else palette[idx % len(palette)]
-                lw = 1.6 if is_active else 1.0
+                spec_color = spec.metadata.get("custom_color") or spec.metadata.get("display_color") or SPECTRAL_PALETTE[idx % len(SPECTRAL_PALETTE)]
+
+                # Zachowujemy właściwy kolor widma z wyraźnym wyróżnieniem aktywności grubością i zorderem
+                lw = 2.2 if is_active else 1.2
                 alpha = 1.0 if is_active else 0.75
+                zorder = 5.0 if is_active else 2.5
 
                 is_dft = getattr(spec, 'file_type', '') in ['gaussian', 'orca', 'dft'] or hasattr(spec, 'stick_freqs')
                 ls = "--" if is_dft else "-"
 
                 self.ax_main.plot(spec.wavenumbers, spec.intensities, label=spec.name,
-                                  color=color, lw=lw, ls=ls, alpha=alpha)
+                                  color=spec_color, lw=lw, ls=ls, alpha=alpha, zorder=zorder)
 
                 min_x = min(min_x, np.min(spec.wavenumbers))
                 max_x = max(max_x, np.max(spec.wavenumbers))
@@ -225,7 +253,7 @@ class SpectroCanvas(QWidget):
                     m_y = np.max(spec.intensities) if len(spec.intensities) > 0 else 1.0
                     m_i = np.max(spec.stick_intens) if len(spec.stick_intens) > 0 else 1.0
                     h = (spec.stick_intens / (m_i if m_i > 0 else 1.0)) * m_y * 0.95
-                    self.ax_main.vlines(f_scaled, 0, h, color=color, alpha=0.75, lw=1.2, ls='-', zorder=2.8)
+                    self.ax_main.vlines(f_scaled, 0, h, color=spec_color, alpha=0.75, lw=1.2, ls='-', zorder=2.8)
 
         series_colormaps = ['viridis', 'plasma', 'cividis', 'inferno']
         for s_idx, s_obj in enumerate(visible_series):
@@ -263,7 +291,7 @@ class SpectroCanvas(QWidget):
             y_margin = max((max_y - min_y) * 0.08, 0.01)
             self.ax_main.set_ylim(min_y - y_margin, max_y + y_margin)
 
-        if n_spectra <= 10 and not visible_series:
+        if n_spectra <= 12 and not visible_series:
             handles, labels = self.ax_main.get_legend_handles_labels()
             if handles:
                 self.ax_main.legend(loc='upper right', facecolor='#2b2b36', edgecolor='#4a4a5a',
@@ -368,7 +396,6 @@ class SpectroCanvas(QWidget):
             self.ax_sub.plot(x_vals, trace['profile'], 'o-', color=trace['color'],
                              markersize=3.5, lw=1.4, label=lbl)
 
-        # Właściwa, czytelna etykieta osi dolnej
         self.ax_sub.set_xlabel(x_label, color='#dcdcdc', fontsize=10)
         self.ax_sub.set_ylabel("Absorbancja", color='#dcdcdc', fontsize=9)
         self.ax_sub.grid(True, linestyle='--', alpha=0.3, color='#888888')
@@ -378,11 +405,9 @@ class SpectroCanvas(QWidget):
         self.ax_sub.set_xlim(x_min - dx, x_max + dx)
 
         if is_time_series:
-            # 1. Dolna oś: rzeczywisty czas w jednostkach fizycznych
             self.ax_sub.xaxis.set_major_locator(ticker.MaxNLocator(nbins=8))
             self.ax_sub.xaxis.set_major_formatter(ticker.ScalarFormatter(useOffset=False))
 
-            # 2. Górna oś pomocnicza: dyskretne indeksy widm w serii bez zbędnego napisu tekstowego
             self.ax_sub_top.set_visible(True)
             self.ax_sub_top.set_xlim(self.ax_sub.get_xlim())
 
@@ -630,7 +655,6 @@ class SpectroCanvas(QWidget):
         if target_ax == self.ax_sub:
             span_x = abs(self.ax_sub.get_xlim()[1] - self.ax_sub.get_xlim()[0])
             span_y = abs(self.ax_sub.get_ylim()[1] - self.ax_sub.get_ylim()[0])
-            # Inteligentny próg zoomu reagujący nawet na małe sygnały absorbancji (np. ΔA ~ 0.001)
             if dx > (span_x * 0.02) or dy > (span_y * 0.02):
                 self.ax_sub.set_xlim(min(x0, x1), max(x0, x1))
                 self.ax_sub.set_ylim(min(y0, y1), max(y0, y1))

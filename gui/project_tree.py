@@ -1,19 +1,28 @@
 """
 gui/project_tree.py
-Drzewo obiektów projektu z obsługą folderów okien roboczych, tabel danych,
-podglądu tabelarycznego (TableViewerDialog), Drag & Drop oraz zaawansowanym eksportem.
+Drzewo obiektów projektu SpectroHub.
+Obsługuje:
+- Dwukolumnowy widok z klikalnym próbnikiem barw (OPUS Style)
+- Bogate toolpity spektroskopowe z parametrami fizykochemicznymi
+- Skróty klawiszowe (Spacja = widoczność, Del = usuwanie, F2 = zmiana nazwy)
+- Naturalne sortowanie alfanumeryczne serii (1, 2, ..., 10 zamiast 1, 10, 2)
+- Narzędzia szybkiego przepływu: wysyłanie do nowego okna, duplikacja okna, selekcja wg wzorca
 """
 
 import os
+import re
+import fnmatch
 import logging
 from typing import List, Tuple, Optional
 from PySide6.QtCore import Qt, QThreadPool, QRunnable, Slot
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen
 from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QMenu, QAbstractItemView,
     QInputDialog, QFileDialog, QMessageBox, QApplication,
     QDialog, QVBoxLayout, QHBoxLayout, QTableWidget, QTableWidgetItem,
-    QPushButton, QHeaderView, QLabel
+    QPushButton, QHeaderView, QLabel, QColorDialog
 )
+import numpy as np
 
 from core.session import session
 from core.models import GaussianData, SpectrumData, WorkspaceWindow, DataTable
@@ -23,9 +32,85 @@ from core.i18n import tr
 
 logger = logging.getLogger("SpectroHub")
 
+# Laboratoryjna paleta wysokiego kontrastu dopasowana do ciemnego motywu
+SPECTRAL_PALETTE = [
+    "#4cc9f0",  # 1. Jasny cyjan
+    "#f72585",  # 2. Karmazyn / magenta
+    "#4ade80",  # 3. Mięta / zieleń
+    "#fb8500",  # 4. Pomarańcz
+    "#d946ef",  # 5. Fuksja
+    "#ffb703",  # 6. Bursztynowy złoty
+    "#06d6a0",  # 7. Turkus
+    "#ff4d6d",  # 8. Koralowa czerwień
+    "#70d6ff",  # 9. Błękit
+    "#ffd166",  # 10. Żółty
+    "#a78bfa",  # 11. Lawenda
+    "#80ed99",  # 12. Limonka
+]
+
+
+def natural_sort_key(s: str) -> list:
+    """Klucz sortowania naturalnego (np. widmo_2 przed widmo_10)."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
+
+
+def make_color_swatch_icon(color_hex: str) -> QIcon:
+    """Tworzy zaokrąglony kafelek koloru z dyskretną ramką dla kolumny 1 drzewka."""
+    pixmap = QPixmap(14, 14)
+    pixmap.fill(Qt.transparent)
+
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setBrush(QColor(color_hex))
+    painter.setPen(QPen(QColor("#666677"), 1))
+    painter.drawRoundedRect(1, 1, 12, 12, 3, 3)
+    painter.end()
+
+    return QIcon(pixmap)
+
+
+def make_spectrum_tooltip(spec: SpectrumData) -> str:
+    """Generuje bogaty tooltip z kluczowymi parametrami spektroskopowymi widma."""
+    try:
+        n_pts = len(spec.wavenumbers)
+        x_min = float(np.min(spec.wavenumbers))
+        x_max = float(np.max(spec.wavenumbers))
+        y_min = float(np.min(spec.intensities))
+        y_max = float(np.max(spec.intensities))
+        max_idx = int(np.argmax(spec.intensities))
+        peak_pos = float(spec.wavenumbers[max_idx])
+
+        time_info = spec.time_str if getattr(spec, 'time_str', None) and spec.time_str != "00:00:00" else ""
+        time_row = f"<b>Czas rejestracji:</b> {time_info}<br>" if time_info else ""
+
+        return (
+            f"<div style='font-family: sans-serif; font-size: 11px; line-height: 1.3;'>"
+            f"<b style='color: #4cc9f0; font-size: 12px;'>{spec.name}</b><br>"
+            f"<hr style='border: 0; border-top: 1px solid #4a4a5a; margin: 4px 0;'>"
+            f"{time_row}"
+            f"<b>Liczba punktów:</b> {n_pts}<br>"
+            f"<b>Zakres liczb falowych:</b> {x_max:.1f} — {x_min:.1f} cm⁻¹<br>"
+            f"<b>Pik główny:</b> A = {y_max:.4f} (@ {peak_pos:.1f} cm⁻¹)<br>"
+            f"<b>Zakres absorbancji:</b> [{y_min:.4f}, {y_max:.4f}]"
+            f"</div>"
+        )
+    except Exception:
+        return spec.name
+
+
+def resolve_spectrum_color(spec: SpectrumData, index_in_group: int) -> str:
+    """Zwraca zdefiniowany custom_color lub deterministyczny kolor z palety i utrwala go w metadanych."""
+    color = spec.metadata.get("custom_color")
+    if not color:
+        color = spec.metadata.get("display_color")
+    if not color:
+        color = SPECTRAL_PALETTE[index_in_group % len(SPECTRAL_PALETTE)]
+    spec.metadata["display_color"] = color
+    return color
+
 
 class TableViewerDialog(QDialog):
-    """Eleganckie okno inspekcji i kopiowania danych tabelarycznych (np. parametry HDO Fit / kinetyka)."""
+    """Eleganckie okno inspekcji i kopiowania danych tabelarycznych."""
 
     def __init__(self, table: DataTable, parent=None):
         super().__init__(parent)
@@ -125,9 +210,10 @@ class TableViewerDialog(QDialog):
 class FileImportWorker(QRunnable):
     """Zadanie w tle: importuje pliki do magazynu danych w jednym strzale."""
 
-    def __init__(self, file_paths: list):
+    def __init__(self, file_paths: list, target_atm: bool = False):
         super().__init__()
         self.file_paths = file_paths
+        self.target_atm = target_atm
 
     @Slot()
     def run(self):
@@ -143,15 +229,24 @@ class FileImportWorker(QRunnable):
                 logger.error(f"Nie udało się zaimportować pliku {path}: {e}")
 
         if all_loaded:
-            session.add_spectra_batch(all_loaded)
+            if self.target_atm:
+                session.add_atm_spectra_batch(all_loaded)
+            else:
+                session.add_spectra_batch(all_loaded)
 
 
 class ProjectTreeWidget(QTreeWidget):
-    """Eksplorator z podziałem na Gałęzie Magazynu oraz Foldery i Okna Robocze."""
+    """Eksplorator z dwukolumnowym widokiem, próbnikiem barw (OPUS Style) oraz pełną kontrolą selekcji."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.setColumnCount(2)
         self.setHeaderHidden(True)
+        self.header().setStretchLastSection(False)
+        self.header().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.header().setSectionResizeMode(1, QHeaderView.Fixed)
+        self.setColumnWidth(1, 28)
+
         self.setAcceptDrops(True)
         self.setDragDropMode(QTreeWidget.DragDrop)
         self.setDefaultDropAction(Qt.CopyAction)
@@ -166,14 +261,14 @@ class ProjectTreeWidget(QTreeWidget):
 
     def _build_root_structure(self):
         # 1. SEKCYJNY KORZEŃ: MAGAZYN DANYCH
-        self.root_storage = QTreeWidgetItem(self, ["📦 MAGAZYN DANYCH (Referencja)"])
+        self.root_storage = QTreeWidgetItem(self, ["📦 MAGAZYN DANYCH (Referencja)", ""])
         self.root_storage.setExpanded(True)
-        self.root_storage.setData(0, Qt.UserRole + 1, "section_header")
+        self.root_storage.setData(0, Qt.UserRole + 1, "section_header_storage")
 
-        self.root_exp = QTreeWidgetItem(self.root_storage, [tr("project_tree.group_exp", "Pomiary Eksperymentalne")])
-        self.root_atm = QTreeWidgetItem(self.root_storage, [tr("project_tree.group_atm", "☁️ Wzorce Atmosfery (ATM / CO₂)")])
-        self.root_series = QTreeWidgetItem(self.root_storage, [tr("project_tree.group_series", "Serie Ewolucyjne (2D)")])
-        self.root_dft = QTreeWidgetItem(self.root_storage, [tr("project_tree.group_dft", "Obliczenia Kwantowe (DFT)")])
+        self.root_exp = QTreeWidgetItem(self.root_storage, [tr("project_tree.group_exp", "Pomiary Eksperymentalne"), ""])
+        self.root_atm = QTreeWidgetItem(self.root_storage, [tr("project_tree.group_atm", "☁️ Wzorce Atmosfery (ATM / CO₂)"), ""])
+        self.root_series = QTreeWidgetItem(self.root_storage, [tr("project_tree.group_series", "Serie Ewolucyjne (2D)"), ""])
+        self.root_dft = QTreeWidgetItem(self.root_storage, [tr("project_tree.group_dft", "Obliczenia Kwantowe (DFT)"), ""])
 
         self.root_exp.setData(0, Qt.UserRole + 1, "category_exp")
         self.root_atm.setData(0, Qt.UserRole + 1, "category_atm")
@@ -191,7 +286,7 @@ class ProjectTreeWidget(QTreeWidget):
             sub.setCheckState(0, Qt.CheckState.Checked)
 
         # 2. SEKCYJNY KORZEŃ: PRZESTRZENIE ROBOCZE
-        self.root_workspaces = QTreeWidgetItem(self, ["🖥️ OKNA WYKRESÓW / ROBOCZE"])
+        self.root_workspaces = QTreeWidgetItem(self, ["🖥️ OKNA WYKRESÓW / ROBOCZE", ""])
         self.root_workspaces.setExpanded(True)
         self.root_workspaces.setData(0, Qt.UserRole + 1, "section_header")
 
@@ -207,7 +302,7 @@ class ProjectTreeWidget(QTreeWidget):
     def _connect_signals(self):
         self.itemChanged.connect(self._on_item_changed)
         self.currentItemChanged.connect(self._on_selection_changed)
-        self.itemClicked.connect(self._on_selection_changed)
+        self.itemClicked.connect(self._on_item_clicked)
         self.itemDoubleClicked.connect(self._on_item_double_clicked)
         self.customContextMenuRequested.connect(self._show_context_menu)
 
@@ -232,13 +327,102 @@ class ProjectTreeWidget(QTreeWidget):
         session.window_added.connect(self._on_window_added)
         session.window_removed.connect(self._on_window_removed)
         session.window_spectrum_added.connect(self._on_window_spectrum_added)
-        session.window_spectra_batch_added.connect(self._on_window_spectra_batch_added)  # <---
+        session.window_spectra_batch_added.connect(self._on_window_spectra_batch_added)
         session.window_spectrum_removed.connect(self._on_window_spectrum_removed)
 
         session.table_added.connect(self._on_table_added)
         session.table_removed.connect(self._on_table_removed)
         session.table_renamed.connect(self._on_table_renamed)
         session.table_folder_changed.connect(self._on_table_folder_changed)
+
+    # --- SKRÓTY KLAWISZOWE ---
+    def keyPressEvent(self, event):
+        """Obsługa laboratoryjnych skrótów klawiszowych: Spacja, Delete, F2."""
+        if event.key() == Qt.Key_Space:
+            selected = self.selectedItems()
+            checkable = [it for it in selected if it.flags() & Qt.ItemFlag.ItemIsUserCheckable]
+            if checkable:
+                all_checked = all(it.checkState(0) == Qt.CheckState.Checked for it in checkable)
+                target = Qt.CheckState.Unchecked if all_checked else Qt.CheckState.Checked
+                self._set_selected_items_check_state(checkable, target)
+                event.accept()
+                return
+
+        elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
+            self._handle_delete_key()
+            event.accept()
+            return
+
+        elif event.key() == Qt.Key_F2:
+            self._handle_f2_rename()
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
+
+    def _handle_delete_key(self):
+        selected = self.selectedItems()
+        if not selected:
+            return
+
+        first = selected[0]
+        itype = first.data(0, Qt.UserRole + 1)
+        name = first.data(0, Qt.UserRole)
+
+        # 1. Usuwanie widm z Okna Roboczego (błyskawiczne, bez pytania)
+        if itype == "window_spectrum":
+            win_id = first.data(0, Qt.UserRole + 2)
+            names = [it.data(0, Qt.UserRole) for it in selected if it.data(0, Qt.UserRole + 1) == "window_spectrum"]
+            for n in names:
+                session.remove_spectrum_from_window(win_id, n)
+            return
+
+        # 2. Usuwanie okna roboczego
+        if itype == "workspace_window":
+            if QMessageBox.question(self, "Usuń okno", f"Czy na pewno usunąć okno '{name}'?",
+                                    QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+                session.remove_window(name)
+            return
+
+        # 3. Usuwanie folderu
+        if itype == "window_folder":
+            reply = QMessageBox.question(self, "Usuń folder", "Czy zachować okna robocze z tego folderu?",
+                                         QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+            if reply == QMessageBox.Yes:
+                session.remove_folder(name, delete_windows=False)
+            elif reply == QMessageBox.No:
+                session.remove_folder(name, delete_windows=True)
+            return
+
+        # 4. Usuwanie tabeli
+        if itype == "data_table":
+            if QMessageBox.question(self, "Usuń tabelę", f"Czy na pewno usunąć tabelę '{name}'?",
+                                    QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+                session.remove_table(name)
+            return
+
+        # 5. Bezpieczne usuwanie widm z Magazynu Referencyjnego
+        if itype in ["spectrum", "dft", "atm"]:
+            names = [it.data(0, Qt.UserRole) for it in selected if it.data(0, Qt.UserRole + 1) in ["spectrum", "dft", "atm"]]
+            msg = f"Czy na pewno trwale usunąć {len(names)} widm z Magazynu Danych?" if len(names) > 1 else f"Czy na pewno trwale usunąć '{names[0]}' z Magazynu Danych?"
+            if QMessageBox.question(self, "Usuń z magazynu", msg, QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes:
+                for n in names:
+                    session.remove_spectrum(n)
+
+    def _handle_f2_rename(self):
+        item = self.currentItem()
+        if not item:
+            return
+
+        itype = item.data(0, Qt.UserRole + 1)
+        name = item.data(0, Qt.UserRole)
+
+        if itype == "workspace_window":
+            self._prompt_rename_window(name)
+        elif itype == "window_folder":
+            self._prompt_rename_folder(name)
+        elif itype == "data_table":
+            self._prompt_rename_table(name)
 
     def _on_session_cleared(self):
         self._is_internal_update = True
@@ -257,6 +441,52 @@ class ProjectTreeWidget(QTreeWidget):
             if tbl:
                 dlg = TableViewerDialog(tbl, parent=self)
                 dlg.exec()
+
+    def _on_item_clicked(self, item: QTreeWidgetItem, column: int):
+        """Kliknięcie w próbnik w kolumnie 1 otwiera paletę kolorów."""
+        if not item:
+            return
+
+        if column == 1:
+            itype = item.data(0, Qt.UserRole + 1)
+            iname = item.data(0, Qt.UserRole)
+            if itype in ["spectrum", "dft", "atm", "window_spectrum"]:
+                self._open_color_picker_for_item(item, iname, itype)
+                return
+
+        self._on_selection_changed(item)
+
+    def _open_color_picker_for_item(self, item: QTreeWidgetItem, name: str, itype: str):
+        """Otwiera okno wyboru koloru i odświeża widok na żywo."""
+        if itype == "window_spectrum":
+            win_id = item.data(0, Qt.UserRole + 2)
+            win = session.windows.get(win_id)
+            spec = win.spectra.get(name) if win else None
+        else:
+            spec = session.get_spectrum(name)
+
+        if not spec:
+            return
+
+        curr_hex = spec.metadata.get("custom_color", spec.metadata.get("display_color", "#4cc9f0"))
+        chosen_color = QColorDialog.getColor(QColor(curr_hex), self, f"Wybierz kolor widma: {name}")
+
+        if chosen_color.isValid():
+            new_hex = chosen_color.name()
+            spec.metadata["custom_color"] = new_hex
+            spec.metadata["display_color"] = new_hex
+
+            item.setIcon(1, make_color_swatch_icon(new_hex))
+
+            if itype == "window_spectrum":
+                win_id = item.data(0, Qt.UserRole + 2)
+                session.window_visibility_changed.emit(win_id, name)
+            else:
+                session.visibility_changed.emit(name)
+
+            main_win = self.window()
+            if hasattr(main_win, "canvas_2d"):
+                main_win.canvas_2d.redraw_all()
 
     # --- ZARZĄDZANIE FOLDERAMI I OKNAMI W DRZEWIE ---
     def _find_folder_item(self, folder_id: str, parent: Optional[QTreeWidgetItem] = None) -> Optional[QTreeWidgetItem]:
@@ -294,7 +524,7 @@ class ProjectTreeWidget(QTreeWidget):
             if found_p:
                 parent_item = found_p
 
-        folder_item = QTreeWidgetItem(parent_item, [f"📁 {name}"])
+        folder_item = QTreeWidgetItem(parent_item, [f"📁 {name}", ""])
         folder_item.setFlags(
             Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable
@@ -318,8 +548,7 @@ class ProjectTreeWidget(QTreeWidget):
             if found_folder:
                 parent_item = found_folder
 
-        # Nowa, czytelna ikonka okna roboczego: 🖼️
-        win_item = QTreeWidgetItem(parent_item, [f"🖼️ {name}"])
+        win_item = QTreeWidgetItem(parent_item, [f"🖼️ {name}", ""])
         win_item.setFlags(
             Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable
@@ -384,7 +613,10 @@ class ProjectTreeWidget(QTreeWidget):
     def _on_window_spectrum_added(self, window_id: str, spec):
         win_node = self._find_window_item(window_id)
         if win_node:
-            item = QTreeWidgetItem(win_node, [f"📈 {spec.name}"])
+            idx = win_node.childCount()
+            spec_color = resolve_spectrum_color(spec, idx)
+
+            item = QTreeWidgetItem(win_node, [f"📈 {spec.name}", ""])
             item.setFlags(
                 Qt.ItemFlag.ItemIsEnabled
                 | Qt.ItemFlag.ItemIsSelectable
@@ -395,6 +627,11 @@ class ProjectTreeWidget(QTreeWidget):
             item.setData(0, Qt.UserRole, spec.name)
             item.setData(0, Qt.UserRole + 1, "window_spectrum")
             item.setData(0, Qt.UserRole + 2, window_id)
+
+            item.setIcon(1, make_color_swatch_icon(spec_color))
+            item.setToolTip(1, "Kliknij, aby zmienić kolor widma (OPUS style)")
+            item.setToolTip(0, make_spectrum_tooltip(spec))
+
             win_node.setExpanded(True)
             self._refresh_parent_indicator(win_node)
 
@@ -416,8 +653,16 @@ class ProjectTreeWidget(QTreeWidget):
         self._is_internal_update = True
         self.setUpdatesEnabled(False)
         items_to_add = []
-        for spec in spectra_list:
-            item = QTreeWidgetItem([f"📈 {spec.name}"])
+        base_idx = win_node.childCount()
+
+        # Naturalne sortowanie numeryczne
+        sorted_specs = sorted(spectra_list, key=lambda s: natural_sort_key(s.name))
+
+        for i, spec in enumerate(sorted_specs):
+            idx = base_idx + i
+            spec_color = resolve_spectrum_color(spec, idx)
+
+            item = QTreeWidgetItem([f"📈 {spec.name}", ""])
             item.setFlags(
                 Qt.ItemFlag.ItemIsEnabled
                 | Qt.ItemFlag.ItemIsSelectable
@@ -428,6 +673,11 @@ class ProjectTreeWidget(QTreeWidget):
             item.setData(0, Qt.UserRole, spec.name)
             item.setData(0, Qt.UserRole + 1, "window_spectrum")
             item.setData(0, Qt.UserRole + 2, window_id)
+
+            item.setIcon(1, make_color_swatch_icon(spec_color))
+            item.setToolTip(1, "Kliknij, aby zmienić kolor widma (OPUS style)")
+            item.setToolTip(0, make_spectrum_tooltip(spec))
+
             items_to_add.append(item)
 
         win_node.addChildren(items_to_add)
@@ -435,7 +685,6 @@ class ProjectTreeWidget(QTreeWidget):
         self._refresh_parent_indicator(win_node)
         self.setUpdatesEnabled(True)
         self._is_internal_update = False
-
 
     # --- DRAG & DROP ---
     def dragEnterEvent(self, event):
@@ -555,13 +804,17 @@ class ProjectTreeWidget(QTreeWidget):
             self._create_folder_item(f_id, folder.name, folder.parent_folder_id)
         for win_id, win in session.windows.items():
             win_node = self._create_window_item(win_id, win.name, win.folder_id)
-            for s_name, spec in win.spectra.items():
-                item = QTreeWidgetItem(win_node, [f"📈 {spec.name}"])
-                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable)
+            for s_idx, (s_name, spec) in enumerate(win.spectra.items()):
+                spec_color = resolve_spectrum_color(spec, s_idx)
+                item = QTreeWidgetItem(win_node, [f"📈 {spec.name}", ""])
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsDragEnabled)
                 item.setCheckState(0, Qt.CheckState.Checked if win.visibility.get(s_name, True) else Qt.CheckState.Unchecked)
                 item.setData(0, Qt.UserRole, spec.name)
                 item.setData(0, Qt.UserRole + 1, "window_spectrum")
                 item.setData(0, Qt.UserRole + 2, win_id)
+                item.setIcon(1, make_color_swatch_icon(spec_color))
+                item.setToolTip(1, "Kliknij, aby zmienić kolor widma (OPUS style)")
+                item.setToolTip(0, make_spectrum_tooltip(spec))
 
     # --- SYNCHRONIZACJA ELEMENTÓW MAGAZYNU ---
     def _create_spectrum_item(self, spectrum, target_root=None, item_type=None) -> tuple[QTreeWidgetItem, QTreeWidgetItem]:
@@ -581,7 +834,7 @@ class ProjectTreeWidget(QTreeWidget):
         else:
             icon = "☁️" if item_type == "atm" else ("⚛️" if item_type == "dft" else "📈")
 
-        item = QTreeWidgetItem(target_root, [f"{icon} {spectrum.name}"])
+        item = QTreeWidgetItem(target_root, [f"{icon} {spectrum.name}", ""])
         item.setFlags(
             Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable
@@ -591,6 +844,14 @@ class ProjectTreeWidget(QTreeWidget):
         item.setCheckState(0, Qt.CheckState.Checked)
         item.setData(0, Qt.UserRole, spectrum.name)
         item.setData(0, Qt.UserRole + 1, item_type)
+
+        idx = target_root.childCount() - 1
+        spec_color = resolve_spectrum_color(spectrum, idx)
+
+        item.setIcon(1, make_color_swatch_icon(spec_color))
+        item.setToolTip(1, "Kliknij, aby zmienić kolor widma (OPUS style)")
+        item.setToolTip(0, make_spectrum_tooltip(spectrum))
+
         return item, target_root
 
     def _on_spectrum_added(self, spectrum):
@@ -603,7 +864,11 @@ class ProjectTreeWidget(QTreeWidget):
         self._is_internal_update = True
         self.setUpdatesEnabled(False)
         roots_affected = set()
-        for spec in spectra_list:
+
+        # Naturalne sortowanie numeryczne
+        sorted_specs = sorted(spectra_list, key=lambda s: natural_sort_key(s.name))
+
+        for spec in sorted_specs:
             _, target_root = self._create_spectrum_item(spec)
             roots_affected.add(target_root)
         for root in roots_affected:
@@ -620,7 +885,8 @@ class ProjectTreeWidget(QTreeWidget):
     def _on_atm_spectra_batch_added(self, spectra_list: list):
         self._is_internal_update = True
         self.setUpdatesEnabled(False)
-        for spec in spectra_list:
+        sorted_specs = sorted(spectra_list, key=lambda s: natural_sort_key(s.name))
+        for spec in sorted_specs:
             self._create_spectrum_item(spec, target_root=self.root_atm, item_type="atm")
         self._refresh_parent_indicator(self.root_atm)
         self.setUpdatesEnabled(True)
@@ -653,7 +919,7 @@ class ProjectTreeWidget(QTreeWidget):
         n_spectra = series_obj.n_spectra if hasattr(series_obj, 'n_spectra') else series_obj.data.shape[1]
         label = f"📊 {series_obj.name} [{dim_tag}, {n_spectra} widm]"
 
-        series_item = QTreeWidgetItem(self.root_series, [label])
+        series_item = QTreeWidgetItem(self.root_series, [label, ""])
         series_item.setFlags(
             Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable
@@ -719,6 +985,155 @@ class ProjectTreeWidget(QTreeWidget):
             parent.setCheckState(0, Qt.CheckState.Unchecked)
         else:
             parent.setCheckState(0, Qt.CheckState.PartiallyChecked)
+
+    # --- METODY LOGICZNE ZARZĄDZANIA ZAZNACZENIEM ---
+    def _set_category_check_state(self, cat_item: QTreeWidgetItem, state: Qt.CheckState):
+        """Ustawia stan zaznaczenia dla gałęzi i kaskadowo dla wszystkich jej potomków."""
+        self._is_internal_update = True
+        cat_item.setCheckState(0, state)
+        self._propagate_down(cat_item, state)
+
+        p = cat_item.parent()
+        while p and p != self.invisibleRootItem():
+            self._refresh_parent_indicator(p)
+            p = p.parent()
+
+        self._is_internal_update = False
+
+    def _invert_category_check_state(self, cat_item: QTreeWidgetItem):
+        """Odwraca zaznaczenie wszystkich bezpośrednich lub zagnieżdżonych elementów w danej gałęzi."""
+        self._is_internal_update = True
+
+        def invert_recursive(parent: QTreeWidgetItem):
+            for i in range(parent.childCount()):
+                child = parent.child(i)
+                if child.childCount() > 0:
+                    invert_recursive(child)
+                elif child.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                    cur = child.checkState(0)
+                    new_state = Qt.CheckState.Unchecked if cur == Qt.CheckState.Checked else Qt.CheckState.Checked
+                    child.setCheckState(0, new_state)
+                    self._sync_item_visibility_to_session(child)
+
+        invert_recursive(cat_item)
+
+        self._refresh_parent_indicator(cat_item)
+        p = cat_item.parent()
+        while p and p != self.invisibleRootItem():
+            self._refresh_parent_indicator(p)
+            p = p.parent()
+
+        self._is_internal_update = False
+
+    def _set_selected_items_check_state(self, items: List[QTreeWidgetItem], state: Qt.CheckState):
+        """Zmienia stan checkboxów wyłącznie dla elementów zaznaczonych myszą."""
+        self._is_internal_update = True
+        parents_to_refresh = set()
+
+        for itm in items:
+            if itm.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                itm.setCheckState(0, state)
+                self._sync_item_visibility_to_session(itm)
+                if itm.parent():
+                    parents_to_refresh.add(itm.parent())
+
+        for p in parents_to_refresh:
+            curr = p
+            while curr and curr != self.invisibleRootItem():
+                self._refresh_parent_indicator(curr)
+                curr = curr.parent()
+
+        self._is_internal_update = False
+
+    def _isolate_selected_spectra(self, container_item: QTreeWidgetItem, selected_names: set):
+        """Zaznacza tylko wskazane widma, odznaczając wszystkie pozostałe w tym samym kontenerze."""
+        self._is_internal_update = True
+
+        def isolate_recursive(parent: QTreeWidgetItem):
+            for i in range(parent.childCount()):
+                child = parent.child(i)
+                if child.childCount() > 0:
+                    isolate_recursive(child)
+                elif child.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                    s_name = child.data(0, Qt.UserRole)
+                    new_state = Qt.CheckState.Checked if s_name in selected_names else Qt.CheckState.Unchecked
+                    child.setCheckState(0, new_state)
+                    self._sync_item_visibility_to_session(child)
+
+        isolate_recursive(container_item)
+
+        self._refresh_parent_indicator(container_item)
+        p = container_item.parent()
+        while p and p != self.invisibleRootItem():
+            self._refresh_parent_indicator(p)
+            p = p.parent()
+
+        self._is_internal_update = False
+
+    def _prompt_pattern_select(self, container_item: QTreeWidgetItem):
+        """Dialog selekcji wg wzorca (np. *40C*, *TMAO*)."""
+        pattern, ok = QInputDialog.getText(
+            self, "Zaznacz według wzorca",
+            "Wpisz szukaną frazę lub wzorzec (np. 50C, *rep*, pH7):"
+        )
+        if not ok or not pattern.strip():
+            return
+
+        patt = pattern.strip().lower()
+        self._is_internal_update = True
+
+        def match_recursive(parent: QTreeWidgetItem):
+            for i in range(parent.childCount()):
+                child = parent.child(i)
+                if child.childCount() > 0:
+                    match_recursive(child)
+                elif child.flags() & Qt.ItemFlag.ItemIsUserCheckable:
+                    s_name = str(child.data(0, Qt.UserRole)).lower()
+                    is_match = (patt in s_name) or fnmatch.fnmatch(s_name, patt)
+                    new_state = Qt.CheckState.Checked if is_match else Qt.CheckState.Unchecked
+                    child.setCheckState(0, new_state)
+                    self._sync_item_visibility_to_session(child)
+
+        match_recursive(container_item)
+        self._refresh_parent_indicator(container_item)
+        self._is_internal_update = False
+
+    # --- SZYBKIE PRZEPŁYWY PRACY (WORKFLOW SHORTCUTS) ---
+    def _send_to_new_window(self, names: List[str]):
+        """Klonuje wybrane widma i wstrzykuje je do nowego okna roboczego."""
+        if not names:
+            return
+
+        def_name = f"Okno_{names[0][:12]}" if len(names) == 1 else "Wybrane Widma"
+        win_name, ok = QInputDialog.getText(self, "Nowe Okno Robocze", "Nazwa docelowego okna:", text=def_name)
+        if not ok or not win_name.strip():
+            return
+
+        new_win_id = session.add_window(name=win_name.strip())
+        for n in names:
+            spec = session.get_spectrum(n)
+            if spec:
+                session.add_spectrum_to_window(new_win_id, spec)
+
+        session.set_context("window")
+        session.set_active_window(new_win_id)
+
+    def _duplicate_workspace_window(self, win_id: str):
+        """Klonuje okno robocze wraz z widmami i ich widocznością."""
+        src_win = session.windows.get(win_id)
+        if not src_win:
+            return
+
+        new_name = f"{src_win.name} (Kopia)"
+        new_win_id = session.add_window(name=new_name, folder_id=src_win.folder_id)
+
+        for s_name, spec in src_win.spectra.items():
+            win_spec = session.add_spectrum_to_window(new_win_id, spec)
+            vis = src_win.visibility.get(s_name, True)
+            session.set_window_spectrum_visibility(new_win_id, win_spec.name, vis)
+
+        session.set_context("window")
+        session.set_active_window(new_win_id)
 
     # --- PRZEŁĄCZANIE AKTYWNEJ GAŁĘZI MAGAZYNU I OKIEN ---
     def _on_selection_changed(self, current: QTreeWidgetItem, *args):
@@ -792,6 +1207,16 @@ class ProjectTreeWidget(QTreeWidget):
     # SILNIK EKSPORTU I DIALOGÓW
     # =========================================================================
 
+    def _prompt_import_files(self, target_atm: bool = False):
+        """Otwiera okno wyboru plików i importuje je w tle do magazynu lub bazy atmosfery."""
+        title = "Dodaj wzorce atmosfery..." if target_atm else tr("menu.open_spectra", "Dodaj pliki widm...")
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, title, "", SpectrumImportDispatcher.get_open_file_filter()
+        )
+        if paths:
+            worker = FileImportWorker(paths, target_atm=target_atm)
+            self.thread_pool.start(worker)
+
     def _get_window_relative_path(self, win: WorkspaceWindow) -> str:
         parts = [win.name]
         cur_fid = win.folder_id
@@ -816,9 +1241,7 @@ class ProjectTreeWidget(QTreeWidget):
         suggested_name = "Eksport_Widm"
         if len(items_to_process) == 1:
             it = items_to_process[0]
-            suggested_name = it.data(0, Qt.UserRole) or it.text(0).replace("📁 ", "").replace("🖼️ ", "").replace("🗂️ ",
-                                                                                                               "").replace(
-                "📈 ", "")
+            suggested_name = it.data(0, Qt.UserRole) or it.text(0).replace("📁 ", "").replace("🖼️ ", "").replace("🗂️ ", "").replace("📈 ", "")
 
         def add_spec(spec: Optional[SpectrumData], rel_dir: str):
             if spec is None:
@@ -1012,6 +1435,22 @@ class ProjectTreeWidget(QTreeWidget):
         menu = QMenu(self)
         selected_items = self.selectedItems()
 
+        # 0. KORZEŃ MAGAZYNU DANYCH
+        if item == self.root_storage:
+            act_import = menu.addAction("📥 Dodaj pliki widm do magazynu...")
+            act_import.triggered.connect(lambda: self._prompt_import_files(target_atm=False))
+
+            menu.addSeparator()
+            act_chk_all = menu.addAction("☑ Zaznacz wszystko w magazynie")
+            act_chk_all.triggered.connect(lambda: self._set_category_check_state(item, Qt.CheckState.Checked))
+            act_unchk_all = menu.addAction("☐ Odznacz wszystko w magazynie")
+            act_unchk_all.triggered.connect(lambda: self._set_category_check_state(item, Qt.CheckState.Unchecked))
+            act_inv_all = menu.addAction("🔄 Odwróć zaznaczenie w magazynie")
+            act_inv_all.triggered.connect(lambda: self._invert_category_check_state(item))
+
+            menu.exec(self.viewport().mapToGlobal(pos))
+            return
+
         # 1. KORZEŃ OKIEN ROBOCZYCH
         if item == self.root_workspaces:
             act_new_win = menu.addAction("➕ Dodaj nowe okno robocze...")
@@ -1019,6 +1458,14 @@ class ProjectTreeWidget(QTreeWidget):
 
             act_new_folder = menu.addAction("📁 Dodaj nowy folder okien...")
             act_new_folder.triggered.connect(lambda: self._prompt_new_folder())
+
+            menu.addSeparator()
+            act_chk_all = menu.addAction("☑ Zaznacz wszystkie okna robocze")
+            act_chk_all.triggered.connect(lambda: self._set_category_check_state(item, Qt.CheckState.Checked))
+            act_unchk_all = menu.addAction("☐ Odznacz wszystkie okna robocze")
+            act_unchk_all.triggered.connect(lambda: self._set_category_check_state(item, Qt.CheckState.Unchecked))
+            act_inv_all = menu.addAction("🔄 Odwróć zaznaczenie we wszystkich oknach")
+            act_inv_all.triggered.connect(lambda: self._invert_category_check_state(item))
 
             self._populate_export_menu(menu, item, selected_items)
             menu.exec(self.viewport().mapToGlobal(pos))
@@ -1034,7 +1481,7 @@ class ProjectTreeWidget(QTreeWidget):
             act_add_subf = menu.addAction("📁 Dodaj podfolder...")
             act_add_subf.triggered.connect(lambda: self._prompt_new_folder(parent_folder_id=folder_id))
 
-            act_rename = menu.addAction("✏️ Zmień nazwę folderu...")
+            act_rename = menu.addAction("✏️ Zmień nazwę folderu (F2)...")
             act_rename.triggered.connect(lambda: self._prompt_rename_folder(folder_id))
 
             menu.addSeparator()
@@ -1042,6 +1489,8 @@ class ProjectTreeWidget(QTreeWidget):
             act_chk_all.triggered.connect(lambda: self._set_category_check_state(item, Qt.CheckState.Checked))
             act_unchk_all = menu.addAction("☐ Odznacz wszystkie w tym folderze")
             act_unchk_all.triggered.connect(lambda: self._set_category_check_state(item, Qt.CheckState.Unchecked))
+            act_inv = menu.addAction("🔄 Odwróć zaznaczenie w tym folderze")
+            act_inv.triggered.connect(lambda: self._invert_category_check_state(item))
 
             menu.addSeparator()
             act_del_keep = menu.addAction("🗑 Usuń folder (zachowaj okna)")
@@ -1082,10 +1531,10 @@ class ProjectTreeWidget(QTreeWidget):
                         lambda checked=False, target_fid=fid: session.move_table_to_folder(tbl_id, target_fid))
 
                 menu.addSeparator()
-                act_rename = menu.addAction("✏️ Zmień nazwę tabeli...")
+                act_rename = menu.addAction("✏️ Zmień nazwę tabeli (F2)...")
                 act_rename.triggered.connect(lambda: self._prompt_rename_table(tbl_id))
 
-                act_del = menu.addAction("🗑 Usuń tabelę")
+                act_del = menu.addAction("🗑 Usuń tabelę (Del)")
                 act_del.triggered.connect(lambda: session.remove_table(tbl_id))
 
             menu.exec(self.viewport().mapToGlobal(pos))
@@ -1094,8 +1543,11 @@ class ProjectTreeWidget(QTreeWidget):
         # 3. OKNO ROBOCZE
         if item.data(0, Qt.UserRole + 1) == "workspace_window":
             win_id = item.data(0, Qt.UserRole)
-            act_rename = menu.addAction("✏️ Zmień nazwę okna...")
+            act_rename = menu.addAction("✏️ Zmień nazwę okna (F2)...")
             act_rename.triggered.connect(lambda: self._prompt_rename_window(win_id))
+
+            act_dup = menu.addAction("📑 Zduplikuj to okno...")
+            act_dup.triggered.connect(lambda: self._duplicate_workspace_window(win_id))
 
             sub_move = menu.addMenu("📁 Przenieś do folderu...")
             act_root = sub_move.addAction("Poziom główny (bez folderu)")
@@ -1111,10 +1563,14 @@ class ProjectTreeWidget(QTreeWidget):
             act_chk_all.triggered.connect(lambda: self._set_category_check_state(item, Qt.CheckState.Checked))
             act_unchk_all = menu.addAction("☐ Odznacz wszystkie w tym oknie")
             act_unchk_all.triggered.connect(lambda: self._set_category_check_state(item, Qt.CheckState.Unchecked))
+            act_inv = menu.addAction("🔄 Odwróć zaznaczenie w tym oknie")
+            act_inv.triggered.connect(lambda: self._invert_category_check_state(item))
 
-            # Zawsze pozwalamy usunąć okno robocze
+            act_patt = menu.addAction("🔍 Zaznacz według wzorca...")
+            act_patt.triggered.connect(lambda: self._prompt_pattern_select(item))
+
             menu.addSeparator()
-            act_del = menu.addAction("🗑 Usuń okno")
+            act_del = menu.addAction("🗑 Usuń okno (Del)")
             act_del.triggered.connect(lambda: session.remove_window(win_id))
 
             self._populate_export_menu(menu, item, selected_items)
@@ -1123,11 +1579,26 @@ class ProjectTreeWidget(QTreeWidget):
 
         # 4. KATEGORIE MAGAZYNU
         if item in (self.root_exp, self.root_atm, self.root_series, self.root_dft):
+            if item == self.root_exp:
+                act_import = menu.addAction("📥 Dodaj pliki pomiarów...")
+                act_import.triggered.connect(lambda: self._prompt_import_files(target_atm=False))
+                menu.addSeparator()
+            elif item == self.root_atm:
+                act_import = menu.addAction("☁️ Dodaj pliki wzorców atmosfery...")
+                act_import.triggered.connect(lambda: self._prompt_import_files(target_atm=True))
+                menu.addSeparator()
+
             act_chk_all = menu.addAction("☑ Zaznacz wszystkie w tej gałęzi")
             act_chk_all.triggered.connect(lambda: self._set_category_check_state(item, Qt.CheckState.Checked))
 
             act_unchk_all = menu.addAction("☐ Odznacz wszystkie w tej gałęzi")
             act_unchk_all.triggered.connect(lambda: self._set_category_check_state(item, Qt.CheckState.Unchecked))
+
+            act_inv = menu.addAction("🔄 Odwróć zaznaczenie w tej gałęzi")
+            act_inv.triggered.connect(lambda: self._invert_category_check_state(item))
+
+            act_patt = menu.addAction("🔍 Zaznacz według wzorca...")
+            act_patt.triggered.connect(lambda: self._prompt_pattern_select(item))
 
             menu.addSeparator()
             act_clear_cat = menu.addAction("🗑 Wyczyść tę gałąź")
@@ -1140,24 +1611,48 @@ class ProjectTreeWidget(QTreeWidget):
         # 5. WIDMO W MAGAZYNIE (EKSPERYMENT / DFT)
         if item.data(0, Qt.UserRole + 1) in ["spectrum", "dft"]:
             names = [it.data(0, Qt.UserRole) for it in selected_items if it.data(0, Qt.UserRole + 1) in ["spectrum", "dft"]]
-            if not names: names = [item.data(0, Qt.UserRole)]
+            if not names:
+                names = [item.data(0, Qt.UserRole)]
 
+            parent_cat = item.parent() or self.root_exp
+
+            if len(names) > 1:
+                act_chk_sel = menu.addAction(f"☑ Zaznacz wybrane ({len(names)}) [Spacja]")
+                act_chk_sel.triggered.connect(lambda: self._set_selected_items_check_state(selected_items, Qt.CheckState.Checked))
+                act_unchk_sel = menu.addAction(f"☐ Odznacz wybrane ({len(names)}) [Spacja]")
+                act_unchk_sel.triggered.connect(lambda: self._set_selected_items_check_state(selected_items, Qt.CheckState.Unchecked))
+                act_iso = menu.addAction(f"🎯 Zaznacz tylko wybrane ({len(names)})")
+                act_iso.triggered.connect(lambda: self._isolate_selected_spectra(parent_cat, set(names)))
+            else:
+                act_iso = menu.addAction("🎯 Zaznacz tylko to widmo")
+                act_iso.triggered.connect(lambda: self._isolate_selected_spectra(parent_cat, {names[0]}))
+
+                act_color = menu.addAction("🎨 Zmień kolor widma...")
+                act_color.triggered.connect(lambda: self._open_color_picker_for_item(item, names[0], item.data(0, Qt.UserRole + 1)))
+
+            act_inv = menu.addAction("🔄 Odwróć zaznaczenie w tej gałęzi")
+            act_inv.triggered.connect(lambda: self._invert_category_check_state(parent_cat))
+
+            menu.addSeparator()
+            act_new_win = menu.addAction(f"🚀 Wyślij do nowego okna roboczego ({len(names)})...")
+            act_new_win.triggered.connect(lambda: self._send_to_new_window(names))
+
+            if session.active_window_id:
+                act_add_win = menu.addAction("➕ Dodaj do aktywnego okna roboczego")
+                act_add_win.triggered.connect(lambda: [session.add_spectrum_to_window(session.active_window_id, session.get_spectrum(n)) for n in names if session.get_spectrum(n)])
+
+            menu.addSeparator()
             if len(names) > 1:
                 act_move_atm = menu.addAction(f"☁️ Przenieś zaznaczone ({len(names)}) do Wzorców Atmosfery")
                 act_move_atm.triggered.connect(lambda: [session.move_to_atm(n) for n in names])
-                act_rem = menu.addAction(f"🗑 Usuń zaznaczone ({len(names)}) z magazynu")
+                act_rem = menu.addAction(f"🗑 Usuń zaznaczone ({len(names)}) z magazynu (Del)")
                 act_rem.triggered.connect(lambda: [session.remove_spectrum(n) for n in names])
             else:
                 s_name = names[0]
                 act_move_atm = menu.addAction("☁️ Przenieś do Wzorców Atmosfery (ATM / CO₂)")
                 act_move_atm.triggered.connect(lambda: session.move_to_atm(s_name))
-                act_rem = menu.addAction(f"🗑 Usuń '{s_name}' z magazynu")
+                act_rem = menu.addAction(f"🗑 Usuń '{s_name}' z magazynu (Del)")
                 act_rem.triggered.connect(lambda: session.remove_spectrum(s_name))
-
-            if session.active_window_id:
-                menu.addSeparator()
-                act_add_win = menu.addAction("➕ Dodaj do aktywnego okna roboczego")
-                act_add_win.triggered.connect(lambda: [session.add_spectrum_to_window(session.active_window_id, session.get_spectrum(n)) for n in names if session.get_spectrum(n)])
 
             self._populate_export_menu(menu, item, selected_items)
             menu.exec(self.viewport().mapToGlobal(pos))
@@ -1166,18 +1661,40 @@ class ProjectTreeWidget(QTreeWidget):
         # 6. WZORCE ATMOSFERY
         if item.data(0, Qt.UserRole + 1) == "atm":
             names = [it.data(0, Qt.UserRole) for it in selected_items if it.data(0, Qt.UserRole + 1) == "atm"]
-            if not names: names = [item.data(0, Qt.UserRole)]
+            if not names:
+                names = [item.data(0, Qt.UserRole)]
+
+            parent_cat = item.parent() or self.root_atm
+
+            if len(names) > 1:
+                act_chk_sel = menu.addAction(f"☑ Zaznacz wybrane ({len(names)}) [Spacja]")
+                act_chk_sel.triggered.connect(lambda: self._set_selected_items_check_state(selected_items, Qt.CheckState.Checked))
+                act_unchk_sel = menu.addAction(f"☐ Odznacz wybrane ({len(names)}) [Spacja]")
+                act_unchk_sel.triggered.connect(lambda: self._set_selected_items_check_state(selected_items, Qt.CheckState.Unchecked))
+                act_iso = menu.addAction(f"🎯 Zaznacz tylko wybrane ({len(names)})")
+                act_iso.triggered.connect(lambda: self._isolate_selected_spectra(parent_cat, set(names)))
+            else:
+                act_iso = menu.addAction("🎯 Zaznacz tylko ten wzorzec")
+                act_iso.triggered.connect(lambda: self._isolate_selected_spectra(parent_cat, {names[0]}))
+
+                act_color = menu.addAction("🎨 Zmień kolor wzorca...")
+                act_color.triggered.connect(lambda: self._open_color_picker_for_item(item, names[0], "atm"))
+
+            act_inv = menu.addAction("🔄 Odwróć zaznaczenie w tej gałęzi")
+            act_inv.triggered.connect(lambda: self._invert_category_check_state(parent_cat))
+
+            menu.addSeparator()
 
             if len(names) > 1:
                 act_move_exp = menu.addAction(f"📈 Przenieś zaznaczone ({len(names)}) do Pomiarów Eksperymentalnych")
                 act_move_exp.triggered.connect(lambda: [session.move_to_experimental(n) for n in names])
-                act_rem = menu.addAction(f"🗑 Usuń zaznaczone ({len(names)}) wzorce atmosfery")
+                act_rem = menu.addAction(f"🗑 Usuń zaznaczone ({len(names)}) wzorce atmosfery (Del)")
                 act_rem.triggered.connect(lambda: [session.remove_spectrum(n) for n in names])
             else:
                 s_name = names[0]
                 act_move_exp = menu.addAction("📈 Przenieś do Pomiarów Eksperymentalnych")
                 act_move_exp.triggered.connect(lambda: session.move_to_experimental(s_name))
-                act_rem = menu.addAction(f"🗑 Usuń '{s_name}'")
+                act_rem = menu.addAction(f"🗑 Usuń '{s_name}' (Del)")
                 act_rem.triggered.connect(lambda: session.remove_spectrum(s_name))
 
             self._populate_export_menu(menu, item, selected_items)
@@ -1188,14 +1705,42 @@ class ProjectTreeWidget(QTreeWidget):
         if item.data(0, Qt.UserRole + 1) == "window_spectrum":
             win_id = item.data(0, Qt.UserRole + 2)
             names = [it.data(0, Qt.UserRole) for it in selected_items if it.data(0, Qt.UserRole + 1) == "window_spectrum"]
-            if not names: names = [item.data(0, Qt.UserRole)]
+            if not names:
+                names = [item.data(0, Qt.UserRole)]
+
+            parent_win_item = item.parent()
 
             if len(names) > 1:
-                act_rem = menu.addAction(f"✕ Usuń zaznaczone ({len(names)}) z tego okna")
+                act_chk_sel = menu.addAction(f"☑ Zaznacz wybrane ({len(names)}) [Spacja]")
+                act_chk_sel.triggered.connect(lambda: self._set_selected_items_check_state(selected_items, Qt.CheckState.Checked))
+                act_unchk_sel = menu.addAction(f"☐ Odznacz wybrane ({len(names)}) [Spacja]")
+                act_unchk_sel.triggered.connect(lambda: self._set_selected_items_check_state(selected_items, Qt.CheckState.Unchecked))
+                if parent_win_item:
+                    act_iso = menu.addAction(f"🎯 Zaznacz tylko wybrane ({len(names)})")
+                    act_iso.triggered.connect(lambda: self._isolate_selected_spectra(parent_win_item, set(names)))
+            else:
+                if parent_win_item:
+                    act_iso = menu.addAction("🎯 Zaznacz tylko to widmo")
+                    act_iso.triggered.connect(lambda: self._isolate_selected_spectra(parent_win_item, {names[0]}))
+
+                act_color = menu.addAction("🎨 Zmień kolor widma...")
+                act_color.triggered.connect(lambda: self._open_color_picker_for_item(item, names[0], "window_spectrum"))
+
+            if parent_win_item:
+                act_inv = menu.addAction("🔄 Odwróć zaznaczenie w tym oknie")
+                act_inv.triggered.connect(lambda: self._invert_category_check_state(parent_win_item))
+
+            menu.addSeparator()
+            act_new_win = menu.addAction(f"🚀 Wyślij do nowego okna ({len(names)})...")
+            act_new_win.triggered.connect(lambda: self._send_to_new_window(names))
+
+            menu.addSeparator()
+            if len(names) > 1:
+                act_rem = menu.addAction(f"✕ Usuń zaznaczone ({len(names)}) z tego okna (Del)")
                 act_rem.triggered.connect(lambda: [session.remove_spectrum_from_window(win_id, n) for n in names])
             else:
                 spec_name = names[0]
-                act_rem = menu.addAction(f"✕ Usuń '{spec_name}' z tego okna")
+                act_rem = menu.addAction(f"✕ Usuń '{spec_name}' z tego okna (Del)")
                 act_rem.triggered.connect(lambda: session.remove_spectrum_from_window(win_id, spec_name))
 
             self._populate_export_menu(menu, item, selected_items)
@@ -1205,16 +1750,10 @@ class ProjectTreeWidget(QTreeWidget):
         # 8. SERIE 2D / 3D
         if item.data(0, Qt.UserRole + 1) == "series":
             s_name = item.data(0, Qt.UserRole)
-            act_rem_ser = menu.addAction(f"🗑 Usuń serię '{s_name}'")
+            act_rem_ser = menu.addAction(f"🗑 Usuń serię '{s_name}' (Del)")
             act_rem_ser.triggered.connect(lambda: session.remove_series(s_name))
             menu.exec(self.viewport().mapToGlobal(pos))
             return
-
-    def _set_category_check_state(self, cat_item: QTreeWidgetItem, state: Qt.CheckState):
-        self._is_internal_update = True
-        cat_item.setCheckState(0, state)
-        self._propagate_down(cat_item, state)
-        self._is_internal_update = False
 
     def _clear_category_items(self, cat_item: QTreeWidgetItem):
         names = [cat_item.child(i).data(0, Qt.UserRole) for i in range(cat_item.childCount())]
@@ -1272,7 +1811,7 @@ class ProjectTreeWidget(QTreeWidget):
             if found_folder:
                 parent_item = found_folder
 
-        tbl_item = QTreeWidgetItem(parent_item, [f"📊 {name}"])
+        tbl_item = QTreeWidgetItem(parent_item, [f"📊 {name}", ""])
         tbl_item.setFlags(
             Qt.ItemFlag.ItemIsEnabled
             | Qt.ItemFlag.ItemIsSelectable

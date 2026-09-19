@@ -20,6 +20,7 @@ from gui.canvas import SpectroCanvas
 from gui.project_tree import ProjectTreeWidget
 from gui.project_metadata_widget import ProjectMetadataWidget
 from io_hub.project_io import ProjectBundleIO
+from io_hub.dispatcher import SpectrumImportDispatcher
 
 # Panele robocze
 from gui.workspaces.ws_preprocessing import PreprocessingPanel
@@ -315,10 +316,10 @@ class MainWindow(QMainWindow):
     def _on_save_project_as(self):
         def_name = f"{session.metadata.title.replace(' ', '_')}.shub" if session.metadata.title else "Projekt_SpectroHub.shub"
         path, _ = QFileDialog.getSaveFileName(
-            self, "Zapisz projekt SpectroHub", def_name, "SpectroHub Project Bundle (*.shub)"
+            self, "Zapisz projekt SpectroHub", def_name, "SpectroHub Project Bundle (*.shub *.SHUB);;Wszystkie pliki (*.*)"
         )
         if path:
-            if not path.endswith(".shub"):
+            if not path.lower().endswith(".shub"):
                 path += ".shub"
             self._save_to_path(path)
 
@@ -339,7 +340,7 @@ class MainWindow(QMainWindow):
 
     def _on_open_project(self):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Otwórz projekt SpectroHub", "", "SpectroHub Project Bundle (*.shub)"
+            self, "Otwórz projekt SpectroHub", "", "SpectroHub Project Bundle (*.shub *.SHUB);;Wszystkie pliki (*.*)"
         )
         if not path:
             return
@@ -360,8 +361,8 @@ class MainWindow(QMainWindow):
 
     def _on_open_files(self):
         paths, _ = QFileDialog.getOpenFileNames(
-            self, tr("menu.open_spectra"), "",
-            "Obsługiwane widma (*.0 *.[0-9]* *.opus *.spa *.spg *.spc *.dx *.jdx *.csv *.dpt *.txt *.log);;Wszystkie (*.*)"
+            self, tr("menu.open_spectra", "Dodaj pliki widm..."), "",
+            SpectrumImportDispatcher.get_open_file_filter()
         )
         if paths:
             from PySide6.QtCore import QThreadPool

@@ -7,7 +7,7 @@ Obsługuje format New (0x4B), Old (0x4D), sub-widma oraz dane stało- i zmiennop
 import os
 import struct
 import numpy as np
-from typing import List, Dict, Any
+from typing import List
 import logging
 
 from core.models import SpectrumData
@@ -19,7 +19,7 @@ logger = logging.getLogger("SpectroHub")
 class SPCReader(BaseSpectrumReader):
     """Natywny dekoder plików binarnych Thermo Grams SPC."""
 
-    SUPPORTED_EXTENSIONS = ['.spc']
+    SUPPORTED_EXTENSIONS = ['.spc', '.SPC']
 
     def read(self, file_path: str) -> List[SpectrumData]:
         if not os.path.isfile(file_path):
@@ -47,18 +47,16 @@ class SPCReader(BaseSpectrumReader):
         head_str = "<BBbBiddicccci9s9sh32s130s30siicchf48sfifc187s"
         unpacked = struct.unpack(head_str, content[:512])
 
-        fexp = unpacked[2]          # b: signed char (wykładnik skali)
+        fexp = unpacked[2]          # b: signed char (wykładnik skali z nagłówka głównego)
         fnpts = unpacked[4]         # i: liczba punktów
         ffirst = unpacked[5]        # d: początek osi X
         flast = unpacked[6]         # d: koniec osi X
         fnsub = unpacked[7]         # i: liczba podwidm
-        fxtype = unpacked[8]        # c/B: typ osi X
-        fytype = unpacked[9]        # c/B: typ osi Y
-        flogoff = unpacked[19]      # i: offset do logu
+        ffactor = unpacked[24]      # f: offset 260, opcjonalny mnożnik (0.0 oznacza brak/1.0)
+        multiplier = float(ffactor) if ffactor != 0.0 else 1.0
 
         # Flagi binarne
         tsprec = bool(ftflgs & 0x01)  # 16-bit integer if true
-        tmulti = bool(ftflgs & 0x04)  # multiple spectra
         txyxys = bool(ftflgs & 0x40)  # each subfile has own x
         txvals = bool(ftflgs & 0x80)  # global x preceeds y
 
@@ -88,18 +86,21 @@ class SPCReader(BaseSpectrumReader):
             sub_npts = sub_hdr[6] if sub_hdr[6] > 0 else fnpts
             dat_pos = sub_pos + 32
 
+            # Wybór właściwego wykładnika skali:
+            # sub_exp ma priorytet (nawet przy fnsub == 1). fexp stanowi fallback, jeśli sub_exp == 0.
+            is_float = (sub_exp in (-128, 128)) or (fexp in (-128, 128))
+            exp_val = sub_exp if sub_exp != 0 else fexp
+
             # Oś X dla txyxys
             cur_x = wavenumbers
             if txyxys:
                 x_bytes = 4 * sub_npts
                 raw_x = np.frombuffer(content[dat_pos:dat_pos + x_bytes], dtype=np.int32)
-                exp_val = sub_exp if tmulti else fexp
                 cur_x = (2.0 ** (exp_val - 32)) * raw_x.astype(np.float64)
                 dat_pos += x_bytes
 
             # Oś Y
-            exp_val = sub_exp if tmulti else fexp
-            if exp_val == -128 or exp_val == 128:
+            if is_float:
                 # Dane zmiennoprzecinkowe float32
                 y_bytes = 4 * sub_npts
                 cur_y = np.frombuffer(content[dat_pos:dat_pos + y_bytes], dtype=np.float32).astype(np.float64)
@@ -116,12 +117,15 @@ class SPCReader(BaseSpectrumReader):
                     cur_y = (2.0 ** (exp_val - 32)) * raw_y.astype(np.float64)
                 dat_pos += y_bytes
 
+            # Zastosowanie ewentualnego mnożnika nagłówka głównego
+            if multiplier != 1.0:
+                cur_y = cur_y * multiplier
+
             sub_pos = dat_pos
             spec_name = base_name if fnsub == 1 else f"{base_name}_sub{sub_idx + 1}"
 
-            # Sanityzacja osi (uporządkowanie monotoniczne)
+            # Sanityzacja osi (uporządkowanie monotoniczne malejąco dla FTIR: np. 4000 -> 400 cm^-1)
             if cur_x[0] < cur_x[-1]:
-                # Odwracamy do tradycyjnego układu FTIR (malejący X: 4000 -> 400 cm^-1)
                 cur_x = cur_x[::-1]
                 cur_y = cur_y[::-1]
 
@@ -131,7 +135,7 @@ class SPCReader(BaseSpectrumReader):
                 name=spec_name,
                 file_path=file_path,
                 file_type="spc",
-                metadata={"fnsub": fnsub, "sub_index": sub_idx, "fversn": "0x4B"}
+                metadata={"fnsub": fnsub, "sub_index": sub_idx, "fversn": "0x4B", "exp_val": exp_val}
             ))
 
         return spectra_list
@@ -156,7 +160,7 @@ class SPCReader(BaseSpectrumReader):
             pts = sub_hdr[6] if sub_hdr[6] > 0 else onpts
 
             dat_pos = sub_pos + 32
-            exp = sub_exp if (0 < sub_exp < 128) else oexp
+            exp = sub_exp if (sub_exp != 0 and sub_exp not in (-128, 128)) else oexp
 
             if sub_exp in [128, -128]:
                 y_bytes = 4 * pts
@@ -164,7 +168,6 @@ class SPCReader(BaseSpectrumReader):
             else:
                 y_bytes = 4 * pts
                 raw_bytes = np.frombuffer(content[dat_pos:dat_pos + y_bytes], dtype=np.uint8)
-                # Odtworzenie wartości całkowitych ze starszego formatu
                 y_int = []
                 for i in range(0, len(raw_bytes), 4):
                     val = (raw_bytes[i + 1] * 16777216 + raw_bytes[i] * 65536 +
@@ -187,7 +190,7 @@ class SPCReader(BaseSpectrumReader):
                 name=spec_name,
                 file_path=file_path,
                 file_type="spc",
-                metadata={"sub_index": sub_idx, "fversn": "0x4D"}
+                metadata={"sub_index": sub_idx, "fversn": "0x4D", "exp_val": exp}
             ))
 
         return spectra_list

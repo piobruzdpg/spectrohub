@@ -38,6 +38,31 @@ class SpectrumImportDispatcher:
     _OPUS_READER = OPUSReader()
 
     @classmethod
+    def get_open_file_filter(cls) -> str:
+        """
+        Zwraca sformatowany ciąg filtrów dla QFileDialog z uwzględnieniem
+        wersji pisanych małymi i wielkimi literami (rozwiązuje problem widoczności na macOS/Linux).
+        """
+        filters = [
+            (
+                "Wszystkie obsługiwane pliki",
+                "*.spc *.SPC *.spa *.SPA *.spg *.SPG *.dx *.DX *.jdx *.JDX "
+                "*.opus *.OPUS *.[0-9] *.[0-9][0-9] "
+                "*.csv *.CSV *.dpt *.DPT *.txt *.TXT *.tsv *.TSV *.dat *.DAT "
+                "*.log *.LOG *.out *.OUT *.fchk *.FCHK"
+            ),
+            ("Thermo Grams SPC (*.spc *.SPC)", "*.spc *.SPC"),
+            ("Thermo Nicolet OMNIC (*.spa *.SPA *.spg *.SPG)", "*.spa *.SPA *.spg *.SPG"),
+            ("Bruker OPUS (*.opus *.OPUS *.[0-9]*)", "*.opus *.OPUS *.[0-9] *.[0-9][0-9]"),
+            ("JCAMP-DX (*.dx *.DX *.jdx *.JDX)", "*.dx *.DX *.jdx *.JDX"),
+            ("Pliki tekstowe / CSV / DPT (*.csv *.CSV *.dpt *.DPT *.txt *.TXT *.tsv *.TSV *.dat *.DAT)",
+             "*.csv *.CSV *.dpt *.DPT *.txt *.TXT *.tsv *.TSV *.dat *.DAT"),
+            ("Gaussian / ORCA Log (*.log *.LOG *.out *.OUT *.fchk *.FCHK)", "*.log *.LOG *.out *.OUT *.fchk *.FCHK"),
+            ("Wszystkie pliki (*.*)", "*.*")
+        ]
+        return ";;".join(f"{name} ({exts})" for name, exts in filters)
+
+    @classmethod
     def load_file(cls, file_path: str) -> List[SpectrumData]:
         """
         Główna metoda importu. Bezpiecznie wczytuje dowolny obsługiwany format widma.
