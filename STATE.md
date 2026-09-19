@@ -647,3 +647,33 @@ spectrohub/
     └── pl.py                        # Tłumaczenie polskie[cite: 1]
 
 ```
+### 19.09.2026 — Checkpoint: Naprawa Skalowania SPC, Deterministyczna Paleta Barw (OPUS Style) i Ergonomia Drzewa
+
+**1. Naprawa Dekodera Thermo Grams SPC i Filtry Rozszerzeń (`spc_reader.py`, `dispatcher.py`, `main_window.py`)**[cite: 1, 2, 5]
+* **Eliminacja błędu zaniżonej intensywności (32× / 64×):** W `_parse_new_spc` naprawiono logikę doboru wykładnika skali[cite: 1]. Zamiast polegać wyłącznie na zerowym `fexp` z nagłówka głównego przy `tmulti == False`, parser odczytuje właściwy wykładnik `sub_exp` bezpośrednio z 32-bajtowego nagłówka podwidma[cite: 1].
+* **Mnożnik zmiennoprzecinkowy:** Wdrożono odczyt pola `factor` (offset 260 w nagłówku SPC) jako opcjonalnego skalara zmiennoprzecinkowego[cite: 1].
+* **Filtry z wariantami wielkich liter (macOS / Linux Case-Sensitivity):** Do `SpectrumImportDispatcher` dodano metodę `get_open_file_filter()` agregującą maski z wariantami pisanymi małymi literami i kapitalikami (`*.spc *.SPC`, `*.spa *.SPA`, `*.dx *.DX`, `*.opus *.OPUS`, `*.csv *.CSV` itp.)[cite: 2]. Wyeliminowało to problem niewidocznych plików przy domyślnym filtrowaniu dialogów Qt[cite: 2, 5].
+
+**2. Deterministyczna Paleta Barw i Próbnik Koloru a'la Bruker OPUS (`project_tree.py`, `canvas.py`)**[cite: 6, 7]
+* **Dwukolumnowa struktura drzewa (`QTreeWidget`):** Kolumna 0 odpowiada za hierarchię, znaczniki i nazwy[cite: 6]; kolumna 1 (stała szerokość 28 px) mieści zaokrąglony kafelek barwy z kontrastową ramką[cite: 6].
+* **Klikalny próbnik (OPUS Style):** Kliknięcie LPM bezpośrednio w kafelek w kolumnie 1 natychmiast wywołuje `QColorDialog`[cite: 6]. Zmiana barwy zapisuje się w `metadata["custom_color"]` i odświeża `SpectroCanvas` w czasie rzeczywistym[cite: 6, 7].
+* **Deterministyczna paleta laboratoryjna (12 barw):** Wprowadzono zestaw barw o wysokim kontraście (`#4cc9f0`, `#f72585`, `#4ade80`, `#fb8500`, `#d946ef`...), eliminujący blade i zlewające się odcienie[cite: 7]. Widmo $i$-te w Oknie A oraz Oknie B zachowuje identyczny kod kolorystyczny[cite: 6, 7].
+* **Wizualna tożsamość aktywnego widma:** Wyeliminowano wymuszone zamienianie aktywnego widma na białe — krzywa zachowuje swój kolor, a wyróżnienie realizowane jest przez zwiększoną grubość (`lw = 2.2`), pełne krycie (`alpha = 1.0`) oraz najwyższy priorytet rysowania (`zorder = 5.0`)[cite: 7].
+
+**3. Ergonomia Eksploratora Projektu (Quality of Life)**[cite: 6]
+* **Laboratoryjne skróty klawiszowe:**
+  * `Spacja`: hurtowe przełączanie widoczności (toggle check) wszystkich zaznaczonych widm[cite: 6].
+  * `Delete` / `Backspace`: szybkie usuwanie widm z okna roboczego (bez naruszania magazynu referencyjnego) lub bezpieczne usuwanie obiektów z potwierdzeniem[cite: 6].
+  * `F2`: zmiana nazwy okna, folderu lub tabeli[cite: 6].
+* **Naturalne sortowanie alfanumeryczne (*Natural Sort*):** Zastąpiono standardowe sortowanie leksykograficzne kluczem numerycznym (`re.split`), dzięki czemu serie pomiarowe układają się w porządku chronologicznym (`1, 2, ..., 9, 10, 11` zamiast `1, 10, 2`)[cite: 6].
+* **Narzędzia selekcji i przepływu pracy:**
+  * *Zaznacz według wzorca:* wyszukiwanie fraz i masek (np. `50C`, `*TMAO*`, `rep2`) z automatyczną izolacją pasujących krzywych[cite: 6].
+  * *Wyślij do nowego okna roboczego:* szybkie tworzenie nowego środowiska roboczego ze wskazanego podzbioru widm[cite: 6].
+  * *Duplikacja okna roboczego:* klonowanie całego okna z zachowaniem widoczności i powiązań widm[cite: 6].
+  * *Bogate Toolpity:* podgląd zakresu liczb falowych, liczby punktów oraz $A_{\max}$ wraz z położeniem piku po najechaniu kursorem[cite: 6].
+
+---
+
+**Plan na kolejną sesję:**
+1. **Workspace Dekonwolucji (Workspace 3):** audyt dopasowania pasm syntetycznych (Amide I / Custom) oraz globalnego fitowania serii temperaturowych/kinetycznych.
+2. **Moduł rycin publikacyjnych (Pub-Studio):** generator paneli publikacyjnych pod wymogi czasopism naukowych (8.5 / 17.5 cm, 600 DPI, wektorowy PDF/SVG).

@@ -84,7 +84,7 @@ def make_spectrum_tooltip(spec: SpectrumData) -> str:
         time_row = f"<b>Czas rejestracji:</b> {time_info}<br>" if time_info else ""
 
         return (
-            f"<div style='font-family: sans-serif; font-size: 11px; line-height: 1.3;'>"
+            f"<div style='font-size: 11px; line-height: 1.3;'>"
             f"<b style='color: #4cc9f0; font-size: 12px;'>{spec.name}</b><br>"
             f"<hr style='border: 0; border-top: 1px solid #4a4a5a; margin: 4px 0;'>"
             f"{time_row}"
@@ -457,7 +457,7 @@ class ProjectTreeWidget(QTreeWidget):
         self._on_selection_changed(item)
 
     def _open_color_picker_for_item(self, item: QTreeWidgetItem, name: str, itype: str):
-        """Otwiera okno wyboru koloru i odświeża widok na żywo."""
+        """Otwiera okno wyboru koloru i odświeża widok na żywo bez zbędnych sygnałów widoczności."""
         if itype == "window_spectrum":
             win_id = item.data(0, Qt.UserRole + 2)
             win = session.windows.get(win_id)
@@ -478,15 +478,12 @@ class ProjectTreeWidget(QTreeWidget):
 
             item.setIcon(1, make_color_swatch_icon(new_hex))
 
-            if itype == "window_spectrum":
-                win_id = item.data(0, Qt.UserRole + 2)
-                session.window_visibility_changed.emit(win_id, name)
-            else:
-                session.visibility_changed.emit(name)
-
+            # Bezpośrednie i bezpieczne przerysowanie wykresu
             main_win = self.window()
             if hasattr(main_win, "canvas_2d"):
                 main_win.canvas_2d.redraw_all()
+            else:
+                session.context_changed.emit(session.active_context)
 
     # --- ZARZĄDZANIE FOLDERAMI I OKNAMI W DRZEWIE ---
     def _find_folder_item(self, folder_id: str, parent: Optional[QTreeWidgetItem] = None) -> Optional[QTreeWidgetItem]:
