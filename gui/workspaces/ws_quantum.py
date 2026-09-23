@@ -7,17 +7,19 @@ Wspiera otwieranie niezależnego okna wizualizacji 3D oraz interaktywne skalowan
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QTableWidget,
     QTableWidgetItem, QHeaderView, QMessageBox, QDoubleSpinBox, QGroupBox,
-    QComboBox
+    QComboBox, QDialog
 )
 from PySide6.QtCore import Qt, QTimer
 import logging
 from typing import Optional
 import numpy as np
+
 from core.session import session
 from core.i18n import tr, i18n
 from core.models import GaussianData
 from algorithms.quantum.ped_engine import PEDAnalyzer
 from gui.vibration_dialog import VibrationVisualizerDialog
+from gui.isotope_dialog import IsotopeExchangeDialog
 
 logger = logging.getLogger("SpectroHub")
 
@@ -127,7 +129,6 @@ class QuantumPanel(QWidget):
         self._ensure_canvas_connected()
 
     def select_mode_from_canvas(self, mode_idx: int):
-        """Zaznacza i przewija tabelę do modu wskazanego kliknięciem na wykresie."""
         if 0 <= mode_idx < self.table_ped.rowCount():
             self.table_ped.selectRow(mode_idx)
             item = self.table_ped.item(mode_idx, 0)
@@ -149,10 +150,23 @@ class QuantumPanel(QWidget):
         n_modes = len(dft.stick_freqs)
         self.lbl_counts.setText(f"Liczba atomów: {n_atoms} | Liczba modów: {n_modes}")
 
+        # Wczytujemy parametry przypisane do danego widma z blokadą sygnałów
         self.spin_scale.blockSignals(True)
-        self.spin_scale.setValue(dft.scale_factor)
+        self.spin_scale.setValue(getattr(dft, 'scale_factor', 1.0))
         self.spin_scale.blockSignals(False)
 
+        self.spin_fwhm.blockSignals(True)
+        self.spin_fwhm.setValue(getattr(dft, 'fwhm', 14.0))
+        self.spin_fwhm.blockSignals(False)
+
+        self.combo_shape.blockSignals(True)
+        shape_val = getattr(dft, 'shape', 'Gauss')
+        idx_shape = self.combo_shape.findText(shape_val)
+        if idx_shape >= 0:
+            self.combo_shape.setCurrentIndex(idx_shape)
+        self.combo_shape.blockSignals(False)
+
+        # Wypełnienie tabeli PED
         self.table_ped.setRowCount(n_modes)
         for row, (freq, inten) in enumerate(zip(dft.stick_freqs, dft.stick_intens)):
             ped_txt = "—"
@@ -166,16 +180,20 @@ class QuantumPanel(QWidget):
             self.table_ped.setItem(row, 3, QTableWidgetItem(ped_txt))
 
     def _on_params_changed(self):
-        """Dynamicznie przelicza splot pasm i odświeża wykres."""
+        """Dynamicznie przelicza splot pasm i zapisuje parametry w aktywnym obiekcie widma."""
         active = session.active_spectrum
         if not isinstance(active, GaussianData) or len(active.stick_freqs) == 0:
             return
 
-        s = self.spin_scale.value()
-        fwhm = self.spin_fwhm.value()
+        s = float(self.spin_scale.value())
+        fwhm = float(self.spin_fwhm.value())
         shape = self.combo_shape.currentText()
 
+        # Zapisujemy parametry w widmie
         active.scale_factor = s
+        active.fwhm = fwhm
+        active.shape = shape
+
         scaled_freqs = active.stick_freqs * s
         intens = active.stick_intens
 
@@ -198,11 +216,16 @@ class QuantumPanel(QWidget):
                 y_l = (gamma ** 2) / (diff ** 2 + gamma ** 2)
                 spectrum_y += i_val * (0.5 * y_g + 0.5 * y_l)
 
-        # Aktualizacja wektorów aktywnego widma
         active.wavenumbers = wn_grid
         active.intensities = spectrum_y
 
-        self._load_dft_data(active)
+        # Odświeżamy tabelę (częstości przeskalowane przez 's')
+        for row in range(len(active.stick_freqs)):
+            f_scaled = active.stick_freqs[row] * s
+            it_f = self.table_ped.item(row, 1)
+            if it_f:
+                it_f.setText(f"{f_scaled:.1f}")
+
         canvas = self._get_canvas()
         if canvas:
             canvas.redraw_all()
@@ -241,32 +264,74 @@ class QuantumPanel(QWidget):
     def _on_simulate_isotope(self):
         active = session.active_spectrum
         if not isinstance(active, GaussianData) or len(active.atomnos) == 0:
+            QMessageBox.warning(self, tr("app.warning"), "Brak aktywnego widma DFT z geometrią atomową.")
             return
 
-        mass_rep = {i: 2.01410178 for i, an in enumerate(active.atomnos) if an == 1}
-        if not mass_rep:
-            QMessageBox.information(self, tr("app.info"), "Struktura nie zawiera atomów wodoru do deuterowania.")
+        dialog = IsotopeExchangeDialog(self, active_dft=active)
+        if dialog.exec() != QDialog.Accepted:
             return
 
-        iso_freqs, iso_intens, iso_Lx = PEDAnalyzer.simulate_isotopic_shift(
-            active.atomnos, active.coords, list(active.stick_freqs), list(active.stick_intens), active.Lx, mass_rep
+        mass_rep = dialog.get_selected_replacements()
+        target_name = dialog.get_target_name()
+        fchk_path = dialog.fchk_path
+
+        # Przeliczenie zagadnienia własnego, intensywności oraz analizy PED
+        iso_freqs, iso_intens, iso_Lx, inten_src, iso_ped = PEDAnalyzer.simulate_isotopic_shift(
+            active.atomnos, active.coords,
+            list(active.stick_freqs), list(active.stick_intens), active.Lx,
+            mass_rep, fchk_path=fchk_path
         )
+
+        stick_f = np.array(iso_freqs, dtype=np.float64)
+        stick_i = np.array(iso_intens, dtype=np.float64)
+        s = getattr(active, 'scale_factor', 1.0)
+        fwhm = getattr(active, 'fwhm', 14.0)
+        shape = getattr(active, 'shape', 'Gauss')
+
+        min_wn = max(200.0, np.min(stick_f * s) - 150.0)
+        max_wn = max(4000.0, np.max(stick_f * s) + 150.0)
+        wn_grid = np.arange(min_wn, max_wn + 1.0, 1.0)
+        c_gauss = 4.0 * np.log(2.0)
+        gamma = fwhm / 2.0
+        spectrum_y = np.zeros_like(wn_grid)
+
+        for f_val, i_val in zip(stick_f * s, stick_i):
+            diff = wn_grid - f_val
+            if shape == "Gauss":
+                spectrum_y += i_val * np.exp(-c_gauss * (diff / fwhm) ** 2)
+            elif shape == "Lorentz":
+                spectrum_y += i_val * (gamma ** 2) / (diff ** 2 + gamma ** 2)
+            else:
+                y_g = np.exp(-c_gauss * (diff / fwhm) ** 2)
+                y_l = (gamma ** 2) / (diff ** 2 + gamma ** 2)
+                spectrum_y += i_val * (0.5 * y_g + 0.5 * y_l)
 
         iso_data = GaussianData(
-            wavenumbers=active.wavenumbers.copy(),
-            intensities=active.intensities.copy(),
-            name=f"{active.name}_deuterated",
+            wavenumbers=wn_grid,
+            intensities=spectrum_y,
+            name=target_name,
             file_path=active.file_path,
             file_type="gaussian",
-            stick_freqs=np.array(iso_freqs),
-            stick_intens=np.array(iso_intens),
-            atomnos=active.atomnos,
-            coords=active.coords,
+            stick_freqs=stick_f,
+            stick_intens=stick_i,
+            ped_results=iso_ped,
+            atomnos=active.atomnos.copy(),
+            coords=active.coords.copy(),
             Lx=iso_Lx,
-            hessian_source="ISO_H->D"
+            scale_factor=s,
+            fwhm=fwhm,
+            shape=shape,
+            hessian_source=f"ISO_{inten_src}"
         )
+
         session.add_spectrum(iso_data, make_active=True)
-        QMessageBox.information(self, tr("app.info"), f"Utworzono widmo izotopomeru ({len(iso_freqs)} modów po deuterowaniu).")
+        QMessageBox.information(
+            self, tr("app.info"),
+            f"Pomyślnie utworzono izotopomer '{target_name}'.\n"
+            f"Wymieniono atomów H: {len(mass_rep)}\n"
+            f"Metoda wyznaczenia intensywności: {inten_src}\n"
+            f"Analiza PED: Obliczona pomyślnie dla {len(iso_freqs)} modów."
+        )
 
     def retranslate_ui(self):
         self.group_meta.setTitle(tr("dft.meta_group", "Parametry Widma Teoretycznego DFT"))

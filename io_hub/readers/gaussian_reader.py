@@ -48,6 +48,9 @@ class GaussianReader(BaseSpectrumReader):
             stick_intens=stick_intens,
             ped_results=ped_results,
             hessian_source=hessian_src,
+            scale_factor=1.0,
+            fwhm=fwhm,
+            shape="Gauss",
             atomnos=atomnos,
             coords=coords,
             Lx=Lx

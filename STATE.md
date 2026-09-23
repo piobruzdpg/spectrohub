@@ -674,6 +674,21 @@ spectrohub/
 
 ---
 
-**Plan na kolejną sesję:**
-1. **Workspace Dekonwolucji (Workspace 3):** audyt dopasowania pasm syntetycznych (Amide I / Custom) oraz globalnego fitowania serii temperaturowych/kinetycznych.
-2. **Moduł rycin publikacyjnych (Pub-Studio):** generator paneli publikacyjnych pod wymogi czasopism naukowych (8.5 / 17.5 cm, 600 DPI, wektorowy PDF/SVG).
+### 23.09.2026 — Checkpoint: Interaktywna Wymiana Izotopowa H ➔ D, Intensywności APT i Analityczny PED
+
+**1. Ścisła Fizyka Wymiany Izotopowej & Rzeczywiste Intensywności IR (`algorithms/quantum/ped_engine.py`)**[cite: 6]
+* **Analityczne intensywności z tensorów APT:** Wdrożono czytnik `Dipole Derivatives` z plików `.fchk` i ich kontrakcję z kartezjańskimi wektorami drgań $\mathbf{L}_x = \mathbf{M}_{\text{iso}}^{-1/2} \mathbf{L}_{MW}$, co zapewnia ścisłe intensywności w $\text{km/mol}$[cite: 6].
+* **Rzutowanie Duschinsky'ego (Fallback dla `.log`):** Dla plików bez `.fchk` zaimplementowano bezparametrowe rzutowanie nakładania modów wyjściowych na drgania izotopomeru, zachowujące sumaryczną siłę oscylatora[cite: 6].
+* **Rzutowanie Eckarta (TR-projection) i konwersja jednostek:** Zintegrowano rzutnik $P_{\text{vib}} = I - Q Q^T$ eliminujący 6 modów translacji i rotacji oraz zastosowano stałą konwersji spektroskopowej ($5140.487\text{ cm}^{-1}$), eliminując zaniżone częstości z jednostek atomowych Hartree/Bohr²[cite: 6].
+* **Pełny PED dla izotopomeru on-the-fly:** Zaimplementowano dynamiczną analizę rozkładu energii potencjalnej (PED Pulaya) dla nowo powstałego izotopomeru z automatycznym etykietowaniem atomów deuteru (np. $\nu(\text{C}-\text{D})$, $\nu_s(\text{CD}_3)$, $\nu(\text{O}-\text{D})$) bez konieczności ponownego uruchamiania Gaussiana[cite: 6].
+* **Reguły labilności protonów:** Algorytm analizy sąsiedztwa automatycznie klasyfikuje atomy wodoru na labilne (związane z heteroatomami $Z \neq 6$: O–H, N–H, S–H, P–H) oraz nielabilne (C–H)[cite: 6].
+
+**2. Nowe Okno Interaktywnej Selekcji 3D (`gui/isotope_dialog.py`)**
+* **Picking sfer w PyVista:** Zaimplementowano interaktywne zaznaczanie wodorów kliknięciem myszą bezpośrednio na geometrii 3D (z dynamiczną zmianą barwy: biel CPK $\leftrightarrow$ jaskrawy cyjan deuteru)[cite: 3].
+* **Dwukierunkowa synchronizacja z tabelą:** Zmiana w widoku 3D natychmiast aktualizuje checkbox w tabeli wodorów i odwrotnie; kliknięcie w dowolną komórkę wiersza przełącza stan zaznaczenia.
+* **Ergonomia wyboru i czysty start:** Dialog startuje z pustą tabelą (pełna kontrola użytkownika), oferując przyciski szybkiego wyboru: *„💧 Zaznacz labilne”*, *„⚛️ Zaznacz wszystkie H”*, *„🧹 Wyczyść”*, *„🔄 Odwróć”* oraz live-counter z automatycznym generowaniem nazwy (`_dLabile`, `_dAll`, `_d{N}H`).
+* **Pancerne typowanie VTK pod Pythonem 3.13:** Wyeliminowano błąd `TypeError: SetPickable` przez jawne rzutowanie flag selekcji na natywne typy C++/int oraz zoptymalizowano lokalizację klikniętego atomu po współrzędnych geometrycznych centroidu.
+
+**3. Autonomia Parametrów Widmowych w Modelu Danych (`core/models.py`, `ws_quantum.py`, `gaussian_reader.py`)**[cite: 2, 4, 7]
+* **Izolacja FWHM i profilu kształtu:** Rozszerzono `GaussianData` o atrybuty `fwhm` oraz `shape` (obok `scale_factor`), dzięki czemu każde widmo teoretyczne (zarówno pierwotne, jak i izotopomery) zachowuje własne, niezależne parametry splotu pasm[cite: 7].
+* **Reaktywne odświeżanie inspektora DFT:** Przełączanie obiektów w drzewie projektu blokuje fałszywe sygnały UI i natychmiast odczytuje rzeczywiste nastawy aktywnego widma w kontrolkach[cite: 4].

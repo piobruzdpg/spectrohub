@@ -236,6 +236,50 @@ class PEDAnalyzer:
         return Fx
 
     @staticmethod
+    def read_fchk_dipole_derivatives(fchk_path: str, n_atoms: int) -> Optional[np.ndarray]:
+        """
+        Parsuje sekcję 'Dipole Derivatives' z pliku .fchk (Atomic Polar Tensors - APT).
+        Zwraca macierz kartezjańskich pochodnych dipolowych o wymiarach (3, 3 * n_atoms).
+        """
+        if not os.path.exists(fchk_path):
+            return None
+        try:
+            with open(fchk_path, 'r', encoding='utf-8', errors='ignore') as f:
+                lines = f.readlines()
+
+            start_idx = -1
+            for idx, line in enumerate(lines):
+                if "Dipole Derivatives" in line:
+                    start_idx = idx + 1
+                    break
+
+            if start_idx == -1:
+                return None
+
+            dim = 3 * n_atoms
+            expected = 3 * dim  # 3 składowe dipola (x, y, z) x 3N współrzędnych
+            raw = []
+            for line in lines[start_idx:]:
+                if re.match(r'^[A-Za-z]', line.strip()):
+                    break
+                for t in line.split():
+                    try:
+                        raw.append(float(t))
+                    except ValueError:
+                        pass
+                if len(raw) >= expected:
+                    break
+
+            if len(raw) < expected:
+                return None
+
+            # Gaussian zapisuje wierszami po 3 składowe: d(mux)/dxi, d(muy)/dxi, d(muz)/dxi
+            apt_matrix = np.array(raw[:expected], dtype=np.float64).reshape((dim, 3)).T
+            return apt_matrix  # Kształt: (3, 3 * n_atoms)
+        except Exception:
+            return None
+
+    @staticmethod
     def parse_gaussian_log(filepath: str) -> Tuple[np.ndarray, np.ndarray, List[float], List[float], np.ndarray]:
         with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
             lines = f.readlines()
@@ -368,14 +412,20 @@ class PEDAnalyzer:
         return atomnos, coords, freqs, intens, Lx
 
     @classmethod
-    def build_sic_matrix(cls, atomnos: np.ndarray, coords: np.ndarray) -> Tuple[np.ndarray, List[str]]:
+    def build_sic_matrix(cls, atomnos: np.ndarray, coords: np.ndarray,
+                         mass_replacements: Optional[Dict[int, float]] = None) -> Tuple[np.ndarray, List[str]]:
         n_atoms = len(atomnos)
-        symbols = [ELEMENT_SYMBOLS.get(num, f"X{num}") for num in atomnos]
+        symbols = []
+        for i, num in enumerate(atomnos):
+            if mass_replacements and i in mass_replacements:
+                symbols.append("D")
+            else:
+                symbols.append(ELEMENT_SYMBOLS.get(int(num), f"X{num}"))
 
         bonds = []
         for i in range(n_atoms):
             for j in range(i + 1, n_atoms):
-                r_cov = COVALENT_RADII.get(atomnos[i], 0.8) + COVALENT_RADII.get(atomnos[j], 0.8)
+                r_cov = COVALENT_RADII.get(int(atomnos[i]), 0.8) + COVALENT_RADII.get(int(atomnos[j]), 0.8)
                 if np.linalg.norm(coords[i] - coords[j]) <= (r_cov + 0.35):
                     bonds.append((i, j))
 
@@ -389,38 +439,41 @@ class PEDAnalyzer:
         b_rows = []
         labels = []
 
-        # Grupy XY3 (np. -CH3)
+        # Grupy XY3 (np. -CH3, -CD3)
         for center in range(n_atoms):
             neighbors = adj[center]
             h_neighbors = [n for n in neighbors if atomnos[n] == 1]
             if len(h_neighbors) == 3:
-                h1, h2, h3 = h_neighbors
-                for h in h_neighbors:
-                    processed_bonds.add(tuple(sorted((center, h))))
-                processed_angles.add((min(h2, h3), center, max(h2, h3)))
-                processed_angles.add((min(h1, h3), center, max(h1, h3)))
-                processed_angles.add((min(h1, h2), center, max(h1, h2)))
+                syms = [symbols[h] for h in h_neighbors]
+                # Tylko jeśli wszystkie 3 atomy to ten sam izotop (same H lub same D)
+                if syms[0] == syms[1] == syms[2]:
+                    h1, h2, h3 = h_neighbors
+                    for h in h_neighbors:
+                        processed_bonds.add(tuple(sorted((center, h))))
+                    processed_angles.add((min(h2, h3), center, max(h2, h3)))
+                    processed_angles.add((min(h1, h3), center, max(h1, h3)))
+                    processed_angles.add((min(h1, h2), center, max(h1, h2)))
 
-                s_label = f"{symbols[center]}{symbols[h1]}3"
-                sA1, sB1 = WilsonSVectors.stretch(coords[center], coords[h1])
-                sA2, sB2 = WilsonSVectors.stretch(coords[center], coords[h2])
-                sA3, sB3 = WilsonSVectors.stretch(coords[center], coords[h3])
+                    s_label = f"{symbols[center]}{syms[0]}3"
+                    sA1, sB1 = WilsonSVectors.stretch(coords[center], coords[h1])
+                    sA2, sB2 = WilsonSVectors.stretch(coords[center], coords[h2])
+                    sA3, sB3 = WilsonSVectors.stretch(coords[center], coords[h3])
 
-                row_s = np.zeros(n_atoms * 3)
-                row_s[center * 3:center * 3 + 3] = (sA1 + sA2 + sA3) / np.sqrt(3)
-                row_s[h1 * 3:h1 * 3 + 3] = sB1 / np.sqrt(3)
-                row_s[h2 * 3:h2 * 3 + 3] = sB2 / np.sqrt(3)
-                row_s[h3 * 3:h3 * 3 + 3] = sB3 / np.sqrt(3)
-                b_rows.append(row_s)
-                labels.append(f"ν_s({s_label})")
+                    row_s = np.zeros(n_atoms * 3)
+                    row_s[center * 3:center * 3 + 3] = (sA1 + sA2 + sA3) / np.sqrt(3)
+                    row_s[h1 * 3:h1 * 3 + 3] = sB1 / np.sqrt(3)
+                    row_s[h2 * 3:h2 * 3 + 3] = sB2 / np.sqrt(3)
+                    row_s[h3 * 3:h3 * 3 + 3] = sB3 / np.sqrt(3)
+                    b_rows.append(row_s)
+                    labels.append(f"ν_s({s_label})")
 
-        # Grupy XY2 (np. -CH2-, -NH2)
+        # Grupy XY2 (np. -CH2-, -CD2-, -NH2, -ND2)
         for center in range(n_atoms):
             neighbors = adj[center]
             for i_idx in range(len(neighbors)):
                 for j_idx in range(i_idx + 1, len(neighbors)):
                     y1, y2 = neighbors[i_idx], neighbors[j_idx]
-                    if atomnos[y1] == atomnos[y2] and (tuple(sorted((center, y1))) not in processed_bonds):
+                    if symbols[y1] == symbols[y2] and (tuple(sorted((center, y1))) not in processed_bonds):
                         processed_bonds.add(tuple(sorted((center, y1))))
                         processed_bonds.add(tuple(sorted((center, y2))))
                         processed_angles.add((min(y1, y2), center, max(y1, y2)))
@@ -443,7 +496,7 @@ class PEDAnalyzer:
                         b_rows.append(row_as)
                         labels.append(f"ν_as({group_tag})")
 
-        # Pozostałe wiązania
+        # Pozostałe wiązania (w tym pojedyncze C-D, O-D, S-D itp.)
         for a, b in bonds:
             bond_key = tuple(sorted((a, b)))
             if bond_key not in processed_bonds:
@@ -476,56 +529,33 @@ class PEDAnalyzer:
         return np.array(b_rows), labels
 
     @classmethod
-    def calculate_ped(cls, filepath: str) -> Tuple[np.ndarray, np.ndarray, List[float], List[float], np.ndarray, List[Dict[str, Any]], str]:
-        """Uniwersalna metoda wyznaczająca PED dla Gaussiana (.log) oraz ORCA (.out)."""
-        ext = os.path.splitext(filepath)[1].lower()
-        if ext in ['.out', '.orca']:
-            atomnos, coords, freqs, intens, Lx = cls.parse_orca_out(filepath)
-            hessian_source = "ORCA_OUT"
-        else:
-            atomnos, coords, freqs, intens, Lx = cls.parse_gaussian_log(filepath)
-            hessian_source = "LOG"
-
+    def compute_ped_analysis(cls, atomnos: np.ndarray, coords: np.ndarray,
+                             freqs: List[float], intens: List[float], Lx: np.ndarray,
+                             masses: np.ndarray, Fx: np.ndarray,
+                             mass_replacements: Optional[Dict[int, float]] = None) -> List[Dict[str, Any]]:
+        """Czysty silnik wyznaczania macierzy PED Pulaya dla zadanego układu i wektorów drgań."""
         n_atoms = len(atomnos)
         n_modes = len(freqs)
 
         if n_atoms == 0 or n_modes == 0:
-            return atomnos, coords, freqs, intens, Lx, [], hessian_source
+            return []
 
-        masses = np.array([ATOMIC_MASSES.get(num, 12.0) for num in atomnos])
         M_diag = np.repeat(masses, 3)
         M_inv_diag = 1.0 / M_diag
 
         scaled_modes = []
         for k in range(n_modes):
             dk = Lx[:, k]
-            mu_k = np.dot(dk, M_diag * dk)
+            mu_k = float(np.dot(dk, M_diag * dk))
             norm_factor = 1.0 / np.sqrt(mu_k) if mu_k > 1e-12 else 1.0
             scaled_modes.append(dk * norm_factor)
 
-        Fx = None
-        if hessian_source == "LOG":
-            fchk_candidate = os.path.splitext(filepath)[0] + ".fchk"
-            if os.path.exists(fchk_candidate):
-                try:
-                    Fx = cls.read_fchk_hessian(fchk_candidate, n_atoms)
-                    hessian_source = "FCHK"
-                except Exception:
-                    Fx = None
-
-        if Fx is None:
-            Fx = np.zeros((n_atoms * 3, n_atoms * 3))
-            for k in range(n_modes):
-                xk = scaled_modes[k]
-                Fx += (freqs[k] ** 2) * np.outer(M_diag * xk, M_diag * xk)
-
-        B_SIC, labels_SIC = cls.build_sic_matrix(atomnos, coords)
+        B_SIC, labels_SIC = cls.build_sic_matrix(atomnos, coords, mass_replacements=mass_replacements)
         n_sic = len(labels_SIC)
 
         if n_sic == 0 or B_SIC.shape[0] == 0:
-            ped_fallback = [{'freq': f, 'inten': it, 'summary': 'Inne / zdelokalizowane', 'full_ped': []}
-                            for f, it in zip(freqs, intens)]
-            return atomnos, coords, freqs, intens, Lx, ped_fallback, hessian_source
+            return [{'freq': f, 'inten': it, 'summary': 'Inne / zdelokalizowane', 'full_ped': []}
+                    for f, it in zip(freqs, intens)]
 
         G = np.dot(B_SIC * M_inv_diag, B_SIC.T)
         G_inv = np.linalg.pinv(G, rcond=1e-6)
@@ -554,40 +584,234 @@ class PEDAnalyzer:
                 'full_ped': mode_ped
             })
 
+        return ped_results
+
+    @classmethod
+    def calculate_ped(cls, filepath: str) -> Tuple[
+        np.ndarray, np.ndarray, List[float], List[float], np.ndarray, List[Dict[str, Any]], str]:
+        ext = os.path.splitext(filepath)[1].lower()
+        if ext in ['.out', '.orca']:
+            atomnos, coords, freqs, intens, Lx = cls.parse_orca_out(filepath)
+            hessian_source = "ORCA_OUT"
+        else:
+            atomnos, coords, freqs, intens, Lx = cls.parse_gaussian_log(filepath)
+            hessian_source = "LOG"
+
+        n_atoms = len(atomnos)
+        n_modes = len(freqs)
+
+        if n_atoms == 0 or n_modes == 0:
+            return atomnos, coords, freqs, intens, Lx, [], hessian_source
+
+        masses = np.array([ATOMIC_MASSES.get(int(num), 12.0) for num in atomnos], dtype=np.float64)
+        M_diag = np.repeat(masses, 3)
+
+        scaled_modes = []
+        for k in range(n_modes):
+            dk = Lx[:, k]
+            mu_k = float(np.dot(dk, M_diag * dk))
+            norm_factor = 1.0 / np.sqrt(mu_k) if mu_k > 1e-12 else 1.0
+            scaled_modes.append(dk * norm_factor)
+
+        Fx = None
+        if hessian_source == "LOG":
+            fchk_candidate = os.path.splitext(filepath)[0] + ".fchk"
+            if os.path.exists(fchk_candidate):
+                try:
+                    Fx = cls.read_fchk_hessian(fchk_candidate, n_atoms)
+                    hessian_source = "FCHK"
+                except Exception:
+                    Fx = None
+
+        if Fx is None:
+            Fx = np.zeros((n_atoms * 3, n_atoms * 3))
+            for k in range(n_modes):
+                xk = scaled_modes[k]
+                Fx += (freqs[k] ** 2) * np.outer(M_diag * xk, M_diag * xk)
+
+        ped_results = cls.compute_ped_analysis(atomnos, coords, freqs, intens, Lx, masses, Fx)
         return atomnos, coords, freqs, intens, Lx, ped_results, hessian_source
+
+    @classmethod
+    def identify_labile_protons(cls, atomnos: np.ndarray, coords: np.ndarray) -> Dict[int, Dict[str, Any]]:
+        """
+        Identyfikuje atomy wodoru w cząsteczce i klasyfikuje je na labilne (O-H, N-H, S-H, P-H itp.)
+        oraz nielabilne (głównie C-H) na podstawie analizy sąsiedztwa i promieni kowalencyjnych.
+        """
+        n_atoms = len(atomnos)
+        protons = {}
+
+        for i in range(n_atoms):
+            if atomnos[i] != 1:
+                continue
+
+            best_partner = -1
+            min_dist = 999.0
+
+            # Szukamy bezpośrednio związanego sąsiada
+            for j in range(n_atoms):
+                if i == j:
+                    continue
+                d = np.linalg.norm(coords[i] - coords[j])
+                r_cov_sum = COVALENT_RADII.get(atomnos[i], 0.31) + COVALENT_RADII.get(atomnos[j], 0.76)
+                if d <= (r_cov_sum + 0.45) and d < min_dist:
+                    min_dist = d
+                    best_partner = j
+
+            if best_partner != -1:
+                z_partner = atomnos[best_partner]
+                sym_partner = ELEMENT_SYMBOLS.get(z_partner, f"X{z_partner}")
+
+                # Wszystkie heteroatomy (Z != 6 i Z != 1) to protony labilne
+                is_labile = (z_partner != 6 and z_partner != 1)
+
+                if z_partner == 8:
+                    group = "O–H (hydroksylowy / karboksylowy)"
+                elif z_partner == 7:
+                    group = "N–H (aminowy / amidowy / iminowy)"
+                elif z_partner == 16:
+                    group = "S–H (tiolowy)"
+                elif z_partner == 15:
+                    group = "P–H / P–OH (fosforanowy)"
+                elif z_partner == 6:
+                    group = "C–H (nielabilny)"
+                else:
+                    group = f"{sym_partner}–H"
+            else:
+                z_partner = 0
+                sym_partner = "?"
+                is_labile = False
+                group = "H (izolowany)"
+                min_dist = 0.0
+
+            protons[i] = {
+                'atom_idx': i,
+                'partner_idx': best_partner,
+                'partner_sym': sym_partner,
+                'partner_z': z_partner,
+                'bond_dist': min_dist,
+                'is_labile': is_labile,
+                'group_name': group
+            }
+
+        return protons
 
     @classmethod
     def simulate_isotopic_shift(cls, atomnos: np.ndarray, coords: np.ndarray,
                                 freqs: List[float], intens: List[float], Lx: np.ndarray,
-                                mass_replacements: Dict[int, float]) -> Tuple[List[float], List[float], np.ndarray]:
-        """Szybkie przeliczenie zagadnienia własnego (H->D) on-the-fly w ułamku sekundy."""
+                                mass_replacements: Dict[int, float],
+                                fchk_path: Optional[str] = None) -> Tuple[
+        List[float], List[float], np.ndarray, str, List[Dict[str, Any]]]:
+        """Przelicza mody, intensywności oraz pełną analizę PED dla wybranego izotopomeru."""
         n_atoms = len(atomnos)
-        n_modes = len(freqs)
-        masses_orig = np.array([ATOMIC_MASSES.get(num, 12.0) for num in atomnos])
-        masses_iso = masses_orig.copy()
+        dim = 3 * n_atoms
+        AU_TO_CM = 5140.487143
 
+        masses_orig = np.array([ATOMIC_MASSES.get(int(num), 12.0) for num in atomnos], dtype=np.float64)
+        masses_iso = masses_orig.copy()
         for atom_idx, new_mass in mass_replacements.items():
             if 0 <= atom_idx < n_atoms:
-                masses_iso[atom_idx] = new_mass
+                masses_iso[atom_idx] = float(new_mass)
 
         M_orig_diag = np.repeat(masses_orig, 3)
         M_iso_diag = np.repeat(masses_iso, 3)
-        M_iso_inv_sqrt = 1.0 / np.sqrt(M_iso_diag)
 
-        # Rekonstrukcja Fx
-        Fx = np.zeros((n_atoms * 3, n_atoms * 3))
-        for k in range(n_modes):
-            dk = Lx[:, k]
-            mu_k = np.dot(dk, M_orig_diag * dk)
-            norm = 1.0 / np.sqrt(mu_k) if mu_k > 1e-12 else 1.0
-            xk = dk * norm
-            Fx += (freqs[k] ** 2) * np.outer(M_orig_diag * xk, M_orig_diag * xk)
+        Fx = None
+        if fchk_path and os.path.exists(fchk_path):
+            try:
+                Fx = cls.read_fchk_hessian(fchk_path, n_atoms)
+            except Exception:
+                Fx = None
 
-        H_mw_iso = (Fx * M_iso_inv_sqrt).T * M_iso_inv_sqrt
-        eigenvalues, eigenvectors = scipy.linalg.eigh(H_mw_iso)
+        if Fx is None:
+            n_modes_in = len(freqs)
+            Fx = np.zeros((dim, dim), dtype=np.float64)
+            for k in range(n_modes_in):
+                dk = Lx[:, k]
+                mu_k = float(np.dot(dk, M_orig_diag * dk))
+                norm = 1.0 / np.sqrt(mu_k) if mu_k > 1e-12 else 1.0
+                xk = dk * norm
+                omega_au = freqs[k] / AU_TO_CM
+                Fx += (omega_au ** 2) * np.outer(M_orig_diag * xk, M_orig_diag * xk)
 
-        pos = eigenvalues > 1e-4
-        iso_freqs = list(np.sqrt(eigenvalues[pos]))
-        iso_Lx = eigenvectors[:, pos]
+        def _diagonalize_with_tr_projection(F_mat: np.ndarray, masses_vec: np.ndarray):
+            coords_bohr = coords * 1.8897261245658
+            total_mass = np.sum(masses_vec)
+            r_cm = np.sum(coords_bohr * masses_vec[:, np.newaxis], axis=0) / total_mass
+            r_rel = coords_bohr - r_cm
 
-        return iso_freqs, intens[:len(iso_freqs)], iso_Lx
+            TR_vectors = np.zeros((dim, 6), dtype=np.float64)
+            for i in range(n_atoms):
+                sq_m = np.sqrt(masses_vec[i])
+                TR_vectors[3 * i + 0, 0] = sq_m
+                TR_vectors[3 * i + 1, 1] = sq_m
+                TR_vectors[3 * i + 2, 2] = sq_m
+                rx, ry, rz = r_rel[i]
+                TR_vectors[3 * i + 0, 3] = 0.0
+                TR_vectors[3 * i + 1, 3] = -rz * sq_m
+                TR_vectors[3 * i + 2, 3] = ry * sq_m
+                TR_vectors[3 * i + 0, 4] = rz * sq_m
+                TR_vectors[3 * i + 1, 4] = 0.0
+                TR_vectors[3 * i + 2, 4] = -rx * sq_m
+                TR_vectors[3 * i + 0, 5] = -ry * sq_m
+                TR_vectors[3 * i + 1, 5] = rx * sq_m
+                TR_vectors[3 * i + 2, 5] = 0.0
+
+            U_tr, s_tr, _ = np.linalg.svd(TR_vectors, full_matrices=False)
+            n_tr = int(np.sum(s_tr > 1e-4))
+            Q_tr = U_tr[:, :n_tr]
+            P_vib = np.eye(dim) - (Q_tr @ Q_tr.T)
+
+            m_diag = np.repeat(masses_vec, 3)
+            m_inv_sqrt = 1.0 / np.sqrt(m_diag)
+
+            H_mw = (F_mat * m_inv_sqrt).T * m_inv_sqrt
+            H_proj = P_vib @ H_mw @ P_vib
+            evals, evecs = scipy.linalg.eigh(H_proj)
+
+            vib_evals = evals[n_tr:]
+            vib_evecs_mw = evecs[:, n_tr:]
+            vib_freqs = AU_TO_CM * np.sqrt(np.maximum(0.0, vib_evals))
+            vib_Lx = (vib_evecs_mw.T * m_inv_sqrt).T
+            return vib_freqs, vib_Lx, vib_evecs_mw
+
+        iso_freqs, iso_Lx, iso_L_mw = _diagonalize_with_tr_projection(Fx, masses_iso)
+
+        # Intensywności IR
+        apt = None
+        if fchk_path and os.path.exists(fchk_path):
+            apt = cls.read_fchk_dipole_derivatives(fchk_path, n_atoms)
+
+        if apt is not None:
+            _, orig_Lx, _ = _diagonalize_with_tr_projection(Fx, masses_orig)
+            dmu_orig = apt @ orig_Lx
+            norm_sq_orig = np.sum(dmu_orig ** 2, axis=0)
+
+            sum_intens_orig = np.sum(intens)
+            sum_norm_orig = np.sum(norm_sq_orig)
+            c_scale = (sum_intens_orig / sum_norm_orig) if (
+                        sum_norm_orig > 1e-7 and sum_intens_orig > 1e-7) else 974.878
+
+            dmu_iso = apt @ iso_Lx
+            norm_sq_iso = np.sum(dmu_iso ** 2, axis=0)
+            iso_intens = list(c_scale * norm_sq_iso)
+            intensity_source = "APT (FCHK)"
+        else:
+            _, _, orig_L_mw = _diagonalize_with_tr_projection(Fx, masses_orig)
+            J = orig_L_mw.T @ iso_L_mw
+            J_sq = J ** 2
+            col_sums = np.sum(J_sq, axis=0)
+            col_sums[col_sums < 1e-8] = 1.0
+            J_norm = J_sq / col_sums
+
+            n_modes_orig = min(len(intens), orig_L_mw.shape[1])
+            iso_intens = list(np.dot(np.array(intens[:n_modes_orig]), J_norm))
+            intensity_source = "Duschinsky Projection (.LOG)"
+
+        # Wyznaczenie analizy PED dla izotopomeru
+        iso_ped = cls.compute_ped_analysis(
+            atomnos, coords, list(iso_freqs), iso_intens, iso_Lx,
+            masses_iso, Fx, mass_replacements=mass_replacements
+        )
+
+        return list(iso_freqs), iso_intens, iso_Lx, intensity_source, iso_ped

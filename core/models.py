@@ -278,6 +278,8 @@ class GaussianData(SpectrumData):
     ped_results: List[Dict[str, Any]] = field(default_factory=list)
     hessian_source: str = "LOG"
     scale_factor: float = 1.0
+    fwhm: float = 14.0
+    shape: str = "Gauss"
     atomnos: np.ndarray = field(default_factory=lambda: np.array([], dtype=int))
     coords: np.ndarray = field(default_factory=lambda: np.empty((0, 3), dtype=np.float64))
     Lx: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=np.float64))
@@ -300,6 +302,8 @@ class GaussianData(SpectrumData):
             ped_results=copy.deepcopy(self.ped_results),
             hessian_source=self.hessian_source,
             scale_factor=self.scale_factor,
+            fwhm=getattr(self, 'fwhm', 14.0),
+            shape=getattr(self, 'shape', 'Gauss'),
             atomnos=self.atomnos.copy() if self.atomnos is not None else np.array([]),
             coords=self.coords.copy() if self.coords is not None else np.empty((0, 3)),
             Lx=self.Lx.copy() if self.Lx is not None else np.empty((0, 0))
