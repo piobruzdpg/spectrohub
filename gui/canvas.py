@@ -346,8 +346,19 @@ class SpectroCanvas(QWidget):
             ref_wn = vis_specs[0].wavenumbers
             n_points = len(vis_specs)
             mat = np.zeros((len(ref_wn), n_points), dtype=np.float64)
+
             for i, s in enumerate(vis_specs):
-                mat[:, i] = np.interp(ref_wn, s.wavenumbers, s.intensities)
+                # 1. Optymalizacja: identyczna siatka X (np. widma z dekompozycji HDO / dekonwolucji)
+                if len(s.wavenumbers) == len(ref_wn) and np.array_equal(s.wavenumbers, ref_wn):
+                    mat[:, i] = s.intensities
+                else:
+                    # 2. Bezpieczna interpolacja: np.interp wymaga strictly increasing xp
+                    xw, yw = s.wavenumbers, s.intensities
+                    if len(xw) > 1 and xw[0] > xw[-1]:
+                        xw_s, yw_s = xw[::-1], yw[::-1]
+                    else:
+                        xw_s, yw_s = xw, yw
+                    mat[:, i] = np.interp(ref_wn, xw_s, yw_s)
 
             x_vals = np.arange(1, n_points + 1, dtype=np.float64)
             x_label = "Numer widma"

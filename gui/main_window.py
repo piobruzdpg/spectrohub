@@ -2,6 +2,8 @@
 gui/main_window.py
 Główne okno aplikacji SpectroHub w technologii PySide6 (Qt6).
 Synchronizuje SpectroCanvas ze zmianą aktywnej gałęzi magazynu.
+Obsługuje 6 perspektyw analitycznych: Preprocessing, Matematyka, Dekonwolucja,
+Chemometria, DFT 3D oraz Statystyka.
 """
 
 import os
@@ -22,12 +24,13 @@ from gui.project_metadata_widget import ProjectMetadataWidget
 from io_hub.project_io import ProjectBundleIO
 from io_hub.dispatcher import SpectrumImportDispatcher
 
-# Panele robocze
+# Panele robocze (Workspaces 1–6)
 from gui.workspaces.ws_preprocessing import PreprocessingPanel
+from gui.workspaces.ws_spectral_math import SpectralMathPanel
 from gui.workspaces.ws_deconvolution import DeconvolutionPanel
 from gui.workspaces.ws_chemometrics import ChemometricsPanel
 from gui.workspaces.ws_quantum import QuantumPanel
-from gui.workspaces.ws_spectral_math import SpectralMathPanel
+from gui.workspaces.ws_statistics import StatisticsWorkspace
 
 from io_hub.exporters.excel_exporter import ExcelProjectExporter
 from io_hub.exporters.ascii_exporter import ASCIIExporter
@@ -63,7 +66,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.resize(1400, 920)
+        self.resize(1440, 920)
         self.setStyleSheet(DARK_STYLE)
 
         self.cached_dag_state = {}
@@ -109,7 +112,7 @@ class MainWindow(QMainWindow):
         self.canvas_2d = SpectroCanvas(self)
         self.setCentralWidget(self.canvas_2d)
 
-        # Prawy dok: Workspace Inspector
+        # Prawy dok: Workspace Inspector (6 Perspektyw)
         self.dock_inspector = QDockWidget(self)
         self.dock_inspector.setObjectName("DockInspector")
         self.inspector_stack = QStackedWidget(self)
@@ -119,18 +122,20 @@ class MainWindow(QMainWindow):
         self.panel_deconv = DeconvolutionPanel(self)
         self.panel_chem = ChemometricsPanel(self)
         self.panel_dft = QuantumPanel(self)
+        self.panel_stat = StatisticsWorkspace(self)
 
         self.inspector_stack.addWidget(self.panel_prep)    # 0
         self.inspector_stack.addWidget(self.panel_math)    # 1
         self.inspector_stack.addWidget(self.panel_deconv)  # 2
         self.inspector_stack.addWidget(self.panel_chem)    # 3
         self.inspector_stack.addWidget(self.panel_dft)     # 4
+        self.inspector_stack.addWidget(self.panel_stat)    # 5
 
         self.dock_inspector.setWidget(self.inspector_stack)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_inspector)
 
         # Zoptymalizowany podział przestrzeni na start
-        self.resizeDocks([self.dock_tree, self.dock_inspector], [260, 360], Qt.Horizontal)
+        self.resizeDocks([self.dock_tree, self.dock_inspector], [260, 380], Qt.Horizontal)
 
         self.status_bar = QStatusBar(self)
         self.setStatusBar(self.status_bar)
@@ -221,7 +226,8 @@ class MainWindow(QMainWindow):
             ("workspaces.spectral_math", 1),
             ("workspaces.deconvolution", 2),
             ("workspaces.chemometrics", 3),
-            ("workspaces.quantum", 4)
+            ("workspaces.quantum", 4),
+            ("workspaces.statistics", 5)
         ]
 
         for key, idx in workspaces_keys:
@@ -236,12 +242,12 @@ class MainWindow(QMainWindow):
 
         self.ws_group.idClicked.connect(self._on_workspace_selected)
 
-        # Rozciągający się spacer dociągający prawe elementy do prawej krawędzi
+        # Spacer dociągający prawe elementy do krawędzi
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         toolbar.addWidget(spacer)
 
-        # Przycisk Okna Grafów (Potoku Węzłowego)
+        # Przycisk Okna Grafów (Potoku Węzłowego DAG)
         self.btn_node_graph = QPushButton("⑂ Okno grafów")
         self.btn_node_graph.setToolTip("Otwórz wizualny potok węzłowy (DAG)")
         self.btn_node_graph.setStyleSheet("""
@@ -258,7 +264,7 @@ class MainWindow(QMainWindow):
         self.btn_node_graph.clicked.connect(self.open_node_pipeline_dialog)
         toolbar.addWidget(self.btn_node_graph)
 
-        # Przycisk zmiany języka (zawsze skrajnie po prawej)
+        # Przycisk zmiany języka
         self.btn_lang = QPushButton("🇵🇱 PL / 🇬🇧 EN")
         self.btn_lang.setToolTip("Zmień język interfejsu (Language)")
         self.btn_lang.clicked.connect(self._toggle_language)
@@ -280,9 +286,13 @@ class MainWindow(QMainWindow):
         self.inspector_stack.setCurrentIndex(idx)
         self.status_bar.showMessage(f"{tr('app.ready')}: Workspace {idx + 1}")
 
-        if idx in (0, 3):
+        if idx in (0, 3, 5):
             self.canvas_2d.prepare_axes(shared_x=True)
             self.canvas_2d.redraw_all()
+
+        current_widget = self.inspector_stack.currentWidget()
+        if hasattr(current_widget, "refresh_view"):
+            current_widget.refresh_view()
 
     def _toggle_language(self):
         new_lang = "en" if i18n.current_language == "pl" else "pl"

@@ -105,6 +105,7 @@ TRANSLATIONS = {
         "deconvolution": "3. Deconvolution & Fit",
         "chemometrics": "4. Chemometrics",
         "quantum": "5. DFT & 3D Vibrations",
+        "workspaces.statistics": "6. Statistics",
     },
     "project_tree": {
         "header": "Project Explorer",

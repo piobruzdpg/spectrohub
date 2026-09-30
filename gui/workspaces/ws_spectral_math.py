@@ -1,8 +1,8 @@
 """
 gui/workspaces/ws_spectral_math.py
 Perspektywa Matematyki Spektralnej (Spectral Math Workspace).
-Zawiera parametryczny korektor suwakowy dla współczynnika k,
-operacje algebraiczne na widmach oraz przeliczanie fotometryczne.
+Zawiera parametryczny korektor suwakowy dla współczynnika k (z zakresem ±100),
+asystenta analitycznego Auto-k (OLS), kompaktowy układ 2x2 dla operacji oraz fotometrię.
 Pełna izolacja kontekstowa (Okna robocze vs Magazyn) i wsparcie wsadowe.
 """
 
@@ -12,17 +12,17 @@ import numpy as np
 from typing import Optional, List, Dict, Any
 
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QComboBox, QDoubleSpinBox, QGroupBox, QRadioButton,
     QButtonGroup, QScrollArea, QFrame, QSlider, QMessageBox,
-    QTabWidget, QLineEdit, QCheckBox
+    QTabWidget, QCheckBox, QSizePolicy
 )
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QUndoCommand
 
 from core.session import session
 from core.models import SpectrumData
-from core.i18n import tr, i18n
+from core.i18n import tr
 from algorithms import spectral_math as smath
 from gui.workspaces.ws_preprocessing import AddBatchSpectraCommand, BatchPipelineCommand
 
@@ -34,10 +34,11 @@ logger = logging.getLogger("SpectroHub")
 # =============================================================================
 
 class ParametricKWidget(QGroupBox):
-    """Korektor suwakowy rozbijający współczynnik k na sumę rzędów wielkości."""
+    """Korektor suwakowy rozbijający współczynnik k na sumę rzędów wielkości (z zakresem ±100)."""
     k_changed = Signal(float)
 
     BANDS = [
+        ("±100", 10.0, 10),      # Krok 10.0, zakres [-100, 100]
         ("±10", 1.0, 10),        # Krok 1.0, zakres [-10, 10]
         ("±1.0", 0.1, 10),       # Krok 0.1, zakres [-1.0, 1.0]
         ("±0.1", 0.01, 10),      # Krok 0.01, zakres [-0.1, 0.1]
@@ -60,15 +61,16 @@ class ParametricKWidget(QGroupBox):
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(6, 8, 6, 6)
-        main_layout.setSpacing(6)
+        main_layout.setContentsMargins(6, 8, 6, 8)
+        main_layout.setSpacing(8)
 
+        # 1. Pasek Master K
         row_master = QHBoxLayout()
         row_master.addWidget(QLabel("Współczynnik całkowity (k):"))
         self.spin_total_k = QDoubleSpinBox()
-        self.spin_total_k.setRange(-99.0, 99.0)
+        self.spin_total_k.setRange(-999.0, 999.0)
         self.spin_total_k.setDecimals(5)
-        self.spin_total_k.setSingleStep(0.01)
+        self.spin_total_k.setSingleStep(0.1)
         self.spin_total_k.setValue(0.0)
         self.spin_total_k.valueChanged.connect(self._on_spin_k_changed)
         row_master.addWidget(self.spin_total_k, 1)
@@ -78,16 +80,48 @@ class ParametricKWidget(QGroupBox):
         row_master.addWidget(btn_reset_all)
         main_layout.addLayout(row_master)
 
+        # 2. Asystent Auto-k w oknie (OLS)
+        row_auto = QHBoxLayout()
+        row_auto.setSpacing(4)
+        lbl_auto = QLabel("🎯 Auto-k w oknie [cm⁻¹]:")
+        lbl_auto.setStyleSheet("font-size: 10px; color: #a0a0a0;")
+        row_auto.addWidget(lbl_auto)
+
+        self.spin_nu_from = QDoubleSpinBox()
+        self.spin_nu_from.setRange(400.0, 4500.0)
+        self.spin_nu_from.setValue(2100.0)
+        self.spin_nu_from.setDecimals(1)
+        self.spin_nu_from.setFixedWidth(68)
+        row_auto.addWidget(self.spin_nu_from)
+
+        lbl_dash = QLabel("–")
+        lbl_dash.setStyleSheet("color: #a0a0a0;")
+        row_auto.addWidget(lbl_dash)
+
+        self.spin_nu_to = QDoubleSpinBox()
+        self.spin_nu_to.setRange(400.0, 4500.0)
+        self.spin_nu_to.setValue(2250.0)
+        self.spin_nu_to.setDecimals(1)
+        self.spin_nu_to.setFixedWidth(68)
+        row_auto.addWidget(self.spin_nu_to)
+
+        self.btn_auto_k = QPushButton("Estymuj")
+        self.btn_auto_k.setStyleSheet("font-size: 10px; font-weight: bold; background-color: #1b4332; color: #52b788; padding: 3px 8px;")
+        row_auto.addWidget(self.btn_auto_k)
+        row_auto.addStretch()
+        main_layout.addLayout(row_auto)
+
+        # 3. Kasetka z pionowymi suwakami rzędów wielkości
         sliders_frame = QFrame()
         sliders_frame.setStyleSheet("background-color: #1e1e24; border-radius: 4px; padding: 4px;")
         l_sliders = QHBoxLayout(sliders_frame)
         l_sliders.setSpacing(4)
-        l_sliders.setContentsMargins(4, 4, 4, 4)
+        l_sliders.setContentsMargins(4, 6, 4, 6)
 
         for label_text, step_mult, max_steps in self.BANDS:
             col_box = QVBoxLayout()
             col_box.setAlignment(Qt.AlignCenter)
-            col_box.setSpacing(4)
+            col_box.setSpacing(5)
 
             lbl_val = QLabel("0.0")
             lbl_val.setStyleSheet("font-size: 10px; color: #a0a0a0;")
@@ -98,7 +132,7 @@ class ParametricKWidget(QGroupBox):
             slider = QSlider(Qt.Vertical)
             slider.setRange(-max_steps, max_steps)
             slider.setValue(0)
-            slider.setFixedHeight(95)
+            slider.setFixedHeight(135)
             slider.setTickPosition(QSlider.TicksBothSides)
             slider.setTickInterval(max_steps // 2)
             slider.valueChanged.connect(self._on_slider_moved)
@@ -121,13 +155,26 @@ class ParametricKWidget(QGroupBox):
         main_layout.addWidget(sliders_frame)
         self.set_k(0.0)
 
+    @staticmethod
+    def _format_contrib(val: float, step: float) -> str:
+        if abs(val) < 1e-12:
+            return "0.0"
+        if step >= 10.0:
+            return f"{val:+.0f}"
+        elif step >= 1.0:
+            return f"{val:+.1f}"
+        elif step >= 0.01:
+            return f"{val:+.3f}"
+        else:
+            return f"{val:+.5f}"
+
     def _on_slider_moved(self):
         if self._is_updating:
             return
         total = 0.0
         for i, (name, step_mult, _) in enumerate(self.BANDS):
             c_val = self._sliders[i].value() * step_mult
-            self._val_labels[i].setText(f"{c_val:+.4f}".rstrip('0').rstrip('.'))
+            self._val_labels[i].setText(self._format_contrib(c_val, step_mult))
             total += c_val
 
         self._is_updating = True
@@ -151,7 +198,7 @@ class ParametricKWidget(QGroupBox):
             steps = max(-max_steps, min(max_steps, steps))
             self._sliders[i].setValue(steps)
             contrib = steps * step_mult
-            self._val_labels[i].setText(f"{contrib:+.4f}".rstrip('0').rstrip('.'))
+            self._val_labels[i].setText(self._format_contrib(contrib, step_mult))
             rem -= contrib
 
         self._is_updating = False
@@ -227,8 +274,11 @@ class SpectralMathPanel(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        # 1. ŹRÓDŁA WIDM (S1 i S2)
+        # ---------------------------------------------------------------------
+        # 1. WYBÓR DANYCH WEJŚCIOWYCH
+        # ---------------------------------------------------------------------
         box_src = QGroupBox("1. Wybór Danych Wejściowych")
+        box_src.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         l_src = QVBoxLayout(box_src)
 
         row_s1 = QHBoxLayout()
@@ -247,7 +297,6 @@ class SpectralMathPanel(QWidget):
         row_s2.addWidget(self.combo_s2, 1)
         l_src.addLayout(row_s2)
 
-        # Tryb wsadowy i informacja o kontekście
         self.chk_batch = QCheckBox("Tryb wsadowy (Batch): zastosuj operację do serii")
         self.chk_batch.setStyleSheet("color: #48cae4; font-weight: bold;")
         self.chk_batch.toggled.connect(self._on_batch_toggled)
@@ -259,17 +308,25 @@ class SpectralMathPanel(QWidget):
 
         layout.addWidget(box_src)
 
-        # 2. EQUALIZER SUWAKOWY DLA K
-        self.equalizer = ParametricKWidget()
-        self.equalizer.k_changed.connect(self._on_k_changed)
-        layout.addWidget(self.equalizer)
+        # ---------------------------------------------------------------------
+        # 2. TYP OPERACJI (ZAKŁADKI W UKŁADZIE 2x2 O STAŁEJ ZWARTEJ WYSOKOŚCI)
+        # ---------------------------------------------------------------------
+        box_ops = QGroupBox("2. Wybór Operacji")
+        box_ops.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        l_ops = QVBoxLayout(box_ops)
+        l_ops.setContentsMargins(4, 6, 4, 6)
 
-        # 3. TYP OPERACJI
         self.tabs_ops = QTabWidget()
+        self.tabs_ops.setFixedHeight(125)
 
-        # Tab 1: Operacje dwuwidmowe
+        # Tab 1: Operacje dwuwidmowe (2 wiersze x 2 kolumny)
         tab_spec = QWidget()
         l_tab_spec = QVBoxLayout(tab_spec)
+        l_tab_spec.setContentsMargins(6, 8, 6, 6)
+        l_tab_spec.setSpacing(6)
+
+        grid_spec = QGridLayout()
+        grid_spec.setSpacing(6)
         self.bg_ops = QButtonGroup(self)
 
         self.rb_sub = QRadioButton("Różnica: S₁ − k·S₂")
@@ -278,26 +335,40 @@ class SpectralMathPanel(QWidget):
         self.rb_mul = QRadioButton("Mnożenie: S₁ × S₂")
         self.rb_div = QRadioButton("Dzielenie: S₁ / S₂")
 
-        for idx, rb in enumerate([self.rb_sub, self.rb_add, self.rb_mul, self.rb_div]):
-            self.bg_ops.addButton(rb, idx)
-            l_tab_spec.addWidget(rb)
+        self.bg_ops.addButton(self.rb_sub, 0)
+        self.bg_ops.addButton(self.rb_add, 1)
+        self.bg_ops.addButton(self.rb_mul, 2)
+        self.bg_ops.addButton(self.rb_div, 3)
+
+        grid_spec.addWidget(self.rb_sub, 0, 0)
+        grid_spec.addWidget(self.rb_add, 0, 1)
+        grid_spec.addWidget(self.rb_mul, 1, 0)
+        grid_spec.addWidget(self.rb_div, 1, 1)
+
+        for rb in [self.rb_sub, self.rb_add, self.rb_mul, self.rb_div]:
             rb.toggled.connect(self._on_operation_changed)
 
+        l_tab_spec.addLayout(grid_spec)
+        l_tab_spec.addStretch()
         self.tabs_ops.addTab(tab_spec, "Widmo ↔ Widmo")
 
-        # Tab 2: Operacje ze stałą (Skalar)
+        # Tab 2: Operacje ze stałą / Skalar (2 wiersze x 2 kolumny)
         tab_scalar = QWidget()
         l_tab_scalar = QVBoxLayout(tab_scalar)
+        l_tab_scalar.setContentsMargins(6, 6, 6, 6)
+        l_tab_scalar.setSpacing(6)
 
         row_c = QHBoxLayout()
         row_c.addWidget(QLabel("Wartość stałej (c):"))
         self.spin_c = QDoubleSpinBox()
-        self.spin_c.setRange(-1000.0, 1000.0)
+        self.spin_c.setRange(-10000.0, 10000.0)
         self.spin_c.setValue(1.0)
         self.spin_c.valueChanged.connect(self._recalculate)
         row_c.addWidget(self.spin_c)
         l_tab_scalar.addLayout(row_c)
 
+        grid_scalar = QGridLayout()
+        grid_scalar.setSpacing(6)
         self.bg_scalar = QButtonGroup(self)
         self.rb_sc_add = QRadioButton("Dodaj: S + c")
         self.rb_sc_sub = QRadioButton("Odejmij: S − c")
@@ -305,37 +376,73 @@ class SpectralMathPanel(QWidget):
         self.rb_sc_div = QRadioButton("Podziel: S / c")
         self.rb_sc_add.setChecked(True)
 
-        for idx, rb in enumerate([self.rb_sc_add, self.rb_sc_sub, self.rb_sc_mul, self.rb_sc_div]):
-            self.bg_scalar.addButton(rb, idx)
-            l_tab_scalar.addWidget(rb)
+        self.bg_scalar.addButton(self.rb_sc_add, 0)
+        self.bg_scalar.addButton(self.rb_sc_sub, 1)
+        self.bg_scalar.addButton(self.rb_sc_mul, 2)
+        self.bg_scalar.addButton(self.rb_sc_div, 3)
+
+        grid_scalar.addWidget(self.rb_sc_add, 0, 0)
+        grid_scalar.addWidget(self.rb_sc_sub, 0, 1)
+        grid_scalar.addWidget(self.rb_sc_mul, 1, 0)
+        grid_scalar.addWidget(self.rb_sc_div, 1, 1)
+
+        for rb in [self.rb_sc_add, self.rb_sc_sub, self.rb_sc_mul, self.rb_sc_div]:
             rb.toggled.connect(self._recalculate)
 
+        l_tab_scalar.addLayout(grid_scalar)
+        l_tab_scalar.addStretch()
         self.tabs_ops.addTab(tab_scalar, "Skalar (c)")
 
-        # Tab 3: Przeliczenia fizyczne i fotometryczne
+        # Tab 3: Przeliczenia fotometryczne (2 wiersze x 2 kolumny)
         tab_trans = QWidget()
         l_tab_trans = QVBoxLayout(tab_trans)
+        l_tab_trans.setContentsMargins(6, 8, 6, 6)
+        l_tab_trans.setSpacing(6)
 
-        btn_a_to_t = QPushButton("Absorbancja ➔ Transmitancja [0–1]")
-        btn_a_to_t.clicked.connect(lambda: self._apply_photometric('a_to_t'))
-        btn_a_to_pct = QPushButton("Absorbancja ➔ %T [0–100%]")
-        btn_a_to_pct.clicked.connect(lambda: self._apply_photometric('a_to_pct'))
-        btn_pct_to_a = QPushButton("%T ➔ Absorbancja")
-        btn_pct_to_a.clicked.connect(lambda: self._apply_photometric('pct_to_a'))
-        btn_km = QPushButton("Kubelka-Munk: f(R∞)")
-        btn_km.clicked.connect(lambda: self._apply_photometric('km'))
+        grid_photo = QGridLayout()
+        grid_photo.setSpacing(6)
 
-        l_tab_trans.addWidget(btn_a_to_t)
-        l_tab_trans.addWidget(btn_a_to_pct)
-        l_tab_trans.addWidget(btn_pct_to_a)
-        l_tab_trans.addWidget(btn_km)
+        self.bg_photo = QButtonGroup(self)
+        self.rb_ph_a_to_t = QRadioButton("A ➔ T (Transmisja 0–1)")
+        self.rb_ph_t_to_a = QRadioButton("T ➔ A (z Transmisji 0–1)")
+        self.rb_ph_a_to_pct = QRadioButton("A ➔ %T (0–100%)")
+        self.rb_ph_pct_to_a = QRadioButton("%T ➔ A (z %T)")
+        self.rb_ph_a_to_t.setChecked(True)
+
+        self.bg_photo.addButton(self.rb_ph_a_to_t, 0)
+        self.bg_photo.addButton(self.rb_ph_t_to_a, 1)
+        self.bg_photo.addButton(self.rb_ph_a_to_pct, 2)
+        self.bg_photo.addButton(self.rb_ph_pct_to_a, 3)
+
+        grid_photo.addWidget(self.rb_ph_a_to_t, 0, 0)
+        grid_photo.addWidget(self.rb_ph_t_to_a, 0, 1)
+        grid_photo.addWidget(self.rb_ph_a_to_pct, 1, 0)
+        grid_photo.addWidget(self.rb_ph_pct_to_a, 1, 1)
+
+        for rb in [self.rb_ph_a_to_t, self.rb_ph_t_to_a, self.rb_ph_a_to_pct, self.rb_ph_pct_to_a]:
+            rb.toggled.connect(self._recalculate)
+
+        l_tab_trans.addLayout(grid_photo)
+        l_tab_trans.addStretch()
         self.tabs_ops.addTab(tab_trans, "Fotometria")
-
         self.tabs_ops.currentChanged.connect(self._on_operation_changed)
-        layout.addWidget(self.tabs_ops)
 
-        # 4. ZATWIERDZANIE
+        l_ops.addWidget(self.tabs_ops)
+        layout.addWidget(box_ops)
+
+        # ---------------------------------------------------------------------
+        # 3. EQUALIZER SUWAKOWY DLA K (DEFINICJA PRZED PODPIĘCIEM SYGNAŁÓW)
+        # ---------------------------------------------------------------------
+        self.equalizer = ParametricKWidget()
+        self.equalizer.k_changed.connect(self._on_k_changed)
+        self.equalizer.btn_auto_k.clicked.connect(self._on_auto_k_requested)
+        layout.addWidget(self.equalizer)
+
+        # ---------------------------------------------------------------------
+        # 4. ZATWIERDZENIE WYNIKÓW
+        # ---------------------------------------------------------------------
         box_commit = QGroupBox("3. Zatwierdzenie")
+        box_commit.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
         l_commit = QVBoxLayout(box_commit)
 
         self.btn_commit_new = QPushButton("➕ Dodaj wynik jako nowe widmo")
@@ -366,6 +473,7 @@ class SpectralMathPanel(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
         self._refresh_combos()
+        self._on_operation_changed()
         self._recalculate()
 
     def hideEvent(self, event):
@@ -386,7 +494,6 @@ class SpectralMathPanel(QWidget):
         self.combo_s1.clear()
         self.combo_s2.clear()
 
-        # Domyślnie puste pozycje placeholder
         self.combo_s1.addItem("-- Wybierz widmo badane (S₁) --", None)
         self.combo_s2.addItem("-- Brak / Wybierz odniesienie (S₂) --", None)
 
@@ -398,6 +505,8 @@ class SpectralMathPanel(QWidget):
         if prev_s1 is not None:
             idx1 = self.combo_s1.findData(prev_s1)
             self.combo_s1.setCurrentIndex(idx1 if idx1 >= 0 else 0)
+        elif spectra:
+            self.combo_s1.setCurrentIndex(1)
         else:
             self.combo_s1.setCurrentIndex(0)
 
@@ -410,7 +519,6 @@ class SpectralMathPanel(QWidget):
         self.combo_s1.blockSignals(False)
         self.combo_s2.blockSignals(False)
 
-        # Precyzyjna informacja o kontekście operacji
         is_window = (session.active_context == "window" and session.active_window is not None)
         if is_window:
             win_name = session.active_window.name
@@ -438,14 +546,48 @@ class SpectralMathPanel(QWidget):
         self._recalculate()
 
     def _on_operation_changed(self):
-        self.equalizer.setVisible(self.tabs_ops.currentIndex() == 0 and self.bg_ops.checkedId() in [0, 1])
+        tab_idx = self.tabs_ops.currentIndex()
+        needs_s2 = (tab_idx == 0)
+        self.lbl_s2.setEnabled(needs_s2)
+        self.combo_s2.setEnabled(needs_s2)
+
+        # Equalizer jest widoczny wyłącznie dla dodawania i odejmowania widm
+        is_linear_diff = (tab_idx == 0 and self.bg_ops.checkedId() in [0, 1])
+        self.equalizer.setVisible(is_linear_diff)
+
         self._recalculate()
 
     def _on_k_changed(self, k: float):
         self._recalculate()
 
+    def _on_auto_k_requested(self):
+        """Oblicza k metodą OLS w wybranym oknie i aktualizuje suwaki equalizera."""
+        s1_name = self.combo_s1.currentData()
+        s2_name = self.combo_s2.currentData()
+        if not s1_name or not s2_name:
+            QMessageBox.warning(self, tr("app.warning"), "Wybierz widmo badane (S₁) oraz odniesienia (S₂) przed estymacją.")
+            return
+
+        spectra_dict = {s.name: s for s in session.get_display_spectra()}
+        s1 = spectra_dict.get(s1_name)
+        s2 = spectra_dict.get(s2_name)
+        if not s1 or not s2:
+            return
+
+        nu_min = self.equalizer.spin_nu_from.value()
+        nu_max = self.equalizer.spin_nu_to.value()
+
+        k_est = smath.estimate_subtraction_factor(
+            s1.wavenumbers, s1.intensities,
+            s2.wavenumbers, s2.intensities,
+            nu_min, nu_max
+        )
+
+        self.equalizer.set_k(k_est)
+        self._recalculate()
+
     # =========================================================================
-    # SZYBKI PODGLĄD NA ŻYWO (60 FPS, TYLKO GDY PERSPEKTYWA JEST WIDOCZNA)
+    # PODGLĄD NA ŻYWO (LIVE PREVIEW)
     # =========================================================================
 
     def _recalculate(self):
@@ -461,7 +603,6 @@ class SpectralMathPanel(QWidget):
         s2_name = self.combo_s2.currentData()
         tab_idx = self.tabs_ops.currentIndex()
 
-        # Dopóki brak wyboru S1 lub S2 (dla operacji dwuwidmowych), usuwamy linię podglądu
         if not s1_name or (tab_idx == 0 and not s2_name):
             self._remove_preview_line()
             return
@@ -496,6 +637,19 @@ class SpectralMathPanel(QWidget):
                 c = self.spin_c.value()
                 op_map = {0: 'add', 1: 'sub', 2: 'mul', 3: 'div'}
                 res_y = smath.scalar_operation(y1, c, op_map.get(self.bg_scalar.checkedId(), 'add'))
+
+            elif tab_idx == 2:
+                ph_id = self.bg_photo.checkedId()
+                if ph_id == 0:
+                    res_y = smath.absorbance_to_transmittance(y1)
+                elif ph_id == 1:
+                    res_y = smath.transmittance_to_absorbance(y1)
+                elif ph_id == 2:
+                    res_y = smath.absorbance_to_percent_t(y1)
+                elif ph_id == 3:
+                    res_y = smath.percent_t_to_absorbance(y1)
+                else:
+                    res_y = y1
             else:
                 res_y = y1
 
@@ -539,6 +693,7 @@ class SpectralMathPanel(QWidget):
         is_batch = self.chk_batch.isChecked()
         target_win = session.active_window_id if session.active_context == "window" else None
         visible_spectra = session.get_display_spectra()
+        tab_idx = self.tabs_ops.currentIndex()
 
         # 1. TRYB POJEDYNCZY
         if not is_batch:
@@ -547,7 +702,17 @@ class SpectralMathPanel(QWidget):
                 QMessageBox.warning(self, tr("app.warning"), "Wybierz widma wejściowe przed zatwierdzeniem.")
                 return
 
-            new_name = f"{s1_name}_math"
+            if tab_idx == 0:
+                op_tags = {0: "diff", 1: "sum", 2: "mul", 3: "div"}
+                tag = op_tags.get(self.bg_ops.checkedId(), "math")
+            elif tab_idx == 1:
+                op_tags = {0: "add", 1: "sub", 2: "mul", 3: "div"}
+                tag = op_tags.get(self.bg_scalar.checkedId(), "scalar")
+            else:
+                ph_tags = {0: "trans", 1: "abs", 2: "pctT", 3: "abs"}
+                tag = ph_tags.get(self.bg_photo.checkedId(), "photo")
+
+            new_name = f"{s1_name}_{tag}"
             new_spec = SpectrumData(
                 wavenumbers=self._last_result_x.copy(),
                 intensities=self._last_result_y.copy(),
@@ -567,7 +732,7 @@ class SpectralMathPanel(QWidget):
                 QMessageBox.warning(self, tr("app.warning"), "Brak widocznych widm w aktywnym widoku.")
                 return
 
-            tab_idx = self.tabs_ops.currentIndex()
+            new_list = []
 
             if tab_idx == 0:  # Widmo ↔ Widmo
                 s2_name = self.combo_s2.currentData()
@@ -582,12 +747,10 @@ class SpectralMathPanel(QWidget):
 
                 k = self.equalizer.get_k()
                 op_id = self.bg_ops.checkedId()
-                op_tags = {0: "sub", 1: "add", 2: "mul", 3: "div"}
+                op_tags = {0: "diff", 1: "sum", 2: "mul", 3: "div"}
                 op_tag = op_tags.get(op_id, "math")
 
-                new_list = []
                 for s in visible_spectra:
-                    # Wykonujemy operację na KAŻDYM widmie (włącznie z odniesieniem, dając np. linię 0 dla k=1)
                     y2_aligned = smath.align_to_reference(s2.wavenumbers, s2.intensities, s.wavenumbers)
                     if op_id == 0:
                         y_out = smath.subtract_spectra(s.intensities, y2_aligned, k)
@@ -609,23 +772,12 @@ class SpectralMathPanel(QWidget):
                         metadata={"math_source": s.name, "math_ref": s2_name, "k": k, "op": op_tag}
                     ))
 
-                if not new_list:
-                    QMessageBox.information(self, tr("app.info"), "Brak widm do przetworzenia.")
-                    return
-
-                self._remove_preview_line()
-                cmd = AddBatchSpectraCommand(new_list, f"Matematyka wsadowa ({len(new_list)} widm)", canvas=canvas,
-                                             window_id=target_win)
-                session.undo_stack.push(cmd)
-                QMessageBox.information(self, tr("app.info"), f"Pomyślnie utworzono {len(new_list)} nowych widm.")
-
             elif tab_idx == 1:  # Skalar
                 c = self.spin_c.value()
                 op_id = self.bg_scalar.checkedId()
                 op_map = {0: 'add', 1: 'sub', 2: 'mul', 3: 'div'}
                 op_str = op_map.get(op_id, 'add')
 
-                new_list = []
                 for s in visible_spectra:
                     y_out = smath.scalar_operation(s.intensities, c, op_str)
                     new_list.append(SpectrumData(
@@ -637,16 +789,46 @@ class SpectralMathPanel(QWidget):
                         metadata={"math_source": s.name, "scalar_c": c, "op": op_str}
                     ))
 
-                self._remove_preview_line()
-                cmd = AddBatchSpectraCommand(new_list, f"Skalar wsadowo ({len(new_list)} widm)", canvas=canvas,
-                                             window_id=target_win)
-                session.undo_stack.push(cmd)
-                QMessageBox.information(self, tr("app.info"), f"Pomyślnie utworzono {len(new_list)} nowych widm.")
+            elif tab_idx == 2:  # Fotometria wsadowa
+                ph_id = self.bg_photo.checkedId()
+                ph_tags = {0: "trans", 1: "abs", 2: "pctT", 3: "abs"}
+                tag = ph_tags.get(ph_id, "photo")
+
+                for s in visible_spectra:
+                    if ph_id == 0:
+                        y_out = smath.absorbance_to_transmittance(s.intensities)
+                    elif ph_id == 1:
+                        y_out = smath.transmittance_to_absorbance(s.intensities)
+                    elif ph_id == 2:
+                        y_out = smath.absorbance_to_percent_t(s.intensities)
+                    elif ph_id == 3:
+                        y_out = smath.percent_t_to_absorbance(s.intensities)
+                    else:
+                        y_out = s.intensities.copy()
+
+                    new_list.append(SpectrumData(
+                        wavenumbers=s.wavenumbers.copy(),
+                        intensities=y_out,
+                        name=f"{tag}_{s.name}",
+                        file_path=s.file_path,
+                        file_type="photo_batch",
+                        metadata={"photo_source": s.name, "op": tag}
+                    ))
+
+            if not new_list:
+                QMessageBox.information(self, tr("app.info"), "Brak widm do przetworzenia.")
+                return
+
+            self._remove_preview_line()
+            cmd = AddBatchSpectraCommand(new_list, f"Operacja wsadowa ({len(new_list)} widm)", canvas=canvas, window_id=target_win)
+            session.undo_stack.push(cmd)
+            QMessageBox.information(self, tr("app.info"), f"Pomyślnie utworzono {len(new_list)} nowych widm.")
 
     def _on_commit_replace(self):
         canvas = self._get_canvas()
         is_batch = self.chk_batch.isChecked()
         visible_spectra = session.get_display_spectra()
+        tab_idx = self.tabs_ops.currentIndex()
 
         # 1. POJEDYNCZE ZASTĄPIENIE
         if not is_batch:
@@ -657,8 +839,7 @@ class SpectralMathPanel(QWidget):
                 return
 
             self._remove_preview_line()
-            cmd = ApplyMathSpectrumCommand(s1, f"Matematyka: {s1.name}", s1.intensities, self._last_result_y,
-                                           canvas=canvas)
+            cmd = ApplyMathSpectrumCommand(s1, f"Matematyka: {s1.name}", s1.intensities, self._last_result_y, canvas=canvas)
             session.undo_stack.push(cmd)
             QMessageBox.information(self, tr("app.info"), f"Zastąpiono widmo '{s1.name}' nowymi danymi.")
 
@@ -668,7 +849,6 @@ class SpectralMathPanel(QWidget):
                 QMessageBox.warning(self, tr("app.warning"), "Brak widocznych widm w aktywnym widoku.")
                 return
 
-            tab_idx = self.tabs_ops.currentIndex()
             batch_records = []
 
             if tab_idx == 0:  # Widmo ↔ Widmo
@@ -685,7 +865,6 @@ class SpectralMathPanel(QWidget):
                 op_id = self.bg_ops.checkedId()
 
                 for s in visible_spectra:
-                    # Przetwarzamy każde widmo w serii, włącznie z t0
                     y2_aligned = smath.align_to_reference(s2.wavenumbers, s2.intensities, s.wavenumbers)
                     if op_id == 0:
                         y_out = smath.subtract_spectra(s.intensities, y2_aligned, k)
@@ -714,55 +893,29 @@ class SpectralMathPanel(QWidget):
                                           s.wavenumbers.copy(), y_out,
                                           copy.deepcopy(s.metadata), copy.deepcopy(s.metadata)))
 
+            elif tab_idx == 2:  # Fotometria wsadowo in-place
+                ph_id = self.bg_photo.checkedId()
+
+                for s in visible_spectra:
+                    if ph_id == 0:
+                        y_out = smath.absorbance_to_transmittance(s.intensities)
+                    elif ph_id == 1:
+                        y_out = smath.transmittance_to_absorbance(s.intensities)
+                    elif ph_id == 2:
+                        y_out = smath.absorbance_to_percent_t(s.intensities)
+                    elif ph_id == 3:
+                        y_out = smath.percent_t_to_absorbance(s.intensities)
+                    else:
+                        y_out = s.intensities.copy()
+
+                    batch_records.append((s, s.wavenumbers.copy(), s.intensities.copy(),
+                                          s.wavenumbers.copy(), y_out,
+                                          copy.deepcopy(s.metadata), copy.deepcopy(s.metadata)))
+
             if not batch_records:
                 return
 
             self._remove_preview_line()
-            cmd = BatchPipelineCommand(batch_records, f"Matematyka wsadowa in-place ({len(batch_records)} widm)",
-                                       canvas=canvas)
+            cmd = BatchPipelineCommand(batch_records, f"Fotometria / Matematyka wsadowa in-place ({len(batch_records)} widm)", canvas=canvas)
             session.undo_stack.push(cmd)
             QMessageBox.information(self, tr("app.info"), f"Zmodyfikowano {len(batch_records)} widm w miejscu.")
-
-    def _apply_photometric(self, mode: str):
-        canvas = self._get_canvas()
-        is_batch = self.chk_batch.isChecked()
-        visible_spectra = session.get_display_spectra()
-
-        op_names = {'a_to_t': "A ➔ T", 'a_to_pct': "A ➔ %T", 'pct_to_a': "%T ➔ A", 'km': "Kubelka-Munk"}
-        desc = op_names.get(mode, mode)
-
-        def transform(y):
-            if mode == 'a_to_t': return smath.absorbance_to_transmittance(y)
-            elif mode == 'a_to_pct': return smath.absorbance_to_percent_t(y)
-            elif mode == 'pct_to_a': return smath.percent_t_to_absorbance(y)
-            elif mode == 'km': return smath.kubelka_munk(y)
-            return y
-
-        if not is_batch:
-            s1_name = self.combo_s1.currentData()
-            s1 = next((s for s in visible_spectra if s.name == s1_name), None)
-            if not s1:
-                QMessageBox.warning(self, tr("app.warning"), "Wybierz widmo badane (S₁) do przeliczenia fotometrycznego.")
-                return
-
-            new_y = transform(s1.intensities)
-            self._remove_preview_line()
-            cmd = ApplyMathSpectrumCommand(s1, f"Fotometria ({desc}): {s1.name}", s1.intensities, new_y, canvas=canvas)
-            session.undo_stack.push(cmd)
-            QMessageBox.information(self, tr("app.info"), f"Zastosowano transformację fotometryczną ({desc}) dla '{s1.name}'.")
-        else:
-            if not visible_spectra:
-                QMessageBox.warning(self, tr("app.warning"), "Brak widocznych widm w aktywnym widoku.")
-                return
-
-            batch_records = []
-            for s in visible_spectra:
-                new_y = transform(s.intensities)
-                batch_records.append((s, s.wavenumbers.copy(), s.intensities.copy(),
-                                      s.wavenumbers.copy(), new_y,
-                                      copy.deepcopy(s.metadata), copy.deepcopy(s.metadata)))
-
-            self._remove_preview_line()
-            cmd = BatchPipelineCommand(batch_records, f"Fotometria wsadowa ({desc}) - {len(batch_records)} widm", canvas=canvas)
-            session.undo_stack.push(cmd)
-            QMessageBox.information(self, tr("app.info"), f"Zastosowano transformację fotometryczną ({desc}) dla {len(batch_records)} widm.")

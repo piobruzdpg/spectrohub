@@ -692,3 +692,24 @@ spectrohub/
 **3. Autonomia Parametrów Widmowych w Modelu Danych (`core/models.py`, `ws_quantum.py`, `gaussian_reader.py`)**[cite: 2, 4, 7]
 * **Izolacja FWHM i profilu kształtu:** Rozszerzono `GaussianData` o atrybuty `fwhm` oraz `shape` (obok `scale_factor`), dzięki czemu każde widmo teoretyczne (zarówno pierwotne, jak i izotopomery) zachowuje własne, niezależne parametry splotu pasm[cite: 7].
 * **Reaktywne odświeżanie inspektora DFT:** Przełączanie obiektów w drzewie projektu blokuje fałszywe sygnały UI i natychmiast odczytuje rzeczywiste nastawy aktywnego widma w kontrolkach[cite: 4].
+
+
+### 30.09.2026 — Checkpoint: Naprawa Przekrojów Kinetycznych, Refaktoryzacja Matematyki Spektralnej i Asystent Auto-k
+
+**1. Naprawa Silnika Przekrojów Kinetycznych Canvasu (`gui/canvas.py`)**
+* **Eliminacja błędu interpolacji malejącej osi X:** W `_get_evolutionary_dataset()` usunięto błąd odwróconej siatki przy wywołaniu `np.interp` (wymagającej ściśle rosnących współrzędnych `xp`).
+* **Wektorowa optymalizacja siatek tożsamych:** Wprowadzono natychmiastowe przepisanie danych przy identycznych wektorach $X$ (charakterystycznych dla dekompozycji HDO i pasm syntetycznych) oraz bezpieczne odwracanie wektorów `[::-1]` przy interpolacji siatek niespójnych.
+* **Przywrócenie dynamiki dolnego wykresu:** Kursor analityczny i przekroje poprzeczne odczytują rzeczywiste absorbancje zamiast punktów brzegowych linii bazowej.
+
+**2. Ergonomia i Architektura Matematyki Spektralnej (`ws_spectral_math.py`, `spectral_math.py`)**
+* **Nowy układ sekcji roboczej:** Przeniesiono wybór operacji nad suwaki parametryczne; equalizer $k$ aktywuje się wyłącznie dla sumy i różnicy widm ($S_1 \pm k \cdot S_2$).
+* **Kompaktowy układ 2×2 o stałej wysokości:** Zastąpiono rozciągające się listy zwartymi siatkami `QGridLayout` o zablokowanej wysokości 125 px dla zakładek *Widmo ↔ Widmo*, *Skalar (c)* oraz *Fotometria*.
+* **Rozszerzenie equalizera do $\pm 100$:** Dodano pasmo rzędu wielkości $\pm 100$ (krok 10.0), rozszerzono zakres pola numerycznego do $\pm 999.0$ oraz podwyższono suwaki do 135 px pod wygodniejsze operowanie myszą.
+* **Asystent Auto-k (OLS):** Wdrożono funkcję `estimate_subtraction_factor` wyliczającą analitycznie optymalny współczynnik $k$ metodą najmniejszych kwadratów w zadanym oknie liczb falowych (domyślnie pasmo libracyjne wody $2100\text{–}2250\text{ cm}^{-1}$) z bezpośrednim zasileniem suwaków equalizera.
+* **Uporządkowanie fotometrii:** Wprowadzono pełną parę transformacji $A \leftrightarrow T$ (ułamek 0–1) oraz $A \leftrightarrow \%T$ (0–100%) z usunięciem sztucznych ścięć linii bazowej, zintegrowanym Live Preview na canvasie i opcją wsadową. Usunięto zbędny w ATR przycisk Kubelki-Munka z głównego UI.
+
+**3. Ustalenia Architektoniczne na Przyszłość**
+* **Narzędzie Fityk pod PPM:** Zaplanowano dodanie pod prawym przyciskiem myszy na dolnym panelu (`ax_sub`) kreatora dopasowywania funkcji analitycznych (kinetyki, sigmoidy, wielomiany) do wygenerowanych profili zmienności.
+* **ZROBIONE! Nowy Workspace: „Statystyka”:** Zdecydowano o wydzieleniu dedykowanej perspektywy do analizy powtórzeń laboratoryjnych (replikaty pomiarowe, widma średnie/mediana, wstęgi błędów $\pm\sigma$, detekcja outlierów metodą Pearsona).
+* **Względne widma różnicowe ($\Delta A / A_{\text{ref}}$):** Odłożono do implementacji jako opcję normalizacyjną w potoku Workspace 1.
+
