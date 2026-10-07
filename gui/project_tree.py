@@ -14,7 +14,7 @@ import re
 import fnmatch
 import logging
 from typing import List, Tuple, Optional
-from PySide6.QtCore import Qt, QThreadPool, QRunnable, Slot
+from PySide6.QtCore import Qt, QThreadPool, QObject, Signal, QRunnable, Slot
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen
 from PySide6.QtWidgets import (
     QTreeWidget, QTreeWidgetItem, QMenu, QAbstractItemView,
@@ -48,11 +48,37 @@ SPECTRAL_PALETTE = [
     "#80ed99",  # 12. Limonka
 ]
 
+SUPPORTED_EXTENSIONS = {
+    # Małe litery
+    '.spc', '.spa', '.spg', '.dx', '.jdx', '.opus',
+    '.csv', '.dpt', '.txt', '.tsv', '.dat',
+    '.log', '.out', '.fchk',
+    # Wielkie litery (macOS / Linux case-sensitivity)
+    '.SPC', '.SPA', '.SPG', '.DX', '.JDX', '.OPUS',
+    '.CSV', '.DPT', '.TXT', '.TSV', '.DAT',
+    '.LOG', '.OUT', '.FCHK'
+}
 
 def natural_sort_key(s: str) -> list:
     """Klucz sortowania naturalnego (np. widmo_2 przed widmo_10)."""
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
+def scan_directory_for_spectra(dir_path: str) -> List[str]:
+    """Skanuje folder i zwraca posortowane naturalnie ścieżki do obsługiwanych plików widm."""
+    found_paths = []
+    try:
+        for entry in os.listdir(dir_path):
+            if entry.startswith('.'):
+                continue
+            full_path = os.path.join(dir_path, entry)
+            if os.path.isfile(full_path):
+                ext = os.path.splitext(entry)[1].lower()
+                if ext in SUPPORTED_EXTENSIONS or re.match(r'^\.\d+$', ext):
+                    found_paths.append(full_path)
+    except Exception as e:
+        logger.error(f"Błąd skanowania katalogu {dir_path}: {e}")
+
+    return sorted(found_paths, key=natural_sort_key)
 
 def make_color_swatch_icon(color_hex: str) -> QIcon:
     """Tworzy zaokrąglony kafelek koloru z dyskretną ramką dla kolumny 1 drzewka."""
@@ -207,18 +233,31 @@ class TableViewerDialog(QDialog):
                 QMessageBox.critical(self, "Błąd", f"Błąd zapisu tabeli:\n{e}")
 
 
+class ImportWorkerSignals(QObject):
+    """Sygnały bezpiecznie łączące wątek poboczny z pętlą zdarzeń GUI."""
+    progress = Signal(int, int)               # (bieżący_plik, suma)
+    batch_loaded = Signal(list, bool)         # (lista_SpectrumData, is_atm)
+    error_occurred = Signal(str)              # komunikat o błędach
+
+
 class FileImportWorker(QRunnable):
-    """Zadanie w tle: importuje pliki do magazynu danych w jednym strzale."""
+    """Zadanie w tle: wczytuje pliki i bezpiecznie przekazuje je do wątku głównego."""
 
     def __init__(self, file_paths: list, target_atm: bool = False):
         super().__init__()
-        self.file_paths = file_paths
+        # Zabezpieczenie przed losową kolejnością z okna dialogowego
+        self.file_paths = sorted(file_paths, key=natural_sort_key)
         self.target_atm = target_atm
+        self.signals = ImportWorkerSignals()
+        self.setAutoDelete(True)
 
     @Slot()
     def run(self):
         all_loaded = []
-        for path in self.file_paths:
+        errors = []
+        total = len(self.file_paths)
+
+        for idx, path in enumerate(self.file_paths, 1):
             try:
                 spectra = SpectrumImportDispatcher.load_file(path)
                 if isinstance(spectra, list):
@@ -226,14 +265,23 @@ class FileImportWorker(QRunnable):
                 elif spectra:
                     all_loaded.append(spectra)
             except Exception as e:
+                err_msg = f"{os.path.basename(path)}: {e}"
                 logger.error(f"Nie udało się zaimportować pliku {path}: {e}")
+                errors.append(err_msg)
 
+            if idx % 25 == 0 or idx == total:
+                self.signals.progress.emit(idx, total)
+
+        # 1. Przekazanie załadowanych widm do slotu w wątku głównym
         if all_loaded:
-            if self.target_atm:
-                session.add_atm_spectra_batch(all_loaded)
-            else:
-                session.add_spectra_batch(all_loaded)
+            self.signals.batch_loaded.emit(all_loaded, self.target_atm)
 
+        # 2. Raport o ewentualnych pominiętych plikach
+        if errors:
+            summary = "\n".join(errors[:10])
+            if len(errors) > 10:
+                summary += f"\n... i {len(errors) - 10} innych."
+            self.signals.error_occurred.emit(summary)
 
 class ProjectTreeWidget(QTreeWidget):
     """Eksplorator z dwukolumnowym widokiem, próbnikiem barw (OPUS Style) oraz pełną kontrolą selekcji."""
@@ -513,6 +561,26 @@ class ProjectTreeWidget(QTreeWidget):
                 if sub:
                     return sub
         return None
+
+    def _prompt_import_directory(self, target_atm: bool = False):
+        """Otwiera okno wyboru folderu i wczytuje z niego wszystkie widma w tle."""
+        title = "Wybierz folder z wzorcami atmosfery..." if target_atm else "Wybierz folder z widmami..."
+        dir_path = QFileDialog.getExistingDirectory(self, title, "")
+        if not dir_path:
+            return
+
+        paths = scan_directory_for_spectra(dir_path)
+        if not paths:
+            QMessageBox.information(self, "Brak plików",
+                                    "W wybranym folderze nie znaleziono obsługiwanych plików widm.")
+            return
+
+        worker = FileImportWorker(paths, target_atm=target_atm)
+        worker.signals.batch_loaded.connect(self._on_import_batch_received)
+        worker.signals.error_occurred.connect(
+            lambda errs: QMessageBox.warning(self, "Błędy importu", f"Pominięto niektóre pliki:\n{errs}")
+        )
+        self.thread_pool.start(worker)
 
     def _create_folder_item(self, folder_id: str, name: str, parent_folder_id: Optional[str] = None) -> QTreeWidgetItem:
         parent_item = self.root_workspaces
@@ -1210,9 +1278,25 @@ class ProjectTreeWidget(QTreeWidget):
         paths, _ = QFileDialog.getOpenFileNames(
             self, title, "", SpectrumImportDispatcher.get_open_file_filter()
         )
-        if paths:
-            worker = FileImportWorker(paths, target_atm=target_atm)
-            self.thread_pool.start(worker)
+        if not paths:
+            return
+
+        worker = FileImportWorker(paths, target_atm=target_atm)
+
+        # Podpięcie bezpiecznego odbioru w wątku GUI
+        worker.signals.batch_loaded.connect(self._on_import_batch_received)
+        worker.signals.error_occurred.connect(
+            lambda errs: QMessageBox.warning(self, "Błędy importu", f"Pominięto niektóre pliki:\n{errs}")
+        )
+        self.thread_pool.start(worker)
+
+    @Slot(list, bool)
+    def _on_import_batch_received(self, loaded_spectra: list, is_atm: bool):
+        """Wykonywane w 100% w wątku głównym (GUI)."""
+        if is_atm:
+            session.add_atm_spectra_batch(loaded_spectra)
+        else:
+            session.add_spectra_batch(loaded_spectra)
 
     def _get_window_relative_path(self, win: WorkspaceWindow) -> str:
         parts = [win.name]
@@ -1437,6 +1521,9 @@ class ProjectTreeWidget(QTreeWidget):
             act_import = menu.addAction("📥 Dodaj pliki widm do magazynu...")
             act_import.triggered.connect(lambda: self._prompt_import_files(target_atm=False))
 
+            act_import_dir = menu.addAction("📁 Dodaj cały folder widm...")
+            act_import_dir.triggered.connect(lambda: self._prompt_import_directory(target_atm=False))
+
             menu.addSeparator()
             act_chk_all = menu.addAction("☑ Zaznacz wszystko w magazynie")
             act_chk_all.triggered.connect(lambda: self._set_category_check_state(item, Qt.CheckState.Checked))
@@ -1579,10 +1666,17 @@ class ProjectTreeWidget(QTreeWidget):
             if item == self.root_exp:
                 act_import = menu.addAction("📥 Dodaj pliki pomiarów...")
                 act_import.triggered.connect(lambda: self._prompt_import_files(target_atm=False))
+
+                act_import_dir = menu.addAction("📁 Dodaj folder pomiarów...")
+                act_import_dir.triggered.connect(lambda: self._prompt_import_directory(target_atm=False))
                 menu.addSeparator()
+
             elif item == self.root_atm:
                 act_import = menu.addAction("☁️ Dodaj pliki wzorców atmosfery...")
                 act_import.triggered.connect(lambda: self._prompt_import_files(target_atm=True))
+
+                act_import_dir = menu.addAction("📁 Dodaj folder wzorców atmosfery...")
+                act_import_dir.triggered.connect(lambda: self._prompt_import_directory(target_atm=True))
                 menu.addSeparator()
 
             act_chk_all = menu.addAction("☑ Zaznacz wszystkie w tej gałęzi")

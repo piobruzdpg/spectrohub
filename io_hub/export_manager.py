@@ -146,14 +146,13 @@ class ExportManager:
 
     @classmethod
     def export_batch_to_zip(cls, targets: List[Tuple[SpectrumData, str]], zip_path: str, fmt_id: str) -> int:
-        """
-        Zapisuje zbiór widm do pojedynczego pliku ZIP z zachowaniem hierarchii katalogów wewnątrz archiwum.
-        """
         cls.set_last_format(fmt_id)
         fmt = cls.get_format_info(fmt_id)
         ext = fmt["ext"]
 
         count = 0
+        used_arc_names = set()
+
         with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zip_f:
             with tempfile.TemporaryDirectory() as temp_dir:
                 for spec, rel_dir in targets:
@@ -162,11 +161,19 @@ class ExportManager:
 
                     cls.export_single_spectrum(spec, temp_file, fmt_id)
 
-                    arc_name = os.path.join(rel_dir, f"{base_name}{ext}") if rel_dir else f"{base_name}{ext}"
-                    # W archiwach ZIP separatorem ścieżek zawsze musi być '/'
-                    arc_name = arc_name.replace('\\', '/')
+                    raw_arc = f"{base_name}{ext}"
+                    final_arc = os.path.join(rel_dir, raw_arc) if rel_dir else raw_arc
+                    final_arc = final_arc.replace('\\', '/')
 
-                    zip_f.write(temp_file, arcname=arc_name)
+                    # Zabezpieczenie przed kolizjami nazw wewnątrz ZIP
+                    ctr = 1
+                    stem = os.path.splitext(final_arc)[0]
+                    while final_arc in used_arc_names:
+                        final_arc = f"{stem}_{ctr}{ext}".replace('\\', '/')
+                        ctr += 1
+
+                    used_arc_names.add(final_arc)
+                    zip_f.write(temp_file, arcname=final_arc)
                     count += 1
 
         return count

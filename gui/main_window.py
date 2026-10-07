@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QToolBar, QButtonGroup, QPushButton, QLabel, QFileDialog,
     QMessageBox, QStatusBar, QSplitter, QVBoxLayout, QSizePolicy
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QAction, QFont, QKeySequence
 import logging
 
@@ -31,6 +31,7 @@ from gui.workspaces.ws_deconvolution import DeconvolutionPanel
 from gui.workspaces.ws_chemometrics import ChemometricsPanel
 from gui.workspaces.ws_quantum import QuantumPanel
 from gui.workspaces.ws_statistics import StatisticsWorkspace
+from gui.workspaces.ws_molar_derivatives import MolarDerivativesPanel
 
 from io_hub.exporters.excel_exporter import ExcelProjectExporter
 from io_hub.exporters.ascii_exporter import ASCIIExporter
@@ -123,6 +124,7 @@ class MainWindow(QMainWindow):
         self.panel_chem = ChemometricsPanel(self)
         self.panel_dft = QuantumPanel(self)
         self.panel_stat = StatisticsWorkspace(self)
+        self.panel_molar = MolarDerivativesPanel(self)
 
         self.inspector_stack.addWidget(self.panel_prep)    # 0
         self.inspector_stack.addWidget(self.panel_math)    # 1
@@ -130,6 +132,7 @@ class MainWindow(QMainWindow):
         self.inspector_stack.addWidget(self.panel_chem)    # 3
         self.inspector_stack.addWidget(self.panel_dft)     # 4
         self.inspector_stack.addWidget(self.panel_stat)    # 5
+        self.inspector_stack.addWidget(self.panel_molar)   # 6
 
         self.dock_inspector.setWidget(self.inspector_stack)
         self.addDockWidget(Qt.RightDockWidgetArea, self.dock_inspector)
@@ -170,6 +173,12 @@ class MainWindow(QMainWindow):
         self.act_open = QAction(self)
         self.act_open.triggered.connect(self._on_open_files)
         self.menu_file.addAction(self.act_open)
+
+        # NOWA OPCJA: Otwórz folder
+        self.act_open_dir = QAction(self)
+        self.act_open_dir.setShortcut(QKeySequence("Ctrl+Shift+O"))
+        self.act_open_dir.triggered.connect(self._on_open_directory)
+        self.menu_file.addAction(self.act_open_dir)
 
         self.menu_file.addSeparator()
 
@@ -227,7 +236,8 @@ class MainWindow(QMainWindow):
             ("workspaces.deconvolution", 2),
             ("workspaces.chemometrics", 3),
             ("workspaces.quantum", 4),
-            ("workspaces.statistics", 5)
+            ("workspaces.statistics", 5),
+            ("workspaces.molar_derivatives", 6)
         ]
 
         for key, idx in workspaces_keys:
@@ -314,6 +324,8 @@ class MainWindow(QMainWindow):
             session.clear_all()
             self.cached_dag_state = {}
             self.panel_prep.set_pipeline_state([])
+            if hasattr(self, 'panel_molar'):
+                self.panel_molar.clear_state()
             self.canvas_2d.redraw_all()
             self.status_bar.showMessage("Utworzono nowy, czysty projekt.")
 
@@ -336,11 +348,13 @@ class MainWindow(QMainWindow):
     def _save_to_path(self, path: str):
         try:
             linear_pipe = self.panel_prep.get_pipeline_state()
+            molar_state = self.panel_molar.get_state() if hasattr(self, 'panel_molar') else {}
             ProjectBundleIO.save_project(
                 file_path=path,
                 session=session,
                 dag_state=self.cached_dag_state,
-                linear_pipeline=linear_pipe
+                linear_pipeline=linear_pipe,
+                molar_state=molar_state
             )
             self._update_window_title()
             self.status_bar.showMessage(f"Projekt został pomyślnie zapisany: {path}", 5000)
@@ -356,29 +370,83 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            dag_state, linear_pipe = ProjectBundleIO.load_project(path, session)
+            dag_state, linear_pipe, molar_state = ProjectBundleIO.load_project(path, session)
             self.cached_dag_state = dag_state
             self.panel_prep.set_pipeline_state(linear_pipe)
+            if hasattr(self, 'panel_molar'):
+                self.panel_molar.set_state(molar_state)
 
             self.canvas_2d.prepare_axes(shared_x=True)
             self.canvas_2d.redraw_all()
             self._update_window_title()
 
             self.status_bar.showMessage(f"Załadowano projekt: {path}", 5000)
-            QMessageBox.information(self, "Wczytano projekt", f"Pomyślnie załadowano projekt:\n{session.metadata.title}")
+            QMessageBox.information(self, "Wczytano projekt",
+                                    f"Pomyślnie załadowano projekt:\n{session.metadata.title}")
         except Exception as e:
             QMessageBox.critical(self, "Błąd odczytu", f"Nie udało się wczytać pliku projektu:\n{e}")
+
+    def _on_open_directory(self):
+        dir_path = QFileDialog.getExistingDirectory(
+            self, tr("menu.open_dir", "Wybierz folder z widmami..."), ""
+        )
+        if not dir_path:
+            return
+
+        from gui.project_tree import scan_directory_for_spectra, FileImportWorker
+        paths = scan_directory_for_spectra(dir_path)
+
+        if not paths:
+            QMessageBox.information(self, tr("app.info", "Informacja"),
+                                    "W wybranym folderze nie ma obsługiwanych plików widm.")
+            return
+
+        self.status_bar.showMessage(f"Wczytywanie {len(paths)} plików widm z folderu...")
+
+        from PySide6.QtCore import QThreadPool
+        worker = FileImportWorker(paths, target_atm=False)
+        worker.signals.progress.connect(
+            lambda cur, tot: self.status_bar.showMessage(f"Wczytywanie widm: {cur} / {tot}...")
+        )
+        worker.signals.batch_loaded.connect(self._on_import_batch_received)
+        worker.signals.error_occurred.connect(
+            lambda errs: QMessageBox.warning(self, "Błędy importu", f"Nie udało się wczytać plików:\n{errs}")
+        )
+        QThreadPool.globalInstance().start(worker)
 
     def _on_open_files(self):
         paths, _ = QFileDialog.getOpenFileNames(
             self, tr("menu.open_spectra", "Dodaj pliki widm..."), "",
             SpectrumImportDispatcher.get_open_file_filter()
         )
-        if paths:
-            from PySide6.QtCore import QThreadPool
-            from gui.project_tree import FileImportWorker
-            worker = FileImportWorker(paths)
-            QThreadPool.globalInstance().start(worker)
+        if not paths:
+            return
+
+        self.status_bar.showMessage(f"Wczytywanie {len(paths)} plików widm...")
+
+        from PySide6.QtCore import QThreadPool
+        from gui.project_tree import FileImportWorker
+
+        worker = FileImportWorker(paths, target_atm=False)
+        worker.signals.progress.connect(
+            lambda cur, tot: self.status_bar.showMessage(f"Wczytywanie widm: {cur} / {tot}...")
+        )
+        worker.signals.batch_loaded.connect(self._on_import_batch_received)
+        worker.signals.error_occurred.connect(
+            lambda errs: QMessageBox.warning(self, "Błędy importu", f"Nie udało się wczytać plików:\n{errs}")
+        )
+        QThreadPool.globalInstance().start(worker)
+
+    @Slot(list, bool)
+    def _on_import_batch_received(self, loaded_spectra: list, is_atm: bool):
+        """Bezpieczne wstrzyknięcie do sesji w głównym wątku i odświeżenie widoku."""
+        if is_atm:
+            session.add_atm_spectra_batch(loaded_spectra)
+        else:
+            session.add_spectra_batch(loaded_spectra)
+
+        self.status_bar.showMessage(f"Pomyślnie zaimportowano {len(loaded_spectra)} widm.", 5000)
+        self.canvas_2d.redraw_all()
 
     def _open_tensor_builder(self):
         from gui.tensor_builder_dialog import TensorBuilderDialog
@@ -446,6 +514,7 @@ class MainWindow(QMainWindow):
         self._update_window_title()
         self.menu_file.setTitle(tr("menu.file", "Plik"))
         self.act_open.setText(tr("menu.open_spectra", "Dodaj pliki widm..."))
+        self.act_open_dir.setText(tr("menu.open_dir", "Dodaj folder z widmami (Cmd+Shift+O)..."))
         self.act_export_excel.setText(tr("menu.export_excel", "Eksportuj projekt do Excela (.xlsx)..."))
         self.act_export_active.setText(tr("menu.export_active", "Eksportuj aktywne widmo jako..."))
         self.act_exit.setText(tr("menu.exit", "Wyjdź"))

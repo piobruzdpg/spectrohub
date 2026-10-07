@@ -2,8 +2,9 @@
 io_hub/project_io.py
 Silnik zapisu i odczytu stanu projektu SpectroHub w kontenerowym formacie .shub (ZIP Bundle).
 Paczka zawiera:
-- project.json: manifest hierarchii, folderów, okien roboczych, tabel danych, potoku DAG i metadanych
-- arrays.npz: zoptymalizowany binarny zrzut tablic NumPy (float64) bez utraty precyzji
+- project.json: manifest hierarchii, folderów, okien roboczych, tabel danych, potoku DAG,
+  analizy molowej (molar_state) i metadanych
+- data.npz: zoptymalizowany binarny zrzut tablic NumPy (float64) bez utraty precyzji
 """
 
 import os
@@ -19,7 +20,7 @@ from core.models import SpectrumData, SpectralSeries, GaussianData, ProjectMetad
 
 logger = logging.getLogger("SpectroHub")
 
-PROJECT_FORMAT_VERSION = "1.2.0"
+PROJECT_FORMAT_VERSION = "1.3.0"
 
 
 class ProjectBundleIO:
@@ -28,7 +29,8 @@ class ProjectBundleIO:
     @staticmethod
     def save_project(file_path: str, session: ProjectSession,
                      dag_state: Optional[Dict[str, Any]] = None,
-                     linear_pipeline: Optional[list] = None) -> bool:
+                     linear_pipeline: Optional[list] = None,
+                     molar_state: Optional[Dict[str, Any]] = None) -> bool:
         """Zapisuje całościowy stan aplikacji do pliku .shub."""
         try:
             arrays_dict: Dict[str, np.ndarray] = {}
@@ -41,6 +43,7 @@ class ProjectBundleIO:
                 "active_spectrum_name": session.active_spectrum.name if session.active_spectrum else None,
                 "dag_state": dag_state or {},
                 "linear_pipeline": linear_pipeline or [],
+                "molar_state": molar_state or {},
                 "storage": {
                     "experimental": [],
                     "atm": [],
@@ -196,10 +199,10 @@ class ProjectBundleIO:
             raise e
 
     @staticmethod
-    def load_project(file_path: str, session: ProjectSession) -> Tuple[Dict[str, Any], list]:
+    def load_project(file_path: str, session: ProjectSession) -> Tuple[Dict[str, Any], list, Dict[str, Any]]:
         """
         Odtwarza kompletny stan programu z pliku .shub.
-        Zwraca tuple: (dag_state, linear_pipeline).
+        Zwraca tuple: (dag_state, linear_pipeline, molar_state).
         """
         try:
             with zipfile.ZipFile(file_path, "r") as zip_f:
@@ -369,9 +372,10 @@ class ProjectBundleIO:
 
             dag_state = manifest_data.get("dag_state", {})
             linear_pipeline = manifest_data.get("linear_pipeline", [])
+            molar_state = manifest_data.get("molar_state", {})
 
             logger.info(f"Pomyślnie wczytano projekt SpectroHub z: {file_path}")
-            return dag_state, linear_pipeline
+            return dag_state, linear_pipeline, molar_state
 
         except Exception as e:
             logger.error(f"Nie udało się załadować projektu {file_path}: {e}")

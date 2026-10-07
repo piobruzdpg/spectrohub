@@ -713,3 +713,26 @@ spectrohub/
 * **ZROBIONE! Nowy Workspace: „Statystyka”:** Zdecydowano o wydzieleniu dedykowanej perspektywy do analizy powtórzeń laboratoryjnych (replikaty pomiarowe, widma średnie/mediana, wstęgi błędów $\pm\sigma$, detekcja outlierów metodą Pearsona).
 * **Względne widma różnicowe ($\Delta A / A_{\text{ref}}$):** Odłożono do implementacji jako opcję normalizacyjną w potoku Workspace 1.
 
+### 07.10.2026 — Checkpoint: Nowy Workspace „Widma Molowe i Zmienności” & Pełna Trwałość Projektu .shub (v1.3.0)
+
+**1. Perspektywa Widm Molowych i Zmienności (`ws_molar_derivatives.py`, `molar_derivatives.py`)**
+* **Układy binarne (Woda + X):**
+  * Ścisły bilans masowo-gęstościowy wyznaczający stężenia molowe $C_X, C_{woda}$ oraz współczynnik odejmowania wody $k_{wow}$.
+  * Izolacja $A_X$, normalizacja do pozornej absorbancji molowej $\epsilon_X = A_X / C_X$ (lub polowej AUC).
+  * Wyznaczanie Różnicowego Widma Zmienności ($d\epsilon/dC$) oraz Granicznego Widma Molowego ($\epsilon_0$) metodą OLS przy nieskończonym rozcieńczeniu ($C \to 0$) dla modeli liniowego i kwadratowego.
+* **Układy trójskładnikowe (Woda + X + Y):**
+  * Zunifikowany potok przetwarzający w jednym środowisku serie czystego X, czystego Y oraz mieszaniny X+Y.
+  * Automatyczna interpolacja nienormalizowanego widma zaburzacza $A_Y$ w dokładnie wyliczonym stężeniu $C_{Y, mix}$ i odjęcie od widm mieszaniny po skompensowaniu wody.
+  * Normalizacja przez rzeczywiste, odważone stężenie $C_{X, mix}$.
+  * Wyznaczanie widma zmienności badanego składnika pod wpływem zaburzacza.
+* **Ergonomia pracy laboratoryjnej:**
+  * Wklejanie wielokolumnowe z Excela/Origin (`Cmd+V` / `Ctrl+V`) z automatyczną zamianą przecinków na kropki i blokadą rekurencji sygnałów Qt.
+  * Bezpośrednie zasilanie serii z drzewa projektu (`📥 Wstaw zaznaczone z drzewa`) bez konieczności usuwania plików z magazynu.
+  * Personalizacja nazw składników (np. *Mocznik*, *Glicyna*) z automatyczną aktualizacją etykiet zakładek i podglądów.
+  * Interaktywna inspekcja przekrojów: kliknięcie w dowolne pasmo na wykresie głównym wykreśla na dolnym panelu punkty doświadczalne, dopasowaną krzywą, styczną w zerze, błąd $\pm\sigma$, RMSE oraz $R^2$.
+  * Jednoklikowy eksport kompletnie zorganizowanej hierarchii folderów, okien roboczych i tabel parametrów do drzewa projektu.
+
+**2. Aktualizacja Formatu Projektu SpectroHub (.shub v1.3.0, `project_io.py`)**
+* **Pełna trwałość modułu:** Zapis i odtwarzanie stanu `molar_state` w manifeście `project.json` (nastawy fizykochemiczne, nazwy składników, przypisane widma, wprowadzone naważki i gęstości).
+* **Automatyczna rekonstrukcja:** Po wczytaniu projektu środowisko odtwarza wiersze tabel, przelicza algebrę liniową i natychmiast prezentuje stan analizy na wykresie z zachowaniem pełnej kompatybilności wstecznej dla starszych plików .shub.
+

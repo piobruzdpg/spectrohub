@@ -382,7 +382,7 @@ class SpectroCanvas(QWidget):
                 if 'v_line' in trace and trace['v_line']:
                     try:
                         trace['v_line'].remove()
-                    except ValueError:
+                    except Exception:  # <--- Bezpieczne ignorowanie odpiętych linii
                         pass
             self.kinetic_traces.clear()
 
@@ -562,7 +562,7 @@ class SpectroCanvas(QWidget):
             if 'v_line' in trace and trace['v_line']:
                 try:
                     trace['v_line'].remove()
-                except ValueError:
+                except Exception:  # <--- Bezpieczne ignorowanie
                     pass
         self.kinetic_traces.clear()
         self.last_kinetic_export_data = None
@@ -694,7 +694,7 @@ class SpectroCanvas(QWidget):
                     self.dft_mode_selected.emit(closest_idx)
                     return
 
-            if self._get_evolutionary_dataset():
+            if self.interaction_mode == "normal" and self._get_evolutionary_dataset():
                 self._update_kinetic_slice(float(x1), add_trace=False)
 
     # =========================================================================
