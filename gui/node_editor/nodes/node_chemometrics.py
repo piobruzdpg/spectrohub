@@ -1,15 +1,18 @@
 """
 gui/node_editor/nodes/node_chemometrics.py
 Węzły chemometrii (SVD/PCA, MCR-ALS, Skalowania) z dedykowanymi dialogami.
-MCR-ALS z obsługą portu widm referencyjnych (Ref) i blokowaniem składowych (Fixed Components).
+MCR-ALS z obsługą portu widm referencyjnych (Ref), blokowaniem składowych (Fixed Components)
+oraz pełną kontrolą kryteriów zatrzymania i tolerancji.
 """
 
 from typing import List, Dict, Any, Tuple, Optional
+import logging
 import numpy as np
-from PySide6.QtGui import QColor
+from PySide6.QtCore import Qt, QRectF
+from PySide6.QtGui import QColor, QPainter, QFont
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QFormLayout, QDialogButtonBox,
-    QSpinBox, QCheckBox, QComboBox, QLabel
+    QSpinBox, QDoubleSpinBox, QAbstractSpinBox, QCheckBox, QComboBox, QLabel
 )
 
 from gui.node_editor.base import BaseNode, PortDef
@@ -17,6 +20,8 @@ from gui.node_editor.registry import register_node
 from algorithms.chemometrics import multivariate as chem
 from algorithms import preprocessing as prep
 from core.session import session
+
+logger = logging.getLogger("SpectroHub")
 
 
 class SvdDenoiseDialog(QDialog):
@@ -61,7 +66,7 @@ class McrDecomposeDialog(QDialog):
         self.node = node
         self.step = node.step_data
         self.setWindowTitle("Dekompozycja MCR-ALS / SPEXFA")
-        self.resize(440, 310)
+        self.resize(470, 400)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -102,9 +107,43 @@ class McrDecomposeDialog(QDialog):
         form.addRow("Kształt profilu:", self.chk_unimodal)
 
         self.spin_max_iter = QSpinBox()
-        self.spin_max_iter.setRange(20, 3000)
+        self.spin_max_iter.setRange(20, 1_000_000)
+        self.spin_max_iter.setSingleStep(100)
+        self.spin_max_iter.setGroupSeparatorShown(False)
         self.spin_max_iter.setValue(int(self.step.get('max_iter', 500)))
         form.addRow("Maksymalna liczba iteracji:", self.spin_max_iter)
+
+        self.spin_tol_err = QDoubleSpinBox()
+        self.spin_tol_err.setDecimals(10)
+        self.spin_tol_err.setRange(0.0, 1.0)
+        self.spin_tol_err.setStepType(QAbstractSpinBox.StepType.AdaptiveDecimalStepType)
+        self.spin_tol_err.setValue(float(self.step.get('tol_err_change', 1e-6)))
+        self.spin_tol_err.setToolTip(
+            "Względna zmiana błędu dopasowania uznawana za zbieżność (np. 1e-6 lub 1e-8).\n"
+            "Ustawienie 0.0 wyłącza wcześniejsze zatrzymanie z powodu małej zmiany błędu."
+        )
+        form.addRow("Tolerancja zbieżności (tol_err_change):", self.spin_tol_err)
+
+        self.spin_tol_inc = QDoubleSpinBox()
+        self.spin_tol_inc.setDecimals(4)
+        self.spin_tol_inc.setRange(0.0, 10.0)
+        self.spin_tol_inc.setStepType(QAbstractSpinBox.StepType.AdaptiveDecimalStepType)
+        self.spin_tol_inc.setValue(float(self.step.get('tol_increase', 0.05)))
+        self.spin_tol_inc.setToolTip(
+            "Dopuszczalny ułamkowy wzrost błędu powyżej minimum (np. 0.05 = 5%),\n"
+            "zanim algorytm przerwie obliczenia. Zwiększ (np. do 0.1–0.5), gdy więzy powodują oscylacje."
+        )
+        form.addRow("Tolerancja wzrostu błędu (tol_increase):", self.spin_tol_inc)
+
+        self.spin_n_above_min = QSpinBox()
+        self.spin_n_above_min.setRange(5, 100_000)
+        self.spin_n_above_min.setSingleStep(10)
+        self.spin_n_above_min.setGroupSeparatorShown(False)
+        self.spin_n_above_min.setValue(int(self.step.get('tol_n_above_min', 50)))
+        self.spin_n_above_min.setToolTip(
+            "Liczba kolejnych iteracji bez poprawy dotychczasowego minimum błędu przed zatrzymaniem."
+        )
+        form.addRow("Limit iteracji bez poprawy:", self.spin_n_above_min)
 
         lbl_hint = QLabel("💡 Wskazówka: podłącz widma wzorcowe (np. rozpuszczalnik) do wejścia 'Ref'.")
         lbl_hint.setStyleSheet("color: #48cae4; font-size: 11px;")
@@ -125,6 +164,9 @@ class McrDecomposeDialog(QDialog):
         self.step['closure'] = bool(self.chk_closure.isChecked())
         self.step['unimodal'] = bool(self.chk_unimodal.isChecked())
         self.step['max_iter'] = int(self.spin_max_iter.value())
+        self.step['tol_err_change'] = float(self.spin_tol_err.value())
+        self.step['tol_increase'] = float(self.spin_tol_inc.value())
+        self.step['tol_n_above_min'] = int(self.spin_n_above_min.value())
         m_label = "MCR-ALS" if method == "mcr_als" else "SPEXFA"
         self.step['name'] = f"{m_label} (k={k})"
         self.accept()
@@ -260,12 +302,17 @@ class McrDecomposeNode(BaseNode):
     category = "Chemometria & Analiza Wielowymiarowa"
     header_gradient = ("#9d0208", "#d90429")
 
+    def __init__(self, step_data: Optional[Dict[str, Any]] = None):
+        super().__init__(step_data)
+        self.last_metrics: Optional[Dict[str, Any]] = None
+
     @classmethod
     def default_step_data(cls) -> Dict[str, Any]:
         return {
             "type": cls.node_type, "name": "MCR-ALS (k=2)", "method": "mcr_als",
             "k": 2, "non_negative": True, "fix_ref": True, "closure": False,
-            "unimodal": False, "max_iter": 500
+            "unimodal": False, "max_iter": 500, "tol_err_change": 1e-6,
+            "tol_increase": 0.05, "tol_n_above_min": 50
         }
 
     def get_ports(self) -> List[PortDef]:
@@ -285,6 +332,7 @@ class McrDecomposeNode(BaseNode):
         data_in = inputs.get("in", (None, None))
         in_names = input_names.get("in", [])
         if data_in[0] is None or data_in[1] is None:
+            self.last_metrics = None
             return {"out": (None, None), "out_conc": (None, None), "out_recon": (None, None), "out_res": (None, None)}, {
                 "out": [], "out_conc": [], "out_recon": [], "out_res": []
             }
@@ -341,7 +389,7 @@ class McrDecomposeNode(BaseNode):
 
         if m_ref > 0:
             ref_matrix = np.column_stack(ref_cols)
-            st_init = ref_matrix.T  # (m_ref x Liczby falowe)[cite: 13]
+            st_init = ref_matrix.T  # (m_ref x Liczby falowe)
             k = max(k, m_ref)       # Składników nie może być mniej niż podanych wzorców
             if fix_ref and method == 'mcr_als':
                 st_fix_indices = list(range(m_ref))
@@ -351,23 +399,42 @@ class McrDecomposeNode(BaseNode):
             try:
                 if method == 'spexfa':
                     res = chem.run_spexfa(target_mat, n=k_eff)
+                    self.last_metrics = None
                 else:
+                    user_max_iter = int(self.step_data.get('max_iter', 500))
+                    # W trybie podglądu na żywo ograniczamy iteracje dla płynności UI (60 FPS)
+                    eff_max_iter = user_max_iter if is_execution else min(user_max_iter, 400)
+                    tol_err = float(self.step_data.get('tol_err_change', 1e-6))
+                    tol_inc = float(self.step_data.get('tol_increase', 0.05))
+                    n_above = int(self.step_data.get('tol_n_above_min', 50))
+
                     res = chem.run_mcr_als(
                         target_mat, rank=k_eff,
                         non_negative=self.step_data.get('non_negative', True),
                         closure=self.step_data.get('closure', False),
                         unimodal=self.step_data.get('unimodal', False),
-                        max_iter=self.step_data.get('max_iter', 500),
+                        max_iter=eff_max_iter,
+                        tol_err_change=tol_err,
+                        tol_increase=tol_inc,
+                        tol_n_above_min=n_above,
                         st_init=st_init,
                         st_fix_indices=st_fix_indices
                     )
+                    self.last_metrics = {
+                        'iterations': res.get('iterations', eff_max_iter),
+                        'lof': res.get('lof', 0.0),
+                        'r2': res.get('r2', 0.0),
+                        'converged': res.get('converged', False),
+                        'is_preview_capped': (not is_execution and user_max_iter > 400)
+                    }
+                    self.step_data['name'] = f"MCR-ALS (k={k_eff}) | LOF={res.get('lof', 0.0):.2f}%"
+
                 pure_spec = res['pure_spectra']
                 pure_conc = res['pure_concentrations']
                 dr = res['dr']
                 residuals = res['residuals']
                 x_samples = np.arange(1, pure_conc.shape[0] + 1, dtype=np.float64)
 
-                # Eleganckie etykiety dla wyjściowych składowych
                 out_spec_labels = []
                 out_conc_labels = []
                 for i in range(k_eff):
@@ -391,15 +458,33 @@ class McrDecomposeNode(BaseNode):
                     "out_recon": in_names,
                     "out_res": in_names
                 }
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Błąd obliczeń MCR-ALS/SPEXFA: {e}")
 
+        self.last_metrics = None
         return {
             "out": (curr_x.copy(), curr_y.copy()),
             "out_conc": (np.array([1.0]), np.array([1.0])),
             "out_recon": (curr_x.copy(), curr_y.copy()),
             "out_res": (curr_x.copy(), np.zeros_like(curr_y))
         }, {"out": in_names, "out_conc": ["C1"], "out_recon": in_names, "out_res": in_names}
+
+    def draw_custom_overlay(self, painter: QPainter, box_rect: QRectF):
+        """Wyświetla na kafelku liczbę wykonanych iteracji oraz %LOF z ostatniego przebiegu."""
+        if not self.last_metrics:
+            return
+
+        painter.save()
+        iters = self.last_metrics.get('iterations', 0)
+        lof = self.last_metrics.get('lof', 0.0)
+        capped = self.last_metrics.get('is_preview_capped', False)
+        tag = f"it:{iters}{'*' if capped else ''} | LOF:{lof:.2f}%"
+
+        info_rect = QRectF(box_rect.left() + 4, box_rect.bottom() - 16, box_rect.width() - 8, 14)
+        painter.setFont(QFont("Arial", 7, QFont.Bold))
+        painter.setPen(QColor("#ffd166"))
+        painter.drawText(info_rect, Qt.AlignRight | Qt.AlignVCenter, tag)
+        painter.restore()
 
 
 @register_node

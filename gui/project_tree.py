@@ -307,6 +307,15 @@ class ProjectTreeWidget(QTreeWidget):
         self._build_root_structure()
         self._connect_signals()
 
+    def _sort_all_windows_in_folder(self, folder_id: str, reverse: bool = False):
+        """Rekurencyjnie sortuje widma we wszystkich oknach wewnątrz wskazanego folderu."""
+        for win_id, win in session.windows.items():
+            if win.folder_id == folder_id:
+                session.sort_window_spectra(win_id, reverse=reverse)
+        for sub_fid, folder in session.folders.items():
+            if folder.parent_folder_id == folder_id:
+                self._sort_all_windows_in_folder(sub_fid, reverse=reverse)
+
     def _build_root_structure(self):
         # 1. SEKCYJNY KORZEŃ: MAGAZYN DANYCH
         self.root_storage = QTreeWidgetItem(self, ["📦 MAGAZYN DANYCH (Referencja)", ""])
@@ -377,6 +386,7 @@ class ProjectTreeWidget(QTreeWidget):
         session.window_spectrum_added.connect(self._on_window_spectrum_added)
         session.window_spectra_batch_added.connect(self._on_window_spectra_batch_added)
         session.window_spectrum_removed.connect(self._on_window_spectrum_removed)
+        session.window_spectra_sorted.connect(self._on_window_spectra_sorted)
 
         session.table_added.connect(self._on_table_added)
         session.table_removed.connect(self._on_table_removed)
@@ -675,6 +685,26 @@ class ProjectTreeWidget(QTreeWidget):
             p.removeChild(win_node)
             self._refresh_parent_indicator(p)
 
+    def _sort_window_item_children(self, win_node: QTreeWidgetItem, reverse: bool = False):
+        """Sortuje elementy widm wewnątrz gałęzi okna roboczego bez utraty ich stanu, ikon i kolorów."""
+        count = win_node.childCount()
+        if count < 2:
+            return
+
+        self._is_internal_update = True
+        children = [win_node.takeChild(0) for _ in range(count)]
+        children.sort(
+            key=lambda it: natural_sort_key(it.data(0, Qt.UserRole) or it.text(0)),
+            reverse=reverse
+        )
+        win_node.addChildren(children)
+        self._is_internal_update = False
+
+    def _on_window_spectra_sorted(self, window_id: str, reverse: bool = False):
+        win_node = self._find_window_item(window_id)
+        if win_node:
+            self._sort_window_item_children(win_node, reverse=reverse)
+
     def _on_window_spectrum_added(self, window_id: str, spec):
         win_node = self._find_window_item(window_id)
         if win_node:
@@ -746,6 +776,7 @@ class ProjectTreeWidget(QTreeWidget):
             items_to_add.append(item)
 
         win_node.addChildren(items_to_add)
+        self._sort_window_item_children(win_node, reverse=False)
         win_node.setExpanded(True)
         self._refresh_parent_indicator(win_node)
         self.setUpdatesEnabled(True)
@@ -869,6 +900,7 @@ class ProjectTreeWidget(QTreeWidget):
             self._create_folder_item(f_id, folder.name, folder.parent_folder_id)
         for win_id, win in session.windows.items():
             win_node = self._create_window_item(win_id, win.name, win.folder_id)
+            sorted_win_items = sorted(win.spectra.items(), key=lambda kv: natural_sort_key(kv[0]))
             for s_idx, (s_name, spec) in enumerate(win.spectra.items()):
                 spec_color = resolve_spectrum_color(spec, s_idx)
                 item = QTreeWidgetItem(win_node, [f"📈 {spec.name}", ""])
@@ -1568,6 +1600,9 @@ class ProjectTreeWidget(QTreeWidget):
             act_rename = menu.addAction("✏️ Zmień nazwę folderu (F2)...")
             act_rename.triggered.connect(lambda: self._prompt_rename_folder(folder_id))
 
+            act_sort_folder = menu.addAction("🔤 Sortuj widma w oknach folderu (A → Z)")
+            act_sort_folder.triggered.connect(lambda: self._sort_all_windows_in_folder(folder_id))
+
             menu.addSeparator()
             act_chk_all = menu.addAction("☑ Zaznacz wszystkie w tym folderze")
             act_chk_all.triggered.connect(lambda: self._set_category_check_state(item, Qt.CheckState.Checked))
@@ -1652,6 +1687,13 @@ class ProjectTreeWidget(QTreeWidget):
 
             act_patt = menu.addAction("🔍 Zaznacz według wzorca...")
             act_patt.triggered.connect(lambda: self._prompt_pattern_select(item))
+
+            menu.addSeparator()
+            act_sort_asc = menu.addAction("🔤 Sortuj widma po nazwie (A → Z)")
+            act_sort_asc.triggered.connect(lambda: session.sort_window_spectra(win_id, reverse=False))
+
+            act_sort_desc = menu.addAction("🔠 Sortuj widma po nazwie (Z → A)")
+            act_sort_desc.triggered.connect(lambda: session.sort_window_spectra(win_id, reverse=True))
 
             menu.addSeparator()
             act_del = menu.addAction("🗑 Usuń okno (Del)")

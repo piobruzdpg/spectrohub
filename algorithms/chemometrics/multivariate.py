@@ -340,7 +340,7 @@ def run_spexfa(d: np.ndarray, n: int) -> Dict[str, Any]:
         spexerr.fill(np.nan)
 
     return {
-        'pure_spectra': spex,                  # (Liczby falowe x n)
+        'pure_spectra': spex,                     # (Liczby falowe x n)
         'pure_concentrations': conc_normalized.T, # (Próbki x n)
         'spexerr': spexerr,
         'rank': n,
@@ -483,7 +483,10 @@ def run_help_rank_profile(d: np.ndarray, window_size: int = 5, noise_level: floa
 def run_mcr_als(d: np.ndarray, rank: int, non_negative: bool = True,
                 norm: bool = False, closure: bool = False, unimodal: bool = False,
                 use_spexfa_init: bool = True, max_iter: int = 500,
-                tol_err_change: float = 1e-5,
+                tol_err_change: float = 1e-6,
+                tol_increase: float = 0.05,
+                tol_n_increase: int = 25,
+                tol_n_above_min: int = 50,
                 st_init: Optional[np.ndarray] = None,
                 st_fix_indices: Optional[List[int]] = None) -> Dict[str, Any]:
     """
@@ -532,10 +535,20 @@ def run_mcr_als(d: np.ndarray, rank: int, non_negative: bool = True,
     if non_negative:
         final_st_init = np.clip(final_st_init, 0.0, None)
 
-    # 3. Dopasowanie pyMCR z opcjonalnym blokowaniem kształtu widm
-    mcr = McrAR(max_iter=max_iter, tol_err_change=tol_err_change,
-                c_regr=c_regr, st_regr=st_regr,
-                c_constraints=c_constraints, st_constraints=st_constraints)
+    # 3. Dopasowanie pyMCR z pełną kontrolą kryteriów zatrzymania i blokowaniem widm
+    err_change_arg = tol_err_change if (tol_err_change is not None and tol_err_change > 0.0) else None
+
+    mcr = McrAR(
+        max_iter=max_iter,
+        tol_err_change=err_change_arg,
+        tol_increase=tol_increase,
+        tol_n_increase=tol_n_increase,
+        tol_n_above_min=tol_n_above_min,
+        c_regr=c_regr,
+        st_regr=st_regr,
+        c_constraints=c_constraints,
+        st_constraints=st_constraints
+    )
 
     mcr.fit(D_samples, ST=final_st_init, st_fix=st_fix_indices)
 
@@ -564,8 +577,8 @@ def run_mcr_als(d: np.ndarray, rank: int, non_negative: bool = True,
         'dr': D_recon.T,                       # (Liczby falowe x Próbki)
         'residuals': residuals.T,
         'rank': rank,
-        'iterations': getattr(mcr, 'n_iter_', max_iter),
-        'converged': getattr(mcr, 'converged', False),
+        'iterations': int(getattr(mcr, 'n_iter_', max_iter)),
+        'converged': bool(getattr(mcr, 'converged', False)),
         'lof': float(lof),
         'r2': float(r2)
     }

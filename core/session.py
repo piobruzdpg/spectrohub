@@ -11,6 +11,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QUndoStack
 import logging
+import re
 
 from core.models import SpectrumData, SpectralSeries, ProjectMetadata, WindowFolder, WorkspaceWindow, DataTable
 
@@ -21,6 +22,10 @@ def is_atmospheric_name(name: str) -> bool:
     """Rozpoznaje wzorce atmosfery wyłącznie na podstawie fraz atm oraz co2."""
     nl = name.lower()
     return "atm" in nl or "co2" in nl
+
+def _natural_sort_key(s: str) -> list:
+    """Klucz sortowania naturalnego (np. widmo_2 przed widmo_10)."""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
 
 
 class ProjectSession(QObject):
@@ -57,6 +62,7 @@ class ProjectSession(QObject):
     window_spectra_batch_added = Signal(str, list)  # <--- NOWY SYGNAŁ HURTOWY
     window_spectrum_removed = Signal(str, str)
     window_visibility_changed = Signal(str, str, bool)
+    window_spectra_sorted = Signal(str, bool)
     context_changed = Signal(str)            # 'storage' | 'window' | 'table'
     storage_branch_changed = Signal(str)     # 'experimental' | 'atm' | 'dft' | 'series'
 
@@ -254,6 +260,21 @@ class ProjectSession(QObject):
         self.active_table_changed.emit(self.active_table)
 
     # --- ZARZĄDZANIE OKNAMI ROBOCZYMI ---
+    def sort_window_spectra(self, window_id: str, reverse: bool = False, emit_signal: bool = True):
+        """Sortuje widma w oknie roboczym alfanumerycznie (natural sort) po nazwie."""
+        if window_id not in self._windows:
+            return
+
+        win = self._windows[window_id]
+        sorted_names = sorted(win.spectra.keys(), key=_natural_sort_key, reverse=reverse)
+        win.spectra = {name: win.spectra[name] for name in sorted_names}
+        win.visibility = {name: win.visibility.get(name, True) for name in sorted_names}
+
+        if emit_signal:
+            self.window_spectra_sorted.emit(window_id, reverse)
+            if self._active_context == "window" and self._active_window_id == window_id:
+                self.context_changed.emit("window")
+
     def add_spectra_batch_to_window(self, window_id: str, spectra_list: List[SpectrumData]) -> List[SpectrumData]:
         """Hurtowo dodaje całą listę widm do okna roboczego z pojedynczą emisją sygnału."""
         if window_id not in self._windows or not spectra_list:
@@ -279,6 +300,7 @@ class ProjectSession(QObject):
             added.append(cloned_spec)
 
         if added:
+            self.sort_window_spectra(window_id, reverse=False, emit_signal=False)
             win.active_spectrum_name = added[-1].name
             self.window_spectra_batch_added.emit(window_id, added)
 
@@ -372,6 +394,7 @@ class ProjectSession(QObject):
         win.visibility[unique_name] = True
         win.active_spectrum_name = unique_name
 
+        self.sort_window_spectra(window_id, reverse=False, emit_signal=False)
         self.window_spectrum_added.emit(window_id, cloned_spec)
         return cloned_spec
 

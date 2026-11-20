@@ -1619,6 +1619,24 @@ class NodePipelineDialog(QMainWindow):
             if progress_dialog is not None:
                 progress_dialog.close()
 
+            validation_errors = []
+            for n in ordered_nodes:
+                err_msg = getattr(getattr(n, 'node_obj', None), 'validation_error', None)
+                if err_msg:
+                    clean_err = err_msg.replace("\n", " ")
+                    validation_errors.append(f"• {n.title}: {clean_err}")
+
+            if validation_errors:
+                QMessageBox.warning(
+                    self,
+                    "Zatrzymano wykonanie potoku",
+                    "Wykryto niezgodność widm w następujących węzłach:\n\n"
+                    + "\n".join(validation_errors)
+                    + "\n\nUjednolić zakres lub liczbę punktów widm (np. węzłem Crop) i spróbuj ponownie."
+                )
+                self.recalculate_graph_preview(target_scene=scene)
+                return
+
             for term_node in terminals:
                 in_p = term_node.in_ports.get("in")
                 incoming_conns = in_p.connections if in_p else []
