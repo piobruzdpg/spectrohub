@@ -864,7 +864,6 @@ class NodePipelineDialog(QMainWindow):
         view = NodeView(scene, self)
         scene.selectionChanged.connect(self._on_selection_changed)
 
-        # Jeśli przekazano dane grafu, odtwórz je; w przeciwnym razie okno startowe pozostaje CZYSTE
         if graph_data and "nodes" in graph_data:
             self._deserialize_to_scene(scene, graph_data)
 
@@ -946,7 +945,7 @@ class NodePipelineDialog(QMainWindow):
         act_duplicate.triggered.connect(lambda: self._duplicate_tab_by_index(tab_idx))
 
         menu.addSeparator()
-        act_close = menu.addAction("✕ Zamknij zakładkę")
+        act_close = menu.addAction("✕ Zamij zakładkę")
         act_close.triggered.connect(lambda: self._on_tab_close_requested(tab_idx))
 
         menu.exec(self.tab_bar.mapToGlobal(point))
@@ -1787,7 +1786,6 @@ class NodePipelineDialog(QMainWindow):
                             session.add_table(new_table, make_active=False)
 
                         else:
-                            # --- TRYB UNIWERSALNY: serie ewolucyjne i batch (np. 600 widm z VaporFit) ---
                             new_x, new_y = res_map.get((src_node, src_port), (None, None))
                             src_names = names_map.get((src_node, src_port), [])
                             if new_x is not None and new_y is not None:
@@ -1818,7 +1816,6 @@ class NodePipelineDialog(QMainWindow):
                                         name=s_n, file_path="", file_type="processed"
                                     ))
 
-                                # Jeden strzał w sesji, jedno odrysowanie na canvasie!
                                 session.add_spectra_batch_to_window(win_id, batch_spectra)
                     continue
 
@@ -1836,7 +1833,14 @@ class NodePipelineDialog(QMainWindow):
                                 target_window_id = wid
                                 break
                     if not target_window_id:
-                        target_window_id = session.add_window(name=win_name)
+                        existing_win_names = {w.name.lower() for w in session.windows.values()}
+                        final_win_name = win_name
+                        if final_win_name.lower() in existing_win_names:
+                            w_cnt = 2
+                            while f"{win_name} ({w_cnt})".lower() in existing_win_names:
+                                w_cnt += 1
+                            final_win_name = f"{win_name} ({w_cnt})"
+                        target_window_id = session.add_window(name=final_win_name)
 
                 used_names = set()
                 if target_window_id and target_window_id in session.windows:

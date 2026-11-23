@@ -23,9 +23,18 @@ def is_atmospheric_name(name: str) -> bool:
     nl = name.lower()
     return "atm" in nl or "co2" in nl
 
+
 def _natural_sort_key(s: str) -> list:
     """Klucz sortowania naturalnego (np. widmo_2 przed widmo_10)."""
     return [int(text) if text.isdigit() else text.lower() for text in re.split(r'(\d+)', str(s))]
+
+
+def _extract_trailing_int(identifier: Optional[str], prefix: str) -> int:
+    """Wydobywa numer z identyfikatora typu 'win_89', aby zsynchronizować licznik."""
+    if not identifier or not identifier.startswith(prefix):
+        return 0
+    suffix = identifier[len(prefix):]
+    return int(suffix) if suffix.isdigit() else 0
 
 
 class ProjectSession(QObject):
@@ -59,7 +68,7 @@ class ProjectSession(QObject):
     window_removed = Signal(str)
     active_window_changed = Signal(str)
     window_spectrum_added = Signal(str, object)
-    window_spectra_batch_added = Signal(str, list)  # <--- NOWY SYGNAŁ HURTOWY
+    window_spectra_batch_added = Signal(str, list)
     window_spectrum_removed = Signal(str, str)
     window_visibility_changed = Signal(str, str, bool)
     window_spectra_sorted = Signal(str, bool)
@@ -98,7 +107,7 @@ class ProjectSession(QObject):
 
         self._active_spectrum_name: Optional[str] = None
         self.undo_stack = QUndoStack(self)
-        self.undo_stack.setUndoLimit(15)  # <--- Bezpieczny bufor zapobiegający wyciekom pamięci
+        self.undo_stack.setUndoLimit(15)
 
         self._series: Dict[str, SpectralSeries] = {}
         self._series_visibility: Dict[str, bool] = {}
@@ -108,7 +117,7 @@ class ProjectSession(QObject):
         self._folders: Dict[str, WindowFolder] = {}
         self._folder_counter = 0
 
-        # Okna robocze (startujemy z czystym słownikiem, bez wymuszonego Okna 1)
+        # Okna robocze
         self._windows: Dict[str, WorkspaceWindow] = {}
         self._active_window_id: Optional[str] = None
         self._window_counter = 0
@@ -145,8 +154,16 @@ class ProjectSession(QObject):
 
     def add_folder(self, name: Optional[str] = None, parent_folder_id: Optional[str] = None,
                    folder_id: Optional[str] = None) -> str:
-        self._folder_counter += 1
-        fid = folder_id or f"folder_{self._folder_counter}"
+        if folder_id and folder_id not in self._folders:
+            fid = folder_id
+            num = _extract_trailing_int(fid, "folder_")
+            self._folder_counter = max(self._folder_counter, num)
+        else:
+            self._folder_counter += 1
+            while f"folder_{self._folder_counter}" in self._folders:
+                self._folder_counter += 1
+            fid = f"folder_{self._folder_counter}"
+
         fname = name or f"Folder {self._folder_counter}"
 
         folder = WindowFolder(folder_id=fid, name=fname, parent_folder_id=parent_folder_id)
@@ -214,8 +231,13 @@ class ProjectSession(QObject):
         return self._tables.get(table_id)
 
     def add_table(self, table: DataTable, make_active: bool = True) -> str:
-        if not table.table_id:
+        if table.table_id and table.table_id not in self._tables:
+            num = _extract_trailing_int(table.table_id, "tbl_")
+            self._table_counter = max(self._table_counter, num)
+        else:
             self._table_counter += 1
+            while f"tbl_{self._table_counter}" in self._tables:
+                self._table_counter += 1
             table.table_id = f"tbl_{self._table_counter}"
 
         self._tables[table.table_id] = table
@@ -275,8 +297,9 @@ class ProjectSession(QObject):
             if self._active_context == "window" and self._active_window_id == window_id:
                 self.context_changed.emit("window")
 
-    def add_spectra_batch_to_window(self, window_id: str, spectra_list: List[SpectrumData]) -> List[SpectrumData]:
-        """Hurtowo dodaje całą listę widm do okna roboczego z pojedynczą emisją sygnału."""
+    def add_spectra_batch_to_window(self, window_id: str, spectra_list: List[SpectrumData],
+                                    sort_by_name: bool = False) -> List[SpectrumData]:
+        """Hurtowo dodaje listę widm do okna roboczego z pojedynczą emisją sygnału."""
         if window_id not in self._windows or not spectra_list:
             return []
 
@@ -300,7 +323,8 @@ class ProjectSession(QObject):
             added.append(cloned_spec)
 
         if added:
-            self.sort_window_spectra(window_id, reverse=False, emit_signal=False)
+            if sort_by_name:
+                self.sort_window_spectra(window_id, reverse=False, emit_signal=False)
             win.active_spectrum_name = added[-1].name
             self.window_spectra_batch_added.emit(window_id, added)
 
@@ -322,8 +346,16 @@ class ProjectSession(QObject):
 
     def add_window(self, name: Optional[str] = None, window_id: Optional[str] = None,
                    folder_id: Optional[str] = None) -> str:
-        self._window_counter += 1
-        win_id = window_id or f"win_{self._window_counter}"
+        if window_id and window_id not in self._windows:
+            win_id = window_id
+            num = _extract_trailing_int(win_id, "win_")
+            self._window_counter = max(self._window_counter, num)
+        else:
+            self._window_counter += 1
+            while f"win_{self._window_counter}" in self._windows:
+                self._window_counter += 1
+            win_id = f"win_{self._window_counter}"
+
         win_name = name or f"Okno {self._window_counter}"
 
         win = WorkspaceWindow(window_id=win_id, name=win_name, folder_id=folder_id)
@@ -344,7 +376,6 @@ class ProjectSession(QObject):
             if self._active_window_id == window_id:
                 new_active = next(iter(self._windows.keys()), None)
                 self.set_active_window(new_active)
-                # Jeśli usunięto ostatnie okno, wracamy do kontekstu Magazynu Danych
                 if new_active is None:
                     self.set_context("storage")
 
@@ -394,7 +425,6 @@ class ProjectSession(QObject):
         win.visibility[unique_name] = True
         win.active_spectrum_name = unique_name
 
-        self.sort_window_spectra(window_id, reverse=False, emit_signal=False)
         self.window_spectrum_added.emit(window_id, cloned_spec)
         return cloned_spec
 

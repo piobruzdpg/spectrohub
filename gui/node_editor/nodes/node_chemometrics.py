@@ -66,7 +66,7 @@ class McrDecomposeDialog(QDialog):
         self.node = node
         self.step = node.step_data
         self.setWindowTitle("Dekompozycja MCR-ALS / SPEXFA")
-        self.resize(470, 400)
+        self.resize(470, 430)
 
         layout = QVBoxLayout(self)
         form = QFormLayout()
@@ -97,6 +97,14 @@ class McrDecomposeDialog(QDialog):
         )
         self.chk_fix_ref.setChecked(bool(self.step.get('fix_ref', True)))
         form.addRow("Widma z portu Ref:", self.chk_fix_ref)
+
+        self.chk_use_ref_names = QCheckBox("Użyj nazw widm referencyjnych w etykietach składowych")
+        self.chk_use_ref_names.setToolTip(
+            "Odznaczone (domyślnie): wszystkie składowe otrzymują jednolite nazwy MCR_Składnik_1, MCR_Składnik_2, ...\n"
+            "Zaznaczone: pierwsze składowe dziedziczą nazwy widm podłączonych pod port 'Ref'."
+        )
+        self.chk_use_ref_names.setChecked(bool(self.step.get('use_ref_names', False)))
+        form.addRow("Nazewnictwo składowych:", self.chk_use_ref_names)
 
         self.chk_closure = QCheckBox("Domknięcie bilansu (Suma stężeń = 1.0)")
         self.chk_closure.setChecked(bool(self.step.get('closure', False)))
@@ -161,6 +169,7 @@ class McrDecomposeDialog(QDialog):
         self.step['k'] = k
         self.step['non_negative'] = bool(self.chk_nnls.isChecked())
         self.step['fix_ref'] = bool(self.chk_fix_ref.isChecked())
+        self.step['use_ref_names'] = bool(self.chk_use_ref_names.isChecked())
         self.step['closure'] = bool(self.chk_closure.isChecked())
         self.step['unimodal'] = bool(self.chk_unimodal.isChecked())
         self.step['max_iter'] = int(self.spin_max_iter.value())
@@ -310,8 +319,8 @@ class McrDecomposeNode(BaseNode):
     def default_step_data(cls) -> Dict[str, Any]:
         return {
             "type": cls.node_type, "name": "MCR-ALS (k=2)", "method": "mcr_als",
-            "k": 2, "non_negative": True, "fix_ref": True, "closure": False,
-            "unimodal": False, "max_iter": 500, "tol_err_change": 1e-6,
+            "k": 2, "non_negative": True, "fix_ref": True, "use_ref_names": False,
+            "closure": False, "unimodal": False, "max_iter": 500, "tol_err_change": 1e-6,
             "tol_increase": 0.05, "tol_n_above_min": 50
         }
 
@@ -341,6 +350,7 @@ class McrDecomposeNode(BaseNode):
         k = int(self.step_data.get('k', 2))
         method = self.step_data.get('method', 'mcr_als')
         fix_ref = bool(self.step_data.get('fix_ref', True))
+        use_ref_names = bool(self.step_data.get('use_ref_names', False))
 
         target_mat = curr_y if (curr_y.ndim == 2 and curr_y.shape[1] >= 2) else (
             session.active_series.get_matrix_2d() if session.active_series else None
@@ -402,7 +412,6 @@ class McrDecomposeNode(BaseNode):
                     self.last_metrics = None
                 else:
                     user_max_iter = int(self.step_data.get('max_iter', 500))
-                    # W trybie podglądu na żywo ograniczamy iteracje dla płynności UI (60 FPS)
                     eff_max_iter = user_max_iter if is_execution else min(user_max_iter, 400)
                     tol_err = float(self.step_data.get('tol_err_change', 1e-6))
                     tol_inc = float(self.step_data.get('tol_increase', 0.05))
@@ -438,7 +447,7 @@ class McrDecomposeNode(BaseNode):
                 out_spec_labels = []
                 out_conc_labels = []
                 for i in range(k_eff):
-                    if i < m_ref:
+                    if use_ref_names and i < m_ref:
                         base = ref_names[i]
                         tag = " (Fixed)" if (fix_ref and method == 'mcr_als') else " (Ref)"
                         out_spec_labels.append(f"{base}{tag}")

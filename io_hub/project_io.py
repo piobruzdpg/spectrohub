@@ -306,8 +306,11 @@ class ProjectBundleIO:
             # 6. Odtworzenie folderów okien roboczych i tabel
             for f_data in manifest_data.get("folders", []):
                 f_obj = WindowFolder.from_dict(f_data)
-                session._folders[f_obj.folder_id] = f_obj
-                session.folder_added.emit(f_obj.folder_id, f_obj.name, f_obj.parent_folder_id)
+                session.add_folder(
+                    name=f_obj.name,
+                    parent_folder_id=f_obj.parent_folder_id,
+                    folder_id=f_obj.folder_id
+                )
 
             # 7. Odtworzenie Okien Roboczych
             if manifest_data.get("windows"):
