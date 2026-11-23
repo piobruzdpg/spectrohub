@@ -2,7 +2,7 @@
 gui/canvas.py
 Wysokowydajny dwupanelowy wykres Matplotlib (Góra: Widma i Serie 2D, Dół: Residua/Kinetyka).
 Podwójny klik LPM = Reset zoomu, PPM = Menu kontekstowe, drag LPM = Zoom na obu panelach.
-Inteligentna obsługa tabel profili i raportów parametrów (HDO Fit).
+Inteligentna obsługa tabel profili, profili stężeń MCR-ALS (oś X rosnąca) i raportów parametrów.
 Deterministyczna paleta barw z pełną synchronizacją z próbnikiem w drzewie projektu.
 """
 
@@ -178,12 +178,31 @@ class SpectroCanvas(QWidget):
             self.canvas.draw_idle()
             return
 
+        # Rozpoznanie trybu osi X/Y (widmo w cm^-1 vs profil stężeń / Scores)
+        is_spectral_x = True
+        x_axis_label = "Liczba falowa [cm⁻¹]"
+        y_axis_label = "Absorbancja"
+
+        if visible_spectra and not visible_series:
+            first_ux = getattr(visible_spectra[0], "units_x", "cm^-1") or "cm^-1"
+            if first_ux != "cm^-1":
+                is_spectral_x = False
+                x_axis_label = "Numer próbki" if first_ux == "sample_index" else first_ux
+
+            first_uy = getattr(visible_spectra[0], "units_y", "absorbance") or "absorbance"
+            if first_uy == "concentration":
+                y_axis_label = "Stężenie / Udział"
+            elif first_uy == "score":
+                y_axis_label = "Wartość ładunku (Score)"
+
+        self.ax_main.set_ylabel(y_axis_label, color="#dcdcdc", fontsize=10)
+        self.ax_sub.set_xlabel(x_axis_label, color="#dcdcdc", fontsize=10)
+
         min_x, max_x = float('inf'), float('-inf')
         min_y, max_y = float('inf'), float('-inf')
 
         n_spectra = len(visible_spectra)
         if n_spectra > 25:
-            # Akceleracja dla dużych zestawów danych
             segments = []
             colors = []
 
@@ -231,16 +250,18 @@ class SpectroCanvas(QWidget):
                 is_active = (active_spec and spec.name == active_spec.name)
                 spec_color = spec.metadata.get("custom_color") or spec.metadata.get("display_color") or SPECTRAL_PALETTE[idx % len(SPECTRAL_PALETTE)]
 
-                # Zachowujemy właściwy kolor widma z wyraźnym wyróżnieniem aktywności grubością i zorderem
                 lw = 2.2 if is_active else 1.2
                 alpha = 1.0 if is_active else 0.75
                 zorder = 5.0 if is_active else 2.5
 
                 is_dft = getattr(spec, 'file_type', '') in ['gaussian', 'orca', 'dft'] or hasattr(spec, 'stick_freqs')
                 ls = "--" if is_dft else "-"
+                marker = 'o' if (not is_spectral_x and len(spec.wavenumbers) <= 200) else None
+                ms = 4.0 if marker else None
 
                 self.ax_main.plot(spec.wavenumbers, spec.intensities, label=spec.name,
-                                  color=spec_color, lw=lw, ls=ls, alpha=alpha, zorder=zorder)
+                                  color=spec_color, lw=lw, ls=ls, marker=marker, markersize=ms,
+                                  alpha=alpha, zorder=zorder)
 
                 min_x = min(min_x, np.min(spec.wavenumbers))
                 max_x = max(max_x, np.max(spec.wavenumbers))
@@ -285,8 +306,17 @@ class SpectroCanvas(QWidget):
                                       alpha=0.85 if is_series_active else 0.45)
 
         if min_x != float('inf') and max_x != float('-inf'):
-            self.ax_main.set_xlim(max_x, min_x)
-            self.ax_sub.set_xlim(max_x, min_x)
+            if is_spectral_x:
+                self.ax_main.set_xlim(max_x, min_x)
+                self.ax_sub.set_xlim(max_x, min_x)
+            else:
+                dx_margin = max((max_x - min_x) * 0.03, 0.2)
+                self.ax_main.set_xlim(min_x - dx_margin, max_x + dx_margin)
+                self.ax_sub.set_xlim(min_x - dx_margin, max_x + dx_margin)
+                if getattr(visible_spectra[0], "units_x", "") == "sample_index":
+                    self.ax_main.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+                    self.ax_sub.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
+
         if min_y != float('inf') and max_y != float('-inf'):
             y_margin = max((max_y - min_y) * 0.08, 0.01)
             self.ax_main.set_ylim(min_y - y_margin, max_y + y_margin)
@@ -348,11 +378,9 @@ class SpectroCanvas(QWidget):
             mat = np.zeros((len(ref_wn), n_points), dtype=np.float64)
 
             for i, s in enumerate(vis_specs):
-                # 1. Optymalizacja: identyczna siatka X (np. widma z dekompozycji HDO / dekonwolucji)
                 if len(s.wavenumbers) == len(ref_wn) and np.array_equal(s.wavenumbers, ref_wn):
                     mat[:, i] = s.intensities
                 else:
-                    # 2. Bezpieczna interpolacja: np.interp wymaga strictly increasing xp
                     xw, yw = s.wavenumbers, s.intensities
                     if len(xw) > 1 and xw[0] > xw[-1]:
                         xw_s, yw_s = xw[::-1], yw[::-1]
@@ -382,7 +410,7 @@ class SpectroCanvas(QWidget):
                 if 'v_line' in trace and trace['v_line']:
                     try:
                         trace['v_line'].remove()
-                    except Exception:  # <--- Bezpieczne ignorowanie odpiętych linii
+                    except Exception:
                         pass
             self.kinetic_traces.clear()
 
@@ -562,7 +590,7 @@ class SpectroCanvas(QWidget):
             if 'v_line' in trace and trace['v_line']:
                 try:
                     trace['v_line'].remove()
-                except Exception:  # <--- Bezpieczne ignorowanie
+                except Exception:
                     pass
         self.kinetic_traces.clear()
         self.last_kinetic_export_data = None
@@ -674,8 +702,12 @@ class SpectroCanvas(QWidget):
                 self.canvas.draw_idle()
             return
 
-        if dx > 3.0 or dy > 0.01:
-            current_xlim = self.ax_main.get_xlim()
+        current_xlim = self.ax_main.get_xlim()
+        current_ylim = self.ax_main.get_ylim()
+        span_x = abs(current_xlim[1] - current_xlim[0])
+        span_y = abs(current_ylim[1] - current_ylim[0])
+
+        if dx > (span_x * 0.015) or dy > (span_y * 0.015):
             is_inverted = current_xlim[0] > current_xlim[1]
             if is_inverted:
                 self.ax_main.set_xlim(max(x0, x1), min(x0, x1))
@@ -884,7 +916,6 @@ class SpectroCanvas(QWidget):
 
         clean_name = table.name.replace("📊", "").strip()
 
-        # BRANCH A: Tabela jest zestawieniem parametrów HDO / Fit (klucz-wartość)
         if table.is_parameter_report:
             row_labels = table.metadata.get("row_labels", [])
             val_col = next(iter(table.y_columns.values())) if table.y_columns else []
@@ -896,8 +927,7 @@ class SpectroCanvas(QWidget):
             for r_idx, lbl in enumerate(row_labels):
                 if r_idx < len(val_col):
                     v = val_col[r_idx]
-                    if any(k in lbl for k in ['R2', 'RMSE', 'Chi2_red', 'RSS', 'N_multiplier', 'MC_Iterations']):
-                        summary_lines.append(f"  • {lbl:<18}: {v:.6g}")
+                    summary_lines.append(f"  • {lbl:<22}: {v:.6g}")
 
             summary_lines.append("─" * 45)
             summary_lines.append("💡 Kliknij dwukrotnie tabelę w drzewie projektu, aby wyświetlić pełną tabelę wartości.")
@@ -923,7 +953,6 @@ class SpectroCanvas(QWidget):
             self.canvas.draw_idle()
             return
 
-        # BRANCH B: Standardowy profil liczbowy (np. kinetyka, stężenia MCR, Scores)
         x = table.x_values
         palette = ['#00e5ff', '#ee6c4d', '#2a9d8f', '#f4a261', '#e0aaff', '#ffd166', '#ff4d6d']
 

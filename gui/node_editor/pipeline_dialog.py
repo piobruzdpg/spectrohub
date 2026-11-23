@@ -826,7 +826,6 @@ class NodePipelineDialog(QMainWindow):
         if session.dag_state:
             self.import_graph_state(session.dag_state)
         else:
-            # Puste okno startowe bez zbędnych nodów
             self.add_pipeline_tab(title="Główny potok")
             self.sync_state_to_session()
 
@@ -945,7 +944,7 @@ class NodePipelineDialog(QMainWindow):
         act_duplicate.triggered.connect(lambda: self._duplicate_tab_by_index(tab_idx))
 
         menu.addSeparator()
-        act_close = menu.addAction("✕ Zamij zakładkę")
+        act_close = menu.addAction("✕ Zamknij zakładkę")
         act_close.triggered.connect(lambda: self._on_tab_close_requested(tab_idx))
 
         menu.exec(self.tab_bar.mapToGlobal(point))
@@ -1030,7 +1029,6 @@ class NodePipelineDialog(QMainWindow):
         btn_fit.clicked.connect(lambda: self.view.fit_to_content() if self.view else None)
         toolbar.addWidget(btn_fit)
 
-        # Dynamiczne menu szablonów z katalogu Graph_Templates/
         self.btn_presets = QPushButton("📑 Szablony Potoków...")
         self.btn_presets.setStyleSheet("background-color: #4a4e69; font-weight: bold; padding: 5px 12px;")
         menu_presets = QMenu(self)
@@ -1648,7 +1646,7 @@ class NodePipelineDialog(QMainWindow):
                 if term_node.node_type == "output_table":
                     tbl_name = term_node.step_data.get("table_name", "Parametry")
                     target_folder_id = term_node.step_data.get("folder_id")
-                    x_lbl = term_node.step_data.get("x_label", "Indeks / Parametr")
+                    x_lbl = term_node.step_data.get("x_label", "Czas / Indeks")
                     y_lbl = term_node.step_data.get("y_label", "Wartość")
 
                     collected_x = None
@@ -1658,6 +1656,11 @@ class NodePipelineDialog(QMainWindow):
                     for conn in incoming_conns:
                         src_node = conn.out_port.node_item
                         src_port = conn.out_port.port_id
+                        src_obj = getattr(src_node, 'node_obj', None)
+                        p_meta = getattr(src_obj, 'runtime_port_meta', {}).get(src_port, {})
+                        if x_lbl in ("Czas / Indeks", "Indeks / Parametr") and p_meta.get("x_label"):
+                            x_lbl = p_meta["x_label"]
+
                         new_x, new_y = res_map.get((src_node, src_port), (None, None))
                         src_names = names_map.get((src_node, src_port), [])
                         if new_x is None or new_y is None:
@@ -1707,7 +1710,103 @@ class NodePipelineDialog(QMainWindow):
                         elif f"hdo_bundle_{src_port}" in src_node.step_data:
                             bundle = src_node.step_data.get(f"hdo_bundle_{src_port}")
 
-                        if bundle:
+                        if bundle and bundle.get("bundle_type") == "mcr":
+                            f_name = custom_folder_name if custom_folder_name else bundle['folder_name']
+                            folder_id = session.add_folder(name=f_name, parent_folder_id=parent_fid)
+
+                            wn = bundle['wavenumbers']
+                            pure_spec = bundle['pure_spectra']
+                            spec_labels = bundle['spec_labels']
+                            spec_meta = bundle.get('spec_meta', [])
+
+                            # 1. Okno Składowych (S^T)
+                            win_comp_id = session.add_window(name="Składowe (S^T)", folder_id=folder_id)
+                            comp_batch = []
+                            if pure_spec.ndim == 2:
+                                for col in range(pure_spec.shape[1]):
+                                    lbl = spec_labels[col] if col < len(spec_labels) else f"MCR_Składnik_{col + 1}"
+                                    meta_c = dict(spec_meta[col]) if col < len(spec_meta) else {}
+                                    comp_batch.append(SpectrumData(
+                                        wavenumbers=wn.copy(), intensities=pure_spec[:, col].copy(),
+                                        name=lbl, file_path="", file_type="processed",
+                                        units_x="cm^-1", units_y="absorbance",
+                                        metadata=meta_c
+                                    ))
+                            session.add_spectra_batch_to_window(win_comp_id, comp_batch)
+
+                            # 2. Okno Residuów (Res)
+                            res_mat = bundle['residuals']
+                            sample_names = bundle.get('sample_names', [])
+                            if res_mat.ndim == 2 and res_mat.shape[1] > 0:
+                                win_res_id = session.add_window(name="Residua (Res)", folder_id=folder_id)
+                                res_batch = []
+                                for col in range(res_mat.shape[1]):
+                                    s_lbl = sample_names[col] if col < len(sample_names) else f"Próbka_{col + 1}"
+                                    res_batch.append(SpectrumData(
+                                        wavenumbers=wn.copy(), intensities=res_mat[:, col].copy(),
+                                        name=f"res_{s_lbl}", file_path="", file_type="residual"
+                                    ))
+                                session.add_spectra_batch_to_window(win_res_id, res_batch)
+
+                            # 3. Okno Rekonstrukcji (Rec)
+                            dr_mat = bundle['dr']
+                            if dr_mat.ndim == 2 and dr_mat.shape[1] > 0:
+                                win_rec_id = session.add_window(name="Rekonstrukcja (Rec)", folder_id=folder_id)
+                                rec_batch = []
+                                for col in range(dr_mat.shape[1]):
+                                    s_lbl = sample_names[col] if col < len(sample_names) else f"Próbka_{col + 1}"
+                                    rec_batch.append(SpectrumData(
+                                        wavenumbers=wn.copy(), intensities=dr_mat[:, col].copy(),
+                                        name=f"rec_{s_lbl}", file_path="", file_type="fit"
+                                    ))
+                                session.add_spectra_batch_to_window(win_rec_id, rec_batch)
+
+                            # 4. Tabela profili stężeń (C)
+                            pure_conc = bundle['pure_conc']
+                            conc_labels = bundle['conc_labels']
+                            x_samples = bundle['x_samples']
+                            x_label = bundle.get('x_label', 'Numer próbki')
+                            if pure_conc.ndim == 2 and pure_conc.shape[1] > 0:
+                                y_cols_conc = {
+                                    (conc_labels[col] if col < len(conc_labels) else f"C_Składnik_{col + 1}"): pure_conc[:, col].copy()
+                                    for col in range(pure_conc.shape[1])
+                                }
+                                tbl_conc = DataTable(
+                                    table_id="",
+                                    name="Profile stężeń (C)",
+                                    x_values=x_samples.copy(),
+                                    y_columns=y_cols_conc,
+                                    x_label=x_label,
+                                    y_label="Stężenie / Udział",
+                                    folder_id=folder_id,
+                                    metadata=dict(bundle.get('metrics', {}))
+                                )
+                                session.add_table(tbl_conc, make_active=True)
+
+                            # 5. Tabela parametrów dopasowania MCR-ALS
+                            metrics = bundle.get('metrics', {})
+                            if 'lof' in metrics:
+                                p_labels = ["Rank (k)", "Iteracje", "Zbieżność (1=Tak)", "LOF [%]", "R² [%]"]
+                                p_vals = np.array([
+                                    float(pure_spec.shape[1] if pure_spec.ndim == 2 else 1),
+                                    float(metrics.get('iterations', 0)),
+                                    1.0 if metrics.get('converged', False) else 0.0,
+                                    float(metrics.get('lof', 0.0)),
+                                    float(metrics.get('r2', 0.0))
+                                ], dtype=np.float64)
+                                tbl_report = DataTable(
+                                    table_id="",
+                                    name="Raport MCR-ALS",
+                                    x_values=np.arange(1, len(p_labels) + 1, dtype=np.float64),
+                                    y_columns={"Wartość": p_vals},
+                                    x_label="Parametr",
+                                    y_label="Wartość",
+                                    folder_id=folder_id,
+                                    metadata={"row_labels": p_labels, **metrics}
+                                )
+                                session.add_table(tbl_report, make_active=False)
+
+                        elif bundle:
                             f_name = custom_folder_name if custom_folder_name else bundle['folder_name']
                             folder_id = session.add_folder(name=f_name, parent_folder_id=parent_fid)
                             win_id = session.add_window(name=f_name, folder_id=folder_id)
@@ -1880,6 +1979,12 @@ class NodePipelineDialog(QMainWindow):
                 for conn in incoming_conns:
                     src_node = conn.out_port.node_item
                     src_port = conn.out_port.port_id
+                    src_obj = getattr(src_node, 'node_obj', None)
+                    p_meta = getattr(src_obj, 'runtime_port_meta', {}).get(src_port, {})
+                    port_units_x = p_meta.get("units_x", "cm^-1")
+                    port_units_y = p_meta.get("units_y", "absorbance")
+                    per_col_meta = p_meta.get("per_col_meta", [])
+
                     new_x, new_y = res_map.get((src_node, src_port), (None, None))
                     src_names = names_map.get((src_node, src_port), [])
                     if new_x is None or new_y is None:
@@ -1893,24 +1998,28 @@ class NodePipelineDialog(QMainWindow):
                             orig_n = src_names[col] if col < len(src_names) else f"Widmo_{col + 1}"
                             formatted_n = format_spectrum_name(orig_n, col, src_node.title, n_cols)
                             raw_n = f"{formatted_n}{branch_tag}"
+                            extra_m = dict(per_col_meta[col]) if col < len(per_col_meta) else {}
                             new_created.append(SpectrumData(
                                 wavenumbers=new_x.copy(), intensities=new_y[:, col].copy(),
                                 name=make_unique_name(raw_n) if term_node.node_type == "output_window" else raw_n,
                                 file_path="", file_type="processed",
-                                metadata={"dag_pipeline": [n.title for n in ordered_nodes], "orig_name": orig_n}
+                                units_x=port_units_x, units_y=port_units_y,
+                                metadata={"dag_pipeline": [n.title for n in ordered_nodes], "orig_name": orig_n, **extra_m}
                             ))
                     else:
                         active = session.active_spectrum
                         orig_n = src_names[0] if src_names else (active.name if active else "Widmo")
                         formatted_n = format_spectrum_name(orig_n, 0, src_node.title, 1)
                         raw_n = f"{formatted_n}{branch_tag}"
+                        extra_m = dict(per_col_meta[0]) if per_col_meta else {}
 
                         if term_node.node_type == "output_window":
                             new_created.append(SpectrumData(
                                 wavenumbers=new_x.copy(), intensities=new_y.copy(),
                                 name=make_unique_name(raw_n), file_path="",
                                 file_type="processed",
-                                metadata={"dag_pipeline": [n.title for n in ordered_nodes], "orig_name": orig_n}
+                                units_x=port_units_x, units_y=port_units_y,
+                                metadata={"dag_pipeline": [n.title for n in ordered_nodes], "orig_name": orig_n, **extra_m}
                             ))
                         else:
                             if active:
@@ -1918,7 +2027,7 @@ class NodePipelineDialog(QMainWindow):
                                 cmd = ModifySpectrumCommand(
                                     active, f"DAG: {raw_n}", active.intensities, new_y,
                                     active.wavenumbers, new_x, old_meta=active.metadata,
-                                    new_meta={"dag_pipeline": [n.title for n in ordered_nodes]},
+                                    new_meta={"dag_pipeline": [n.title for n in ordered_nodes], **extra_m},
                                     canvas=canvas
                                 )
                                 session.undo_stack.push(cmd)

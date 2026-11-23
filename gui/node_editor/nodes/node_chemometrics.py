@@ -1,8 +1,8 @@
 """
 gui/node_editor/nodes/node_chemometrics.py
 Węzły chemometrii (SVD/PCA, MCR-ALS, Skalowania) z dedykowanymi dialogami.
-MCR-ALS z obsługą portu widm referencyjnych (Ref), blokowaniem składowych (Fixed Components)
-oraz pełną kontrolą kryteriów zatrzymania i tolerancji.
+MCR-ALS z obsługą portu widm referencyjnych (Ref), blokowaniem składowych (Fixed Components),
+metadanymi osi dla profili stężeń (C) oraz pełną paczką wyników dla węzła Folder.
 """
 
 from typing import List, Dict, Any, Tuple, Optional
@@ -228,6 +228,10 @@ class SvdDenoiseNode(BaseNode):
     category = "Chemometria & Analiza Wielowymiarowa"
     header_gradient = ("#240046", "#5a189a")
 
+    def __init__(self, step_data: Optional[Dict[str, Any]] = None):
+        super().__init__(step_data)
+        self.runtime_port_meta: Dict[str, Dict[str, Any]] = {}
+
     @classmethod
     def default_step_data(cls) -> Dict[str, Any]:
         return {"type": cls.node_type, "name": "SVD Denoise (k=2)", "k": 2, "center": False}
@@ -246,6 +250,9 @@ class SvdDenoiseNode(BaseNode):
     def compute(self, inputs, input_names, is_execution=False, progress_callback=None):
         data_in = inputs.get("in", (None, None))
         in_names = input_names.get("in", [])
+        self.runtime_port_meta = {
+            "out_scores": {"units_x": "sample_index", "units_y": "score", "x_label": "Numer próbki"}
+        }
         if data_in[0] is None or data_in[1] is None:
             return {"out": (None, None), "out_res": (None, None), "out_scores": (None, None)}, {
                 "out": [], "out_res": [], "out_scores": []
@@ -314,6 +321,8 @@ class McrDecomposeNode(BaseNode):
     def __init__(self, step_data: Optional[Dict[str, Any]] = None):
         super().__init__(step_data)
         self.last_metrics: Optional[Dict[str, Any]] = None
+        self.runtime_bundles: Dict[str, Dict[str, Any]] = {}
+        self.runtime_port_meta: Dict[str, Dict[str, Any]] = {}
 
     @classmethod
     def default_step_data(cls) -> Dict[str, Any]:
@@ -340,6 +349,9 @@ class McrDecomposeNode(BaseNode):
     def compute(self, inputs, input_names, is_execution=False, progress_callback=None):
         data_in = inputs.get("in", (None, None))
         in_names = input_names.get("in", [])
+        self.runtime_bundles = {}
+        self.runtime_port_meta = {}
+
         if data_in[0] is None or data_in[1] is None:
             self.last_metrics = None
             return {"out": (None, None), "out_conc": (None, None), "out_recon": (None, None), "out_res": (None, None)}, {
@@ -442,11 +454,47 @@ class McrDecomposeNode(BaseNode):
                 pure_conc = res['pure_concentrations']
                 dr = res['dr']
                 residuals = res['residuals']
-                x_samples = np.arange(1, pure_conc.shape[0] + 1, dtype=np.float64)
+
+                # Oś X dla profili stężeń: wartości fizyczne z aktywnej serii lub indeksy 1..N
+                n_samples = pure_conc.shape[0]
+                active_s = session.active_series
+                if (
+                    active_s is not None
+                    and active_s.axis_n_values is not None
+                    and len(active_s.axis_n_values) == n_samples
+                ):
+                    x_samples = np.asarray(active_s.axis_n_values, dtype=np.float64).copy()
+                    conc_x_label = active_s.axis_n_name or "Zmienna serii"
+                    conc_units_x = conc_x_label
+                else:
+                    x_samples = np.arange(1, n_samples + 1, dtype=np.float64)
+                    conc_x_label = "Numer próbki"
+                    conc_units_x = "sample_index"
 
                 out_spec_labels = []
                 out_conc_labels = []
+                out_spec_meta = []
+                out_conc_meta = []
+
+                base_metrics_meta = {
+                    "mcr_method": method,
+                    "mcr_rank": k_eff,
+                }
+                if self.last_metrics:
+                    base_metrics_meta.update({
+                        "mcr_lof": round(self.last_metrics['lof'], 4),
+                        "mcr_r2": round(self.last_metrics['r2'], 4),
+                        "mcr_iterations": self.last_metrics['iterations'],
+                    })
+
                 for i in range(k_eff):
+                    if i < m_ref:
+                        ref_src = ref_names[i]
+                        role_str = f"Ref ({'Fixed' if (fix_ref and method == 'mcr_als') else 'Init'}): {ref_src}"
+                    else:
+                        ref_src = ""
+                        role_str = "Wolna składowa MCR-ALS"
+
                     if use_ref_names and i < m_ref:
                         base = ref_names[i]
                         tag = " (Fixed)" if (fix_ref and method == 'mcr_als') else " (Ref)"
@@ -455,6 +503,63 @@ class McrDecomposeNode(BaseNode):
                     else:
                         out_spec_labels.append(f"MCR_Składnik_{i + 1}")
                         out_conc_labels.append(f"C_Składnik_{i + 1}")
+
+                    comp_meta = {
+                        **base_metrics_meta,
+                        "mcr_component": i + 1,
+                        "mcr_role": role_str,
+                        "mcr_ref_source": ref_src,
+                    }
+                    out_spec_meta.append(comp_meta)
+                    out_conc_meta.append(comp_meta)
+
+                self.runtime_port_meta = {
+                    "out": {
+                        "units_x": "cm^-1",
+                        "units_y": "absorbance",
+                        "per_col_meta": out_spec_meta,
+                    },
+                    "out_conc": {
+                        "units_x": conc_units_x,
+                        "units_y": "concentration",
+                        "x_label": conc_x_label,
+                        "per_col_meta": out_conc_meta,
+                    },
+                    "out_recon": {
+                        "units_x": "cm^-1",
+                        "units_y": "absorbance",
+                    },
+                    "out_res": {
+                        "units_x": "cm^-1",
+                        "units_y": "absorbance",
+                    },
+                }
+
+                m_tag = "MCR-ALS" if method == "mcr_als" else "SPEXFA"
+                mcr_bundle = {
+                    "bundle_type": "mcr",
+                    "folder_name": f"{m_tag}_k{k_eff}",
+                    "wavenumbers": curr_x.copy(),
+                    "pure_spectra": pure_spec.copy(),
+                    "spec_labels": list(out_spec_labels),
+                    "spec_meta": list(out_spec_meta),
+                    "x_samples": x_samples.copy(),
+                    "x_label": conc_x_label,
+                    "pure_conc": pure_conc.copy(),
+                    "conc_labels": list(out_conc_labels),
+                    "dr": dr.copy(),
+                    "residuals": residuals.copy(),
+                    "sample_names": list(in_names),
+                    "metrics": dict(self.last_metrics) if self.last_metrics else {
+                        "method": method, "rank": k_eff
+                    }
+                }
+                self.runtime_bundles = {
+                    "out": mcr_bundle,
+                    "out_conc": mcr_bundle,
+                    "out_recon": mcr_bundle,
+                    "out_res": mcr_bundle,
+                }
 
                 return {
                     "out": (curr_x.copy(), pure_spec),

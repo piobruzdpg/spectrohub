@@ -276,6 +276,8 @@ class ProjectBundleIO:
                     file_path=itm["file_path"],
                     file_type=itm["file_type"],
                     time_str=itm.get("time_str", "00:00:00"),
+                    units_x=itm.get("units_x", "cm^-1"),
+                    units_y=itm.get("units_y", "absorbance"),
                     metadata=itm.get("metadata", {})
                 )
                 session.add_spectrum(spec, is_atm=True, make_active=False)
@@ -335,6 +337,8 @@ class ProjectBundleIO:
                             file_path=s_info["file_path"],
                             file_type=s_info["file_type"],
                             time_str=s_info.get("time_str", "00:00:00"),
+                            units_x=s_info.get("units_x", "cm^-1"),
+                            units_y=s_info.get("units_y", "absorbance"),
                             metadata=s_info.get("metadata", {})
                         )
                         win_spec = session.add_spectrum_to_window(w_id, spec)
